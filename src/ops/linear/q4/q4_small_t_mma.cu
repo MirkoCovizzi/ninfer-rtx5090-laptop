@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear/q4/q4_launch.h"
 
 #include "core/device.h"
@@ -18,17 +19,17 @@ using FullGeometry            = Q4DraftHeadGeometry<5120>;
 using OptimizedGeometry       = Q4DraftHeadGeometry<2048>;
 
 template <class Geometry, int TileTokens, int ActiveTokens>
-void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     using Schedule = Q4DraftSmallTSchedule;
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
 
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
     q4_small_t_mma_kernel<Geometry, TileTokens, ActiveTokens>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(out.data));
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const std::uint8_t*>(weight.scales), static_cast<__hip_bfloat16*>(out.data));
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Geometry, int First, std::size_t... Offsets>
@@ -52,7 +53,7 @@ bool matches(const Tensor& x, const Weight& weight) {
 } // namespace
 
 void launch_q4_draft_head_small_t(const Tensor& x, const Weight& weight, Tensor& out,
-                                  cudaStream_t stream) {
+                                  hipStream_t stream) {
     if (matches<FullGeometry>(x, weight) && x.ne[1] <= kLastFullT) {
         kFullLaunchers[static_cast<std::size_t>(x.ne[1] - kFirstSmallT)](x, weight, out, stream);
         return;

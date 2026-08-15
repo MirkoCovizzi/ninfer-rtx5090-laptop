@@ -1,8 +1,10 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/memory.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -15,7 +17,7 @@ struct Nvfp4IdentityEpilogue {
 };
 
 struct Nvfp4ContiguousOutput {
-    __nv_bfloat16* data;
+    __hip_bfloat16* data;
     std::int32_t rows;
 
     __device__ __forceinline__ void store(std::int32_t parent_row, std::int32_t token,

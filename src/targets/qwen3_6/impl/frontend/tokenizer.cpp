@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "targets/qwen3_6/impl/frontend/tokenizer.h"
 
 #include "text/unicode.h"

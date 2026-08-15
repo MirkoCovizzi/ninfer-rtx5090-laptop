@@ -1,6 +1,8 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -13,11 +15,11 @@ enum class W8Epilogue {
 };
 
 struct W8OutputTile {
-    __nv_bfloat16* data;
+    __hip_bfloat16* data;
     std::int32_t leading_dim;
     std::int32_t parent_row_begin;
 
-    __device__ __forceinline__ __nv_bfloat16* at(std::int32_t parent_row, std::int32_t col) const {
+    __device__ __forceinline__ __hip_bfloat16* at(std::int32_t parent_row, std::int32_t col) const {
         return data + static_cast<std::int64_t>(col) * leading_dim + parent_row - parent_row_begin;
     }
 
@@ -30,7 +32,7 @@ struct W8OutputTile {
 // straddles two final allocations.
 
 struct W8ContiguousOutput {
-    __nv_bfloat16* data;
+    __hip_bfloat16* data;
     std::int32_t leading_dim;
 
     __device__ __forceinline__ std::int32_t row_begin(std::int32_t block,
@@ -47,8 +49,8 @@ template <std::int32_t Rows0, std::int32_t Rows1>
 struct W8SplitOutput2 {
     static_assert(Rows0 > 0 && Rows1 > 0);
 
-    __nv_bfloat16* out0;
-    __nv_bfloat16* out1;
+    __hip_bfloat16* out0;
+    __hip_bfloat16* out1;
 
     __device__ __forceinline__ std::int32_t row_begin(std::int32_t block,
                                                       std::int32_t tile_rows) const {
@@ -65,9 +67,9 @@ template <std::int32_t Rows0, std::int32_t Rows1, std::int32_t Rows2>
 struct W8SplitOutput3 {
     static_assert(Rows0 > 0 && Rows1 > 0 && Rows2 > 0);
 
-    __nv_bfloat16* out0;
-    __nv_bfloat16* out1;
-    __nv_bfloat16* out2;
+    __hip_bfloat16* out0;
+    __hip_bfloat16* out1;
+    __hip_bfloat16* out2;
 
     __device__ __forceinline__ std::int32_t row_begin(std::int32_t block,
                                                       std::int32_t tile_rows) const {
@@ -87,10 +89,10 @@ template <std::int32_t Rows0, std::int32_t Rows1, std::int32_t Rows2, std::int32
 struct W8SplitOutput4 {
     static_assert(Rows0 > 0 && Rows1 > 0 && Rows2 > 0 && Rows3 > 0);
 
-    __nv_bfloat16* out0;
-    __nv_bfloat16* out1;
-    __nv_bfloat16* out2;
-    __nv_bfloat16* out3;
+    __hip_bfloat16* out0;
+    __hip_bfloat16* out1;
+    __hip_bfloat16* out2;
+    __hip_bfloat16* out3;
 
     __device__ __forceinline__ std::int32_t row_begin(std::int32_t block,
                                                       std::int32_t tile_rows) const {

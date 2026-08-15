@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gdn_gating.h"
 
 #include "ops/op_tester.h"
@@ -96,7 +97,7 @@ int run_case(std::int32_t tokens, std::uint32_t seed, bool stress_transcendental
 
     ops::gdn_gating(tensor_a, tensor_b, tensor_a_log, tensor_dt_bias, tensor_g, tensor_beta,
                     nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = std::string("gdn_gating T=") + std::to_string(tokens) +
                               (stress_transcendentals ? " transcendental-range" : "");
@@ -121,7 +122,7 @@ int run_case(std::int32_t tokens, std::uint32_t seed, bool stress_transcendental
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

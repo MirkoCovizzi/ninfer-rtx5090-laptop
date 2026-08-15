@@ -6,7 +6,7 @@
 #include "ninfer/ops/argmax.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -91,7 +91,7 @@ void run_shape(std::int32_t physical_rows, std::int32_t valid_rows, int cols, co
     int launch             = 0;
     const int window_count = kLogitSlots / cols;
     const Result result    = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             const int slot = (launch++ % window_count) * cols;
             auto* window   = logits_base + static_cast<std::size_t>(slot) * physical_rows;
             Tensor tlogits(window, DType::BF16, {physical_rows, cols});
@@ -109,7 +109,7 @@ void run_shape(std::int32_t physical_rows, std::int32_t valid_rows, int cols, co
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

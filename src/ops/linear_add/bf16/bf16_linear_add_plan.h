@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -27,15 +27,15 @@ Bf16LinearAddScheduleId bf16_linear_add_select(std::int32_t output_rows, std::in
 const char* bf16_linear_add_schedule_name(Bf16LinearAddScheduleId schedule) noexcept;
 
 void bf16_linear_add_decode_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                   cudaStream_t stream);
+                                   hipStream_t stream);
 void bf16_linear_add_small_t_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                    cudaStream_t stream);
+                                    hipStream_t stream);
 void bf16_linear_add_aggregate_mma_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                          cudaStream_t stream);
+                                          hipStream_t stream);
 void bf16_linear_add_mma_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                cudaStream_t stream);
+                                hipStream_t stream);
 
 void bf16_linear_add_dispatch(const Tensor& x, const Weight& weight, Tensor& residual,
-                              cudaStream_t stream);
+                              hipStream_t stream);
 
 } // namespace ninfer::ops::detail

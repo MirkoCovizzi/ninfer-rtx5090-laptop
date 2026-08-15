@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/rope.h"
 
 #include "ops/launcher/rope.h"
@@ -99,7 +100,7 @@ void require_model_mode(int axes, int rotary_dim, std::int32_t head_dim) {
 } // namespace
 
 void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tensor& k,
-          cudaStream_t stream) {
+          hipStream_t stream) {
     require_common(positions, rotary_dim, theta);
     if (q.dtype != DType::BF16 || k.dtype != DType::BF16) {
         throw std::invalid_argument("rope: q/k must be BF16");
@@ -123,7 +124,7 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tenso
     detail::rope_launch(positions, rotary_dim, theta, q, k, stream);
 }
 
-void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaStream_t stream) {
+void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, hipStream_t stream) {
     require_common(positions, rotary_dim, theta);
     if (x.dtype != DType::BF16) { throw std::invalid_argument("rope: tensor must be BF16"); }
     (void)numel_allow_zero(positions, "positions");

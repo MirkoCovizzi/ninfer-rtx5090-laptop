@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Shared pointwise comparison mechanics for Op tests. Each semantic Op owns the

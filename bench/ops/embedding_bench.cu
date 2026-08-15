@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Public aggregate-column benchmark for the registered Qwen3.6 embedding profiles.
 //
 // Every measurement is exactly one ninfer::ops::embedding call. L2 eviction
@@ -157,10 +158,10 @@ std::vector<std::int32_t> production_tokens(const ProfileSpec& spec) {
 
 ColdTiming measure_point(const ProfileSpec& spec, const Weight& table, DeviceBuffer& ids,
                          DeviceBuffer& out, DeviceBuffer& flush, std::int32_t t,
-                         cudaStream_t stream, int warmup, int repeat) {
+                         hipStream_t stream, int warmup, int repeat) {
     Tensor all_ids(ids.p, DType::I32, {t});
     Tensor all_out(out.p, DType::BF16, {spec.d, t});
-    const auto launch = [&](cudaStream_t selected_stream) {
+    const auto launch = [&](hipStream_t selected_stream) {
         ops::embedding(all_ids, table, all_out, selected_stream);
     };
     return measure_cold_launch(launch, flush, stream, warmup, repeat);
@@ -191,8 +192,8 @@ void run_profile(Profile profile, const std::vector<std::int32_t>* requested_tok
     out.fill();
     const Weight table = make_weight(spec, layout, payload.p);
 
-    cudaStream_t stream = nullptr;
-    CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    hipStream_t stream = nullptr;
+    HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
     for (const std::int32_t t : tokens) {
         const ColdTiming result =
             measure_point(spec, table, ids, out, flush, t, stream, warmup, repeat);
@@ -208,14 +209,14 @@ void run_profile(Profile profile, const std::vector<std::int32_t>* requested_tok
                         spec.name, t, result.median_us, result.p95_us, effective_gbs, read_pct);
         }
     }
-    CUDA_CHECK(cudaStreamDestroy(stream));
+    HIP_CHECK(hipStreamDestroy(stream));
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

@@ -1,7 +1,8 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/kv_cache_append_prefix.h"
 #include "ops/op_tester.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <array>
 #include <cstddef>
@@ -153,7 +154,7 @@ int run_case(int tokens, int commit_count, int first_position, bool cyclic,
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
                                     paged_view(cache_k, cache_v, d_table), nullptr);
     }
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = std::string("kv_cache_append_prefix ") +
                               (cyclic ? "cyclic" : "paged") + " T=" + std::to_string(tokens) +
@@ -203,16 +204,16 @@ int cyclic_graph_replay_case() {
     Tensor lane_tensor(d_lane.p, DType::I32, {1});
     auto cache = cyclic_view(cache_k, cache_v);
 
-    cudaStream_t stream        = nullptr;
-    cudaGraph_t graph          = nullptr;
-    cudaGraphExec_t executable = nullptr;
-    cuda_check(cudaStreamCreate(&stream), "create kv append stream");
-    cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+    hipStream_t stream        = nullptr;
+    hipGraph_t graph          = nullptr;
+    hipGraphExec_t executable = nullptr;
+    hip_check(hipStreamCreate(&stream), "create kv append stream");
+    hip_check(hipStreamBeginCapture(stream, hipStreamCaptureModeGlobal),
                "begin kv append capture");
     ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, lane_tensor, {0, tokens},
                                 cache, stream);
-    cuda_check(cudaStreamEndCapture(stream, &graph), "end kv append capture");
-    cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
+    hip_check(hipStreamEndCapture(stream, &graph), "end kv append capture");
+    hip_check(hipGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
                "instantiate kv append graph");
 
     int failures = 0;
@@ -220,8 +221,8 @@ int cyclic_graph_replay_case() {
         cache_k.copy_from_host(initial_k.data(), cache_k.bytes());
         cache_v.copy_from_host(initial_v.data(), cache_v.bytes());
         d_count.copy_from_host(&commit_count, sizeof(commit_count));
-        cuda_check(cudaGraphLaunch(executable, stream), "launch kv append graph");
-        cuda_synchronize(stream);
+        hip_check(hipGraphLaunch(executable, stream), "launch kv append graph");
+        hip_synchronize(stream);
 
         auto expected_k = initial_k;
         auto expected_v = initial_v;
@@ -238,9 +239,9 @@ int cyclic_graph_replay_case() {
                                  from_device<std::int32_t>(d_count, 1), {commit_count});
     }
 
-    cudaGraphExecDestroy(executable);
-    cudaGraphDestroy(graph);
-    cudaStreamDestroy(stream);
+    hipGraphExecDestroy(executable);
+    hipGraphDestroy(graph);
+    hipStreamDestroy(stream);
     failures += verify_exact("kv append graph input k unchanged",
                              from_device<std::uint16_t>(d_k, input_count), host_k);
     failures += verify_exact("kv append graph input v unchanged",
@@ -280,16 +281,16 @@ int paged_graph_replay_case() {
     Tensor row_tensor(d_row.p, DType::I32, {1});
     auto cache = paged_view(cache_k, cache_v, d_table);
 
-    cudaStream_t stream        = nullptr;
-    cudaGraph_t graph          = nullptr;
-    cudaGraphExec_t executable = nullptr;
-    cuda_check(cudaStreamCreate(&stream), "create paged kv append stream");
-    cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+    hipStream_t stream        = nullptr;
+    hipGraph_t graph          = nullptr;
+    hipGraphExec_t executable = nullptr;
+    hip_check(hipStreamCreate(&stream), "create paged kv append stream");
+    hip_check(hipStreamBeginCapture(stream, hipStreamCaptureModeGlobal),
                "begin paged kv append capture");
     ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, row_tensor, {0, tokens}, cache,
                                 stream);
-    cuda_check(cudaStreamEndCapture(stream, &graph), "end paged kv append capture");
-    cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
+    hip_check(hipStreamEndCapture(stream, &graph), "end paged kv append capture");
+    hip_check(hipGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
                "instantiate paged kv append graph");
 
     const std::array<int, 3> counts{0, 7, tokens};
@@ -306,8 +307,8 @@ int paged_graph_replay_case() {
         cache_v.copy_from_host(initial_v.data(), cache_v.bytes());
         d_count.copy_from_host(&commit_count, sizeof(commit_count));
         d_table.copy_from_host(mapping.data(), mapping.size() * sizeof(std::int32_t));
-        cuda_check(cudaGraphLaunch(executable, stream), "launch paged kv append graph");
-        cuda_synchronize(stream);
+        hip_check(hipGraphLaunch(executable, stream), "launch paged kv append graph");
+        hip_synchronize(stream);
 
         auto expected_k = initial_k;
         auto expected_v = initial_v;
@@ -325,9 +326,9 @@ int paged_graph_replay_case() {
                                  from_device<std::int32_t>(d_table, mapping.size()), mapping);
     }
 
-    cudaGraphExecDestroy(executable);
-    cudaGraphDestroy(graph);
-    cudaStreamDestroy(stream);
+    hipGraphExecDestroy(executable);
+    hipGraphDestroy(graph);
+    hipStreamDestroy(stream);
     failures += cache_k.verify_guards("paged kv append graph cache k guards");
     failures += cache_v.verify_guards("paged kv append graph cache v guards");
     return failures;
@@ -400,7 +401,7 @@ int batch_selector_case(bool cyclic) {
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
                                     paged_view(cache_k, cache_v, d_tables, batch), nullptr);
     }
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label =
         std::string("kv_cache_append_prefix B=2 ") + (cyclic ? "cyclic lanes" : "paged rows");
@@ -418,7 +419,7 @@ int batch_selector_case(bool cyclic) {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "kv_cache_append_prefix: SKIP (CUDA unavailable)\n";
         return 77;
     }

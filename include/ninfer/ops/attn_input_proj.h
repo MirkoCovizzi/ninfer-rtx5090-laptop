@@ -3,7 +3,7 @@
 #include "core/tensor.h"
 #include "ninfer/ops/linear.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -31,7 +31,7 @@ namespace ninfer::ops {
  */
 void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
                      const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
-                     cudaStream_t stream);
+                     hipStream_t stream);
 
 /**
  * Computes the single-parent Q/K/output-gate/V projection.
@@ -69,13 +69,13 @@ attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int32_t parent
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight, Tensor& q,
                      Tensor& gate, Tensor& k, Tensor& v, LinearPolicy policy,
-                     WorkspaceArena& workspace, cudaStream_t stream);
+                     WorkspaceArena& workspace, hipStream_t stream);
 
 /**
  * Applies the A16-only single-parent Q/K/output-gate/V projection without transient workspace.
  */
 void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight, Tensor& q,
-                     Tensor& gate, Tensor& k, Tensor& v, cudaStream_t stream);
+                     Tensor& gate, Tensor& k, Tensor& v, hipStream_t stream);
 
 /**
  * Qwen3.6 companion W8 specialization. The W8G32_F16S RowSplit parent has shape [6144,2048]
@@ -86,6 +86,6 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight,
  * Op does not normalize or rotate either tensor.
  */
 void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tensor& q, Tensor& k,
-                     Tensor& v, cudaStream_t stream);
+                     Tensor& v, hipStream_t stream);
 
 } // namespace ninfer::ops

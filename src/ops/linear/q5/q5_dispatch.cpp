@@ -86,7 +86,7 @@ Q5Launch select_q5_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
 }
 
 void q5_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
-                 cudaStream_t stream) {
+                 hipStream_t stream) {
     const Q5Launch launch = select_q5_launch(w.n, w.k, x.ne[1], policy);
     launch(x, w, out, stream);
 }

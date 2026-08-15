@@ -1,7 +1,8 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/vision_pos_embed.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -100,14 +101,14 @@ void run(std::int32_t patches, bool control, bool profile_once) {
     }
     DeviceBuffer di(indices.size() * sizeof(std::int32_t));
     DeviceBuffer dw(weights.size() * sizeof(float));
-    cudaMemcpy(di.p, indices.data(), di.bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(dw.p, weights.data(), dw.bytes, cudaMemcpyHostToDevice);
+    hipMemcpy(di.p, indices.data(), di.bytes, hipMemcpyHostToDevice);
+    hipMemcpy(dw.p, weights.data(), dw.bytes, hipMemcpyHostToDevice);
     Tensor ttable(table.p, DType::BF16, {kD, kRows});
     Tensor tx(x.p, DType::BF16, {kD, patches});
     Tensor ti(di.p, DType::I32, {4, patches});
     Tensor tw(dw.p, DType::FP32, {4, patches});
 
-    const auto launch = [&](cudaStream_t stream) {
+    const auto launch = [&](hipStream_t stream) {
         if (control) {
             if (patches < 1024) {
                 const int tiles = small_p_tiles(patches);
@@ -130,7 +131,7 @@ void run(std::int32_t patches, bool control, bool profile_once) {
 
     if (profile_once) {
         launch(nullptr);
-        cudaDeviceSynchronize();
+        hipDeviceSynchronize();
         const int tiles = patches < 1024 ? small_p_tiles(patches) : 1;
         std::printf("vision_pos_embed %s profile P=%d grid=%d block=%d\n",
                     control ? "control" : "production", patches, patches * tiles,
@@ -153,7 +154,7 @@ void run(std::int32_t patches, bool control, bool profile_once) {
 
 int main(int argc, char** argv) {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

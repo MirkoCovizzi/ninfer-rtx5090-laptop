@@ -2,7 +2,7 @@
 #include "core/decode_graph.h"
 #include "core/device.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <exception>
@@ -10,15 +10,15 @@
 
 namespace {
 
-bool cuda_unavailable(cudaError_t err) {
-    return err == cudaErrorNoDevice || err == cudaErrorInsufficientDriver;
+bool hip_unavailable(hipError_t err) {
+    return err == hipErrorNoDevice || err == hipErrorInsufficientDriver;
 }
 
 int expect_value(void* device, std::uint32_t expected, const char* label) {
     std::uint32_t actual  = 0;
-    const cudaError_t err = cudaMemcpy(&actual, device, sizeof(actual), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        std::cerr << label << " copy failed: " << cudaGetErrorString(err) << '\n';
+    const hipError_t err = hipMemcpy(&actual, device, sizeof(actual), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        std::cerr << label << " copy failed: " << hipGetErrorString(err) << '\n';
         return 1;
     }
     if (actual == expected) { return 0; }
@@ -31,29 +31,29 @@ int expect_value(void* device, std::uint32_t expected, const char* label) {
 
 int main() {
     int count                   = 0;
-    const cudaError_t count_err = cudaGetDeviceCount(&count);
-    if (cuda_unavailable(count_err) || (count_err == cudaSuccess && count == 0)) {
+    const hipError_t count_err = hipGetDeviceCount(&count);
+    if (hip_unavailable(count_err) || (count_err == hipSuccess && count == 0)) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
-    if (count_err != cudaSuccess) {
-        std::cerr << "cudaGetDeviceCount failed: " << cudaGetErrorString(count_err) << '\n';
+    if (count_err != hipSuccess) {
+        std::cerr << "hipGetDeviceCount failed: " << hipGetErrorString(count_err) << '\n';
         return 1;
     }
 
     try {
         ninfer::DeviceContext device(0);
         ninfer::DeviceArena storage(sizeof(std::uint32_t));
-        CUDA_CHECK(cudaMemsetAsync(storage.base(), 0x33, sizeof(std::uint32_t), device.stream));
+        HIP_CHECK(hipMemsetAsync(storage.base(), 0x33, sizeof(std::uint32_t), device.stream));
         device.synchronize();
 
         ninfer::DecodeGraphDefinition first;
         first.capture(device.stream, [&] {
-            CUDA_CHECK(cudaMemsetAsync(storage.base(), 0x11, sizeof(std::uint32_t), device.stream));
+            HIP_CHECK(hipMemsetAsync(storage.base(), 0x11, sizeof(std::uint32_t), device.stream));
         });
         ninfer::DecodeGraphDefinition second;
         second.capture(device.stream, [&] {
-            CUDA_CHECK(cudaMemsetAsync(storage.base(), 0x22, sizeof(std::uint32_t), device.stream));
+            HIP_CHECK(hipMemsetAsync(storage.base(), 0x22, sizeof(std::uint32_t), device.stream));
         });
 
         int failures = 0;

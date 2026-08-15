@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // ninfer::ops - split-KV GQA small-T attention, int8 KV-cache partial kernel.
@@ -19,9 +20,10 @@
 // Standalone from the bf16 kernel; shared scaffolding (layout constants, ldmatrix
 // helpers, the s8/bf16 MMA helpers, the reducer) lives in gqa_attention_decode.cuh.
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
-#include <math_constants.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
+#include <hip/hip_math_constants.h>
 
 #include "ops/kernel/gqa_attention_decode.cuh"
 #include "ops/kernel/gqa_attention_kv_quant.cuh"
@@ -44,6 +46,25 @@ __device__ __forceinline__ void gqa_small_t_i8_store_swz(std::int8_t* tile, int 
     tile[off]     = code;
 }
 
+// gfx1151 i8 WMMA (wmma_i32_16x16x16_iu8) fragment loads. The atom holds 16 raw
+// int8 per lane (one v4i32 = WmmaA8I). In the [row][D-byte] b16-lane XOR-swizzled
+// tile a 16-byte k-window (k0 multiple of 16) is contiguous at
+// tile[row*D + swz(row, k0/2)*2], so each fragment is ONE 16-byte ds read. The i8
+// A-fragment: participating lanes ((l&1)==((l>>4)&1)) hold row l>>1; the i8
+// B-fragment: every lane holds column n = l&15. Both use k = byte index.
+__device__ __forceinline__ void gqa_wmma_load_a_i8(unsigned (&frag)[4], const std::int8_t* base,
+                                                   int row, int k0, int stride_bytes) {
+    const int cn          = k0 >> 1;
+    const unsigned addr   = smem_addr(&base[row * stride_bytes + gqa_small_t_tc_swz(row, cn) * 2]);
+    wmma_ds_load_b128(frag, addr, 0);
+}
+__device__ __forceinline__ void gqa_wmma_load_b_i8(unsigned (&frag)[4], const std::int8_t* base,
+                                                   int col, int k0, int stride_bytes) {
+    const int cn          = k0 >> 1;
+    const unsigned addr   = smem_addr(&base[col * stride_bytes + gqa_small_t_tc_swz(col, cn) * 2]);
+    wmma_ds_load_b128(frag, addr, 0);
+}
+
 // Decode-specialized producer/consumer kernel for T=1..6. One producer warp per
 // m16 row tile computes QK + online softmax, while all CTA warps partition the
 // tile's 256-wide PV output. This keeps each thread's PV accumulator at 16, 32,
@@ -58,12 +79,12 @@ template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm,
           bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput>
 __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     void gqa_attention_decode_i8_tiled_kernel(
-        const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, std::int8_t* cache_k_i8,
+        const __hip_bfloat16* q, CacheInput input, const std::int32_t* pos, std::int8_t* cache_k_i8,
         std::int8_t* cache_v_i8, __half* cache_k_scale, __half* cache_v_scale,
         const std::int32_t* block_tables, const std::int32_t* valid_columns,
         const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t full_width,
         std::int32_t column_begin, std::int32_t logical_capacity, float scale,
-        __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
+        __hip_bfloat16* partial_acc, float* partial_m, float* partial_l) {
     constexpr int Wc                   = WarpsPerCta;
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
     constexpr int RowTiles             = (RowCount + 15) / 16;
@@ -84,7 +105,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     constexpr int ProducerThreads = RowTiles * 32;
     constexpr int VLoaderThreads  = Threads - ProducerThreads;
     constexpr float Log2E         = 1.4426950408889634074f;
-    constexpr unsigned FullMask   = 0xffffffffu;
+    constexpr unsigned long long FullMask = 0xffffffffull;
 
     static_assert(TokenTile >= 1 && TokenTile <= 6);
     static_assert(Bc == 32 || Bc == 64);
@@ -104,11 +125,9 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     std::int8_t* q_i8     = q_s;
     float* q_scale_tmp    = reinterpret_cast<float*>(r_s);
     std::int8_t* k_i8     = r_s;
-    __nv_bfloat16* q_b16  = reinterpret_cast<__nv_bfloat16*>(q_i8);
-    __nv_bfloat16* k_b16  = reinterpret_cast<__nv_bfloat16*>(k_i8);
     std::int8_t* v_i8     = r_s + Bc * D;
-    __nv_bfloat16* v_bf16 = reinterpret_cast<__nv_bfloat16*>(r_s + 2 * Bc * D);
-    __shared__ __align__(16) __nv_bfloat16 p_s[Br * Bc];
+    __hip_bfloat16* v_bf16 = reinterpret_cast<__hip_bfloat16*>(r_s + 2 * Bc * D);
+    __shared__ __align__(16) __hip_bfloat16 p_s[Br * Bc];
     __shared__ float alpha_s[Br];
     __shared__ __align__(16) __half k_scale_s[Bc * Groups];
     __shared__ __align__(16) __half v_scale_s[Bc * Groups];
@@ -152,7 +171,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             gqa_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
             if (gqa_valid_q_head<Geometry>(kv_head, q_head)) {
                 partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] =
-                    -CUDART_INF_F;
+                    -HIP_INF_F;
                 partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] = 0.0f;
             }
         }
@@ -276,43 +295,46 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     }
     __syncthreads();
 
-    const int gid = lane >> 2;
-    const int lid = lane & 3;
+    // gfx1151 WMMA atoms are 16x16 (not 16x8). QK covers Bc keys as Bc/16 column
+    // atoms; PV covers D dims as D/16 column atoms; each atom carries 8 regs.
+    constexpr int WQKNt         = QKNt / 2;      // Bc / 16
+    constexpr int WPVNt         = D / 16;
+    constexpr int WPVNtPerWarp  = PVNtPerWarp / 2;
+    constexpr int I8KSteps      = D / 16;        // 16-byte QK k-steps
+    constexpr int I8KPerGroup   = kGqaKvQuantGroup / 16; // 64 / 16 = 4, == I8KSteps / Groups
+    static_assert(WQKNt * 16 == Bc);
+    static_assert(WPVNtPerWarp * 2 == PVNtPerWarp);
+    static_assert(I8KSteps == Groups * I8KPerGroup);
 
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int b_rin    = lane & 7;
-    const int b_koff   = ((lane >> 3) & 1) << 3;
+    const bool lane_hi = (lane >> 4) != 0;
 
-    float q_scale_r0[Groups];
-    float q_scale_r1[Groups];
+    // Per-row query quant scale for this lane's 8 rows (rows r + 8*(l>=16)).
+    float q_scale_r[8][Groups];
     if (warp < RowTiles) {
-        const int producer_row0 = warp * 16 + gid;
+        const int producer_base = warp * 16 + (lane_hi ? 8 : 0);
 #pragma unroll
-        for (int g = 0; g < Groups; ++g) {
-            float qs0     = (lid == 0 && producer_row0 < RowCount)
-                                ? q_scale_tmp[producer_row0 * Groups + g]
-                                : 0.0f;
-            float qs1     = (lid == 0 && producer_row0 + 8 < RowCount)
-                                ? q_scale_tmp[(producer_row0 + 8) * Groups + g]
-                                : 0.0f;
-            q_scale_r0[g] = __shfl_sync(FullMask, qs0, gid * 4);
-            q_scale_r1[g] = __shfl_sync(FullMask, qs1, gid * 4);
+        for (int r = 0; r < 8; ++r) {
+            const int row_abs = producer_base + r;
+            const bool valid  = row_abs < RowCount;
+#pragma unroll
+            for (int g = 0; g < Groups; ++g) {
+                q_scale_r[r][g] = valid ? q_scale_tmp[row_abs * Groups + g] : 0.0f;
+            }
         }
     }
     __syncthreads();
 
-    float acc[PVNtPerWarp][4];
+    float acc[WPVNtPerWarp][8];
 #pragma unroll
-    for (int n = 0; n < PVNtPerWarp; ++n) {
+    for (int n = 0; n < WPVNtPerWarp; ++n) {
 #pragma unroll
-        for (int i = 0; i < 4; ++i) { acc[n][i] = 0.0f; }
+        for (int r = 0; r < 8; ++r) { acc[n][r] = 0.0f; }
     }
 
-    float m0 = -CUDART_INF_F, m1 = -CUDART_INF_F;
-    float l0 = 0.0f, l1 = 0.0f;
+    // Running per-row softmax state (lanes 0-15 -> rows 0..7, 16-31 -> rows 8..15).
+    float m[8], l[8];
+#pragma unroll
+    for (int r = 0; r < 8; ++r) { m[r] = -HIP_INF_F; l[r] = 0.0f; }
 
     auto issue_kv_tile = [&](int tile_k0, int physical_page) {
         for (int key_l = tid; key_l < Bc; key_l += Threads) {
@@ -360,154 +382,134 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         // stream/dequant V.
         if (warp < RowTiles) {
             const int producer_row_base = warp * 16;
-            __nv_bfloat16* p_sw         = &p_s[producer_row_base * Bc];
-            float score[QKNt][4];
+            __hip_bfloat16* p_sw         = &p_s[producer_row_base * Bc];
+            float score[WQKNt][8];
 #pragma unroll
-            for (int nt = 0; nt < QKNt; ++nt) {
-                score[nt][0] = 0.0f;
-                score[nt][1] = 0.0f;
-                score[nt][2] = 0.0f;
-                score[nt][3] = 0.0f;
+            for (int nt = 0; nt < WQKNt; ++nt) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) { score[nt][r] = 0.0f; }
             }
 
+            // Int8 QK: one per-64-group int32 accumulation (I8KPerGroup 16-byte
+            // k-steps each), rescaled by qs[row,g]*ks[key,g] into the fp32 score.
+            const int arow = producer_row_base + (lane >> 1);
+            unsigned a_frag[4];
 #pragma unroll
             for (int g = 0; g < Groups; ++g) {
-                unsigned af[GroupKc][4];
+                int acc_i[WQKNt][8];
 #pragma unroll
-                for (int kk = 0; kk < GroupKc; ++kk) {
-                    const int k    = g * GroupKc + kk;
-                    const int acol = k * 16 + a_coloff;
-                    ldmatrix_x4(
-                        af[kk][0], af[kk][1], af[kk][2], af[kk][3],
-                        smem_addr(&q_b16[(producer_row_base + a_rowoff) * DB16 +
-                                         gqa_small_t_tc_swz(producer_row_base + a_rowoff, acol)]));
+                for (int nt = 0; nt < WQKNt; ++nt) {
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) { acc_i[nt][r] = 0; }
                 }
-
 #pragma unroll
-                for (int nt = 0; nt < QKNt; ++nt) {
-                    int c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+                for (int kk = 0; kk < I8KPerGroup; ++kk) {
+                    const int k = g * I8KPerGroup + kk;
+                    if (wmma_a_lane_active(lane)) {
+                        gqa_wmma_load_a_i8(a_frag, q_i8, arow, k * 16, D);
+                    }
+                    WmmaA8I a = *reinterpret_cast<WmmaA8I*>(a_frag);
 #pragma unroll
-                    for (int kk = 0; kk < GroupKc; ++kk) {
-                        const int k    = g * GroupKc + kk;
-                        const int brow = nt * 8 + b_rin;
-                        const int bcol = k * 16 + b_koff;
-                        unsigned bf[2];
-                        ldmatrix_x2(
-                            bf[0], bf[1],
-                            smem_addr(&k_b16[brow * DB16 + gqa_small_t_tc_swz(brow, bcol)]));
-                        mma_s8(c0, c1, c2, c3, af[kk][0], af[kk][1], af[kk][2], af[kk][3], bf[0],
-                               bf[1]);
+                    for (int nt = 0; nt < WQKNt; ++nt) {
+                        unsigned b_frag[4];
+                        gqa_wmma_load_b_i8(b_frag, k_i8, nt * 16 + (lane & 15), k * 16, D);
+                        WmmaC8I& c = *reinterpret_cast<WmmaC8I*>(acc_i[nt]);
+                        WmmaA8I b  = *reinterpret_cast<WmmaA8I*>(b_frag);
+                        c          = wmma_i8(a, b, c);
                     }
-                    const int keya = nt * 8 + 2 * lid;
-                    const int keyb = keya + 1;
-                    float ka       = 0.0f;
-                    float kb2      = 0.0f;
-                    if (gid == 0) {
-                        ka  = __half2float(k_scale_s[keya * Groups + g]);
-                        kb2 = __half2float(k_scale_s[keyb * Groups + g]);
+                }
+#pragma unroll
+                for (int nt = 0; nt < WQKNt; ++nt) {
+                    const float ks = __half2float(k_scale_s[(nt * 16 + (lane & 15)) * Groups + g]);
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        score[nt][r] += q_scale_r[r][g] * ks * static_cast<float>(acc_i[nt][r]);
                     }
-                    ka  = __shfl_sync(FullMask, ka, lid);
-                    kb2 = __shfl_sync(FullMask, kb2, lid);
-                    score[nt][0] += q_scale_r0[g] * ka * static_cast<float>(c0);
-                    score[nt][1] += q_scale_r0[g] * kb2 * static_cast<float>(c1);
-                    score[nt][2] += q_scale_r1[g] * ka * static_cast<float>(c2);
-                    score[nt][3] += q_scale_r1[g] * kb2 * static_cast<float>(c3);
                 }
             }
 
-            const int row0 = producer_row_base + gid;
-            const int row1 = row0 + 8;
-            int q_head0 = 0, token0 = 0, q_head1 = 0, token1 = 0;
-            gqa_small_t_tc_row_to_qt<Geometry>(row0, TokenTile, kv_head, q_head0, token0);
-            gqa_small_t_tc_row_to_qt<Geometry>(row1, TokenTile, kv_head, q_head1, token1);
-            const int qabs0 = (row0 < RowCount) ? pos[token0] : -1;
-            const int qabs1 = (row1 < RowCount) ? pos[token1] : -1;
-            float bm0 = -CUDART_INF_F, bm1 = -CUDART_INF_F;
+            // Per-query validity/absolute position, uniform across each 8-row half.
+            int row_qabs[8];
+            bool row_valid[8];
 #pragma unroll
-            for (int nt = 0; nt < QKNt; ++nt) {
-                const int col0 = nt * 8 + 2 * lid;
-                const int col1 = col0 + 1;
-                const int key0 = k0 + col0;
-                const int key1 = k0 + col1;
-                score[nt][0] =
-                    (row0 < RowCount && key0 >= split_start && key0 < split_end && key0 <= qabs0)
-                        ? score[nt][0] * scale
-                        : -CUDART_INF_F;
-                score[nt][1] =
-                    (row0 < RowCount && key1 >= split_start && key1 < split_end && key1 <= qabs0)
-                        ? score[nt][1] * scale
-                        : -CUDART_INF_F;
-                score[nt][2] =
-                    (row1 < RowCount && key0 >= split_start && key0 < split_end && key0 <= qabs1)
-                        ? score[nt][2] * scale
-                        : -CUDART_INF_F;
-                score[nt][3] =
-                    (row1 < RowCount && key1 >= split_start && key1 < split_end && key1 <= qabs1)
-                        ? score[nt][3] * scale
-                        : -CUDART_INF_F;
-                bm0 = fmaxf(bm0, fmaxf(score[nt][0], score[nt][1]));
-                bm1 = fmaxf(bm1, fmaxf(score[nt][2], score[nt][3]));
+            for (int r = 0; r < 8; ++r) {
+                const int row_abs = producer_row_base + (lane_hi ? 8 : 0) + r;
+                row_valid[r]      = row_abs < RowCount;
+                int q_head = 0, token = 0;
+                gqa_small_t_tc_row_to_qt<Geometry>(row_abs, TokenTile, kv_head, q_head, token);
+                row_qabs[r] = row_valid[r] ? pos[token] : -1;
             }
-            bm0 = warp_max<4>(bm0, FullMask);
-            bm1 = warp_max<4>(bm1, FullMask);
 
-            const float nm0    = fmaxf(m0, bm0);
-            const float nm1    = fmaxf(m1, bm1);
-            const float alpha0 = (m0 == -CUDART_INF_F) ? 0.0f : exp2_approx((m0 - nm0) * Log2E);
-            const float alpha1 = (m1 == -CUDART_INF_F) ? 0.0f : exp2_approx((m1 - nm1) * Log2E);
-
-            float bl0 = 0.0f, bl1 = 0.0f;
+            float bm[8];
 #pragma unroll
-            for (int nt = 0; nt < QKNt; ++nt) {
-                const int col0  = nt * 8 + 2 * lid;
-                const int col1  = col0 + 1;
-                const float p00 = (nm0 > -CUDART_INF_F && score[nt][0] > -CUDART_INF_F)
-                                      ? exp2_approx((score[nt][0] - nm0) * Log2E)
-                                      : 0.0f;
-                const float p01 = (nm0 > -CUDART_INF_F && score[nt][1] > -CUDART_INF_F)
-                                      ? exp2_approx((score[nt][1] - nm0) * Log2E)
-                                      : 0.0f;
-                const float p10 = (nm1 > -CUDART_INF_F && score[nt][2] > -CUDART_INF_F)
-                                      ? exp2_approx((score[nt][2] - nm1) * Log2E)
-                                      : 0.0f;
-                const float p11 = (nm1 > -CUDART_INF_F && score[nt][3] > -CUDART_INF_F)
-                                      ? exp2_approx((score[nt][3] - nm1) * Log2E)
-                                      : 0.0f;
-                bl0 += p00 + p01;
-                bl1 += p10 + p11;
-                p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col0)]           = __float2bfloat16(p00);
-                p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col1)]           = __float2bfloat16(p01);
-                p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col0)] = __float2bfloat16(p10);
-                p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col1)] = __float2bfloat16(p11);
+            for (int r = 0; r < 8; ++r) { bm[r] = -HIP_INF_F; }
+#pragma unroll
+            for (int nt = 0; nt < WQKNt; ++nt) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    const int key  = k0 + nt * 16 + (lane & 15);
+                    const bool keep = row_valid[r] && key >= split_start && key < split_end &&
+                                      key <= row_qabs[r];
+                    score[nt][r] = keep ? score[nt][r] * scale : -HIP_INF_F;
+                    bm[r]        = fmaxf(bm[r], score[nt][r]);
+                }
             }
-            bl0 = warp_sum<4>(bl0, FullMask);
-            bl1 = warp_sum<4>(bl1, FullMask);
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { bm[r] = warp_max<16>(bm[r], FullMask); }
 
-            l0 = l0 * alpha0 + bl0;
-            l1 = l1 * alpha1 + bl1;
-            m0 = nm0;
-            m1 = nm1;
-            if (lid == 0) {
-                alpha_s[row0] = alpha0;
-                alpha_s[row1] = alpha1;
+            float nm[8], alpha[8];
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                nm[r]    = fmaxf(m[r], bm[r]);
+                alpha[r] = (m[r] == -HIP_INF_F) ? 0.0f : exp2_approx((m[r] - nm[r]) * Log2E);
+            }
+
+            float bl[8];
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { bl[r] = 0.0f; }
+#pragma unroll
+            for (int nt = 0; nt < WQKNt; ++nt) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    const int row_l = r + (lane_hi ? 8 : 0);
+                    const int col   = nt * 16 + (lane & 15);
+                    const float p   = (nm[r] > -HIP_INF_F && score[nt][r] > -HIP_INF_F)
+                                          ? exp2_approx((score[nt][r] - nm[r]) * Log2E)
+                                          : 0.0f;
+                    bl[r] += p;
+                    p_sw[row_l * Bc + gqa_small_t_tc_swz32(row_l, col)] = __float2bfloat16(p);
+                }
+            }
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                bl[r] = warp_sum<16>(bl[r], FullMask);
+                l[r]  = l[r] * alpha[r] + bl[r];
+                m[r]  = nm[r];
+                const int row_abs = producer_row_base + r + (lane_hi ? 8 : 0);
+                alpha_s[row_abs]  = alpha[r];
             }
         } else {
             const int loader_tid = tid - ProducerThreads;
 #pragma unroll 1
             for (int chunk = loader_tid; chunk < Bc * (D / 8); chunk += VLoaderThreads) {
-                const int key_l    = chunk / (D / 8);
-                const int dc       = chunk - key_l * (D / 8);
-                const int d        = dc * 8;
-                const int key      = k0 + key_l;
-                __nv_bfloat16* dst = &v_bf16[key_l * D + gqa_small_t_tc_swz(key_l, d)];
+                const int key_l = chunk / (D / 8);
+                const int dc    = chunk - key_l * (D / 8);
+                const int d     = dc * 8;
+                const int key   = k0 + key_l;
+                int4 deq        = make_int4(0, 0, 0, 0);
                 if (key >= split_start && key < split_end) {
                     const int grp = d >> 6;
                     float vs      = 0.0f;
                     if ((lane & 7) == 0) { vs = __half2float(v_scale_s[key_l * Groups + grp]); }
-                    vs = __shfl_sync(FullMask, vs, grp * 8);
-                    store_vec(dst, gqa_kv_dequant_i8x8_from(&v_i8[key_l * D + d], vs));
-                } else {
-                    store_vec(dst, make_int4(0, 0, 0, 0));
+                    vs  = __shfl_sync(FullMask, vs, grp * 8);
+                    deq = gqa_kv_dequant_i8x8_from(&v_i8[key_l * D + d], vs);
+                }
+                const __hip_bfloat16* src8 = reinterpret_cast<const __hip_bfloat16*>(&deq);
+                // Bc is only 32, so keep 8-key groups inside the 32-wide row.
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    const int dd = d + i;
+                    v_bf16[dd * Bc + gqa_small_t_tc_swz32(dd, key_l)] = src8[i];
                 }
             }
         }
@@ -525,84 +527,80 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         const int consumer_tile     = warp % RowTiles;
         const int consumer_slice    = warp / RowTiles;
         const int consumer_row_base = consumer_tile * 16;
-        __nv_bfloat16* p_consumer   = &p_s[consumer_row_base * Bc];
-        const float alpha0          = alpha_s[consumer_row_base + gid];
-        const float alpha1          = alpha_s[consumer_row_base + gid + 8];
+        __hip_bfloat16* p_consumer  = &p_s[consumer_row_base * Bc];
+        float alpha[8];
 #pragma unroll
-        for (int n = 0; n < PVNtPerWarp; ++n) {
-            acc[n][0] *= alpha0;
-            acc[n][1] *= alpha0;
-            acc[n][2] *= alpha1;
-            acc[n][3] *= alpha1;
+        for (int r = 0; r < 8; ++r) {
+            alpha[r] = alpha_s[consumer_row_base + r + (lane_hi ? 8 : 0)];
+        }
+#pragma unroll
+        for (int n = 0; n < WPVNtPerWarp; ++n) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { acc[n][r] *= alpha[r]; }
         }
 
+        unsigned pv_a[PVKs][8];
 #pragma unroll
-        for (int n = 0; n < PVNtPerWarp; ++n) {
-            const int global_n = consumer_slice * PVNtPerWarp + n;
+        for (int k = 0; k < PVKs; ++k) {
+            if (wmma_a_lane_active(lane)) {
+                wmma_load_a_bf16(pv_a[k], p_consumer, lane >> 1, k * 16, Bc,
+                                 gqa_small_t_tc_swz32);
+            }
+        }
+#pragma unroll
+        for (int n = 0; n < WPVNtPerWarp; ++n) {
+            const int global_nw = consumer_slice * WPVNtPerWarp + n;
 #pragma unroll
             for (int k = 0; k < PVKs; ++k) {
-                unsigned pf[4];
-                const int pcol = k * 16 + a_coloff;
-                ldmatrix_x4(
-                    pf[0], pf[1], pf[2], pf[3],
-                    smem_addr(&p_consumer[a_rowoff * Bc + gqa_small_t_tc_swz32(a_rowoff, pcol)]));
-                unsigned vf[2];
-                const int vrow = k * 16 + b_koff + b_rin;
-                const int vcol = global_n * 8;
-                ldmatrix_x2_t(vf[0], vf[1],
-                              smem_addr(&v_bf16[vrow * D + gqa_small_t_tc_swz(vrow, vcol)]));
-                mma_bf16(acc[n][0], acc[n][1], acc[n][2], acc[n][3], pf[0], pf[1], pf[2], pf[3],
-                         vf[0], vf[1]);
+                unsigned vf[8];
+                wmma_load_b_bf16(vf, v_bf16, global_nw * 16 + (lane & 15), k * 16, Bc,
+                                 gqa_small_t_tc_swz32);
+                WmmaC8& c  = *reinterpret_cast<WmmaC8*>(acc[n]);
+                WmmaA16I a = *reinterpret_cast<WmmaA16I*>(pv_a[k]);
+                WmmaA16I b = *reinterpret_cast<WmmaA16I*>(vf);
+                c          = wmma_bf16(a, b, c);
             }
         }
         if (has_next) { ninfer::ops::cp_wait<0>(); }
         __syncthreads();
     }
 
-    if (warp < RowTiles && lid == 0) {
-        const int row0 = warp * 16 + gid;
-        const int row1 = row0 + 8;
-        if (row0 < RowCount) {
-            int q_head = 0;
-            int token  = 0;
-            gqa_small_t_tc_row_to_qt<Geometry>(row0, TokenTile, kv_head, q_head, token);
-            partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] = m0;
-            partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] = l0;
-        }
-        if (row1 < RowCount) {
-            int q_head = 0;
-            int token  = 0;
-            gqa_small_t_tc_row_to_qt<Geometry>(row1, TokenTile, kv_head, q_head, token);
-            partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] = m1;
-            partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] = l1;
+    // Publish the running per-row softmax stats (one lane per 8-row half).
+    if (warp < RowTiles && (lane == 0 || lane == 16)) {
+        const int half_off = (lane >> 4) << 3;
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            const int row_abs = warp * 16 + half_off + r;
+            if (row_abs < RowCount) {
+                int q_head = 0;
+                int token  = 0;
+                gqa_small_t_tc_row_to_qt<Geometry>(row_abs, TokenTile, kv_head, q_head, token);
+                partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] = m[r];
+                partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] = l[r];
+            }
         }
     }
 
 #pragma unroll
-    for (int n = 0; n < PVNtPerWarp; ++n) {
+    for (int n = 0; n < WPVNtPerWarp; ++n) {
         const int consumer_tile     = warp % RowTiles;
         const int consumer_slice    = warp / RowTiles;
         const int consumer_row_base = consumer_tile * 16;
-        const int d0                = (consumer_slice * PVNtPerWarp + n) * 8 + 2 * lid;
-        const int row0              = consumer_row_base + gid;
-        const int row1              = row0 + 8;
-        if (row0 < RowCount) {
-            int q_head = 0;
-            int token  = 0;
-            gqa_small_t_tc_row_to_qt<Geometry>(row0, TokenTile, kv_head, q_head, token);
-            const std::int64_t dst =
-                gqa_partial_acc_index<Geometry>(q_head, d0, token, split, TokenTile);
-            *reinterpret_cast<unsigned*>(&partial_acc[dst]) = pack_bf16x2(acc[n][0], acc[n][1]);
-        }
-        if (row1 < RowCount) {
-            int q_head = 0;
-            int token  = 0;
-            gqa_small_t_tc_row_to_qt<Geometry>(row1, TokenTile, kv_head, q_head, token);
-            const std::int64_t dst =
-                gqa_partial_acc_index<Geometry>(q_head, d0, token, split, TokenTile);
-            *reinterpret_cast<unsigned*>(&partial_acc[dst]) = pack_bf16x2(acc[n][2], acc[n][3]);
+        const int d                 = (consumer_slice * WPVNtPerWarp + n) * 16 + (lane & 15);
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            const int row_abs = consumer_row_base + r + (lane_hi ? 8 : 0);
+            if (row_abs < RowCount) {
+                int q_head = 0;
+                int token  = 0;
+                gqa_small_t_tc_row_to_qt<Geometry>(row_abs, TokenTile, kv_head, q_head, token);
+                const std::int64_t dst =
+                    gqa_partial_acc_index<Geometry>(q_head, d, token, split, TokenTile);
+                partial_acc[dst] = __float2bfloat16(acc[n][r]);
+            }
         }
     }
+
 }
 
 } // namespace ninfer::ops

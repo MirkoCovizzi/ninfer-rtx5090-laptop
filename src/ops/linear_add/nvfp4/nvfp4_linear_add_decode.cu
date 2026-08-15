@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 
 #include "core/device.h"
@@ -9,23 +10,23 @@ namespace ninfer::ops::detail {
 namespace {
 
 template <class Geometry>
-void launch(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
+void launch(const Tensor& x, const Weight& weight, Tensor& residual, hipStream_t stream) {
     using Schedule        = typename Nvfp4LinearDecodeProductionSchedule<Geometry>::Type;
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
     const float inverse   = 1.0F / weight.weight_scale_divisor;
-    auto* output          = static_cast<__nv_bfloat16*>(residual.data);
+    auto* output          = static_cast<__hip_bfloat16*>(residual.data);
     nvfp4_gemv_kernel<Geometry, Schedule><<<kBlocks, Schedule::kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
         static_cast<const std::uint8_t*>(weight.scales), inverse,
         Nvfp4AddResidualEpilogue{output, Geometry::kOutputRows},
         Nvfp4ContiguousOutput{output, Geometry::kOutputRows});
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
 
 void nvfp4_linear_add_decode_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     switch (resolve_nvfp4_problem(weight.n, weight.k)) {
     case Nvfp4Problem::Residual6144:
         launch<Nvfp4Residual6144Geometry>(x, weight, residual, stream);

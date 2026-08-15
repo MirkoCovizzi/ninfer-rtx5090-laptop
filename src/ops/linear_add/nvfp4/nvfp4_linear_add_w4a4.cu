@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 
 #include "core/device.h"
@@ -20,23 +21,23 @@ constexpr std::int32_t kTmaBlockM = 256;
 
 template <class Geometry, class Schedule>
 void launch_gemm(const Weight& weight, Tensor& residual, Nvfp4W4a4Workspace workspace,
-                 std::int32_t tokens, cudaStream_t stream) {
+                 std::int32_t tokens, hipStream_t stream) {
     const dim3 grid(Geometry::kOutputRows / Schedule::kBlockN,
                     (tokens + Schedule::kBlockM - 1) / Schedule::kBlockM);
     const Nvfp4W4a4MaterializedActivation activation{workspace.codes, workspace.scales};
-    auto* output      = static_cast<__nv_bfloat16*>(residual.data);
+    auto* output      = static_cast<__hip_bfloat16*>(residual.data);
     const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
     nvfp4_w4a4_mma_kernel<Geometry, Schedule><<<grid, Schedule::kThreads, 0, stream>>>(
         activation, static_cast<const std::uint8_t*>(weight.qdata),
         static_cast<const std::uint8_t*>(weight.scales), tokens, alpha,
         Nvfp4AddResidualEpilogue{output, Geometry::kOutputRows},
         Nvfp4ContiguousOutput{output, Geometry::kOutputRows});
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Geometry>
 void launch_problem(const Weight& weight, Tensor& residual, Nvfp4W4a4Workspace workspace,
-                    std::int32_t tokens, cudaStream_t stream) {
+                    std::int32_t tokens, hipStream_t stream) {
     if (tokens <= 64) {
         launch_gemm<Geometry, M32N64>(weight, residual, workspace, tokens, stream);
     } else if (tokens <= 128) {
@@ -55,7 +56,7 @@ void launch_problem(const Weight& weight, Tensor& residual, Nvfp4W4a4Workspace w
 } // namespace
 
 void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                  Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
+                                  Nvfp4W4a4Workspace workspace, hipStream_t stream) {
     launch_nvfp4_w4a4_quantize(x, weight, workspace, stream);
     const std::int32_t tokens  = x.ne[1];
     const Nvfp4Problem problem = resolve_nvfp4_problem(weight.n, weight.k);
@@ -64,7 +65,7 @@ void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
         launch_nvfp4_w4a4_tma_linear_add(problem, workspace.codes, workspace.scales,
                                          static_cast<const std::uint8_t*>(weight.qdata),
                                          static_cast<const std::uint8_t*>(weight.scales),
-                                         static_cast<__nv_bfloat16*>(residual.data), tokens, alpha,
+                                         static_cast<__hip_bfloat16*>(residual.data), tokens, alpha,
                                          stream);
         return;
     }

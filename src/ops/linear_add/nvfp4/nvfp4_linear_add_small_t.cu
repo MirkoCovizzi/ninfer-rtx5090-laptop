@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 
 #include "core/device.h"
@@ -13,23 +14,23 @@
 namespace ninfer::ops::detail {
 namespace {
 
-using Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+using Launch = void (*)(const Tensor&, const Weight&, Tensor&, hipStream_t);
 
 template <class Geometry, int ActiveTokens>
-void launch_exact(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
+void launch_exact(const Tensor& x, const Weight& weight, Tensor& residual, hipStream_t stream) {
     using Schedule = typename Nvfp4LinearSmallTProductionSchedule<Geometry, ActiveTokens>::Type;
     constexpr int kTokenTiles = (ActiveTokens + Schedule::kTokenTile - 1) / Schedule::kTokenTile;
     constexpr int kBlocks     = (Geometry::kOutputRows / Schedule::kRowsPerCta) * kTokenTiles;
     const float inverse       = 1.0F / weight.weight_scale_divisor;
-    auto* output              = static_cast<__nv_bfloat16*>(residual.data);
+    auto* output              = static_cast<__hip_bfloat16*>(residual.data);
     nvfp4_small_t_kernel<Geometry, ActiveTokens, Schedule>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), inverse,
             Nvfp4AddResidualEpilogue{output, Geometry::kOutputRows},
             Nvfp4ContiguousOutput{output, Geometry::kOutputRows});
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Geometry, std::size_t... Offsets>
@@ -50,7 +51,7 @@ constexpr auto kResidual17408Launchers = make_launchers<Nvfp4Residual17408Geomet
 } // namespace
 
 void nvfp4_linear_add_small_t_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                     cudaStream_t stream) {
+                                     hipStream_t stream) {
     const std::size_t index = static_cast<std::size_t>(x.ne[1] - kNvfp4FirstSmallT);
     switch (resolve_nvfp4_problem(weight.n, weight.k)) {
     case Nvfp4Problem::Residual6144:

@@ -1,7 +1,8 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - rope launcher: private token-count tuning and generic fallback.
 #include "ops/launcher/rope.h"
 
-#include "core/device.h" // CUDA_CHECK
+#include "core/device.h" // HIP_CHECK
 #include "ops/kernel/rope.cuh"
 
 #include <cstdint>
@@ -22,27 +23,27 @@ inline constexpr bool kTextMode =
     Mode == RopeKernelMode::DflashText1D;
 
 std::int64_t token_stride(const Tensor* tensor) {
-    return tensor == nullptr ? 0 : tensor->nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16));
+    return tensor == nullptr ? 0 : tensor->nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16));
 }
 
 bool bf16x2_aligned(const Tensor& tensor) {
-    return (reinterpret_cast<std::uintptr_t>(tensor.data) & (alignof(__nv_bfloat162) - 1)) == 0 &&
-           tensor.nb[2] % static_cast<std::int64_t>(alignof(__nv_bfloat162)) == 0;
+    return (reinterpret_cast<std::uintptr_t>(tensor.data) & (alignof(__hip_bfloat162) - 1)) == 0 &&
+           tensor.nb[2] % static_cast<std::int64_t>(alignof(__hip_bfloat162)) == 0;
 }
 
 template <RopeKernelMode Mode, int QHeads, int KHeads>
 void launch_fixed_block(const Tensor& positions, Tensor* q, Tensor* k, int block,
-                        cudaStream_t stream) {
+                        hipStream_t stream) {
     const int tokens = positions.ne[0];
     rope_fixed_kernel<Mode, QHeads, KHeads><<<tokens, block, 0, stream>>>(
         static_cast<const std::int32_t*>(positions.data),
-        q == nullptr ? nullptr : static_cast<__nv_bfloat16*>(q->data),
-        k == nullptr ? nullptr : static_cast<__nv_bfloat16*>(k->data), tokens, token_stride(q),
+        q == nullptr ? nullptr : static_cast<__hip_bfloat16*>(q->data),
+        k == nullptr ? nullptr : static_cast<__hip_bfloat16*>(k->data), tokens, token_stride(q),
         token_stride(k));
 }
 
 template <RopeKernelMode Mode, int QHeads, int KHeads>
-void launch_fixed(const Tensor& positions, Tensor* q, Tensor* k, cudaStream_t stream) {
+void launch_fixed(const Tensor& positions, Tensor* q, Tensor* k, hipStream_t stream) {
     const int tokens = positions.ne[0];
     int block        = kSmallBlock;
     if constexpr (kTextMode<Mode>) {
@@ -61,20 +62,20 @@ void launch_fixed(const Tensor& positions, Tensor* q, Tensor* k, cudaStream_t st
 }
 
 template <int HeadsPerBlock, int QHeads, int KHeads>
-void launch_dflash_split(const Tensor& positions, Tensor* q, Tensor* k, cudaStream_t stream) {
+void launch_dflash_split(const Tensor& positions, Tensor* q, Tensor* k, hipStream_t stream) {
     constexpr int kGroups = (QHeads + KHeads + HeadsPerBlock - 1) / HeadsPerBlock;
     constexpr int kBlock  = HeadsPerBlock <= 2 ? 64 : HeadsPerBlock * 32;
     const int tokens      = positions.ne[0];
     rope_fixed_split_kernel<RopeKernelMode::DflashText1D, QHeads, KHeads, HeadsPerBlock>
         <<<tokens * kGroups, kBlock, 0, stream>>>(
             static_cast<const std::int32_t*>(positions.data),
-            q == nullptr ? nullptr : static_cast<__nv_bfloat16*>(q->data),
-            k == nullptr ? nullptr : static_cast<__nv_bfloat16*>(k->data), tokens, token_stride(q),
+            q == nullptr ? nullptr : static_cast<__hip_bfloat16*>(q->data),
+            k == nullptr ? nullptr : static_cast<__hip_bfloat16*>(k->data), tokens, token_stride(q),
             token_stride(k));
 }
 
 bool launch_fixed_pair(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tensor& k,
-                       cudaStream_t stream) {
+                       hipStream_t stream) {
     if (!bf16x2_aligned(q) || !bf16x2_aligned(k)) { return false; }
     const int axes = positions.ne[1];
     if (axes == 1 && q.ne[0] == 128 && rotary_dim == 128 && theta == 1.0e7F && q.ne[1] == 32 &&
@@ -119,12 +120,12 @@ bool launch_fixed_pair(const Tensor& positions, int rotary_dim, float theta, Ten
 }
 
 template <RopeKernelMode Mode, int Heads>
-void launch_fixed_single(const Tensor& positions, Tensor& x, cudaStream_t stream) {
+void launch_fixed_single(const Tensor& positions, Tensor& x, hipStream_t stream) {
     launch_fixed<Mode, Heads, 0>(positions, &x, nullptr, stream);
 }
 
 template <int Heads>
-bool launch_text_single(const Tensor& positions, int axes, Tensor& x, cudaStream_t stream) {
+bool launch_text_single(const Tensor& positions, int axes, Tensor& x, hipStream_t stream) {
     if (x.ne[1] != Heads) { return false; }
     if (axes == 1) {
         launch_fixed_single<RopeKernelMode::Text1D, Heads>(positions, x, stream);
@@ -138,7 +139,7 @@ bool launch_text_single(const Tensor& positions, int axes, Tensor& x, cudaStream
 }
 
 bool launch_fixed_single_dispatch(const Tensor& positions, int rotary_dim, float theta, Tensor& x,
-                                  cudaStream_t stream) {
+                                  hipStream_t stream) {
     if (!bf16x2_aligned(x)) { return false; }
     const int axes = positions.ne[1];
     if (axes == 1 && x.ne[0] == 128 && rotary_dim == 128 && theta == 1.0e7F) {
@@ -167,14 +168,14 @@ bool launch_fixed_single_dispatch(const Tensor& positions, int rotary_dim, float
 }
 
 void launch_generic(const Tensor& positions, int rotary_dim, float theta, Tensor* q, Tensor* k,
-                    cudaStream_t stream) {
+                    hipStream_t stream) {
     constexpr int block = 128;
     Tensor& sample      = q != nullptr ? *q : *k;
     const int tokens    = sample.ne[2];
     rope_generic_kernel<<<tokens, block, 0, stream>>>(
         static_cast<const std::int32_t*>(positions.data), positions.ne[1],
-        q == nullptr ? nullptr : static_cast<__nv_bfloat16*>(q->data),
-        k == nullptr ? nullptr : static_cast<__nv_bfloat16*>(k->data), sample.ne[0], rotary_dim,
+        q == nullptr ? nullptr : static_cast<__hip_bfloat16*>(q->data),
+        k == nullptr ? nullptr : static_cast<__hip_bfloat16*>(k->data), sample.ne[0], rotary_dim,
         theta, q == nullptr ? 0 : q->ne[1], k == nullptr ? 0 : k->ne[1], tokens, token_stride(q),
         token_stride(k));
 }
@@ -182,19 +183,19 @@ void launch_generic(const Tensor& positions, int rotary_dim, float theta, Tensor
 } // namespace
 
 void rope_launch(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tensor& k,
-                 cudaStream_t stream) {
+                 hipStream_t stream) {
     if (!launch_fixed_pair(positions, rotary_dim, theta, q, k, stream)) {
         launch_generic(positions, rotary_dim, theta, &q, &k, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void rope_single_launch(const Tensor& positions, int rotary_dim, float theta, Tensor& x,
-                        cudaStream_t stream) {
+                        hipStream_t stream) {
     if (!launch_fixed_single_dispatch(positions, rotary_dim, theta, x, stream)) {
         launch_generic(positions, rotary_dim, theta, &x, nullptr, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

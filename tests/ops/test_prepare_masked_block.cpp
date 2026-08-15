@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/prepare_masked_block.h"
 #include "ops/op_tester.h"
 
@@ -49,7 +50,7 @@ int run_case(int block_size, std::int32_t anchor_value, std::int32_t length_valu
     Tensor positions_tensor(positions.data(), DType::I32, {block_size, 1});
     ops::prepare_masked_block(anchor_tensor, length_tensor, valid_tensor, kMaskId, ids_tensor,
                               positions_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = "prepare_masked_block W=" + std::to_string(block_size);
     int failures            = verify_exact(
@@ -96,7 +97,7 @@ int run_batch_case() {
     Tensor positions_tensor(positions.data(), DType::I32, {width, batch});
     ops::prepare_masked_block(anchors_tensor, lengths_tensor, valid_tensor, kMaskId, ids_tensor,
                               positions_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures =
         verify_exact("prepare_masked_block B=2 ids",
@@ -114,7 +115,7 @@ int run_batch_case() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "prepare_masked_block: SKIP (CUDA unavailable)\n";
         return 77;
     }

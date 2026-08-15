@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // W8G32 RowSplit medium-T split-K MMA core. K-split warps share one 16-row
@@ -6,8 +7,9 @@
 
 #include "ops/linear/w8/w8_small_t_mma.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 
@@ -17,7 +19,7 @@ template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks, cla
           bool AddResidual = false>
 __global__
 __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_splitk_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales, Output output, int active_cols) {
     constexpr int kTileK       = 64;
     constexpr int kMmaRows     = 16;
@@ -27,13 +29,16 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
     constexpr int kGroups      = Hidden / kGroupK;
     constexpr int kWarpCols    = TileCols / NGroups;
     constexpr int kNt          = kWarpCols / 8;
-    constexpr unsigned kMask   = 0xffffffffu;
+    // gfx1151 WMMA atoms are 16x16; the warp column tile uses div_up(kWarpCols,16) atoms
+    // and the final atom may overlap the neighboring warp/global columns (filtered at store).
+    constexpr int kWmmaNt = (kWarpCols + 15) / 16;
+    constexpr unsigned long long kMask = 0xffffffffull;
     static_assert(KSplits == 2 || KSplits == 4 || KSplits == 8);
     static_assert(TileCols % NGroups == 0 && kWarpCols % 8 == 0);
     static_assert(Hidden % kGroupK == 0 && kKernelWarps <= 32);
 
     __shared__ __align__(16) std::uint8_t code_shared[kMmaRows][kGroupK];
-    __shared__ __align__(16) __nv_bfloat16 b_shared[kKernelWarps][kWarpCols * kTileK];
+    __shared__ __align__(16) __hip_bfloat16 b_shared[kKernelWarps][kWarpCols * kTileK];
 
     const int tid        = static_cast<int>(threadIdx.x);
     const int warp       = tid >> 5;
@@ -42,7 +47,11 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
     const int k_split    = warp - n_group * KSplits;
     const int gid        = lane >> 2;
     const int lid        = lane & 3;
-    const int n_base     = n_group * kWarpCols;
+    // blockIdx.y selects a contiguous TileCols-wide column range so a wide problem can be
+    // split across more CTAs (grid.y > 1) to keep the per-CTA static shared tile within the
+    // gfx1151 64 KiB LDS cap; all single-column-block callers use blockIdx.y == 0.
+    const int col_base   = static_cast<int>(blockIdx.y) * TileCols;
+    const int n_base     = col_base + n_group * kWarpCols;
     const int remaining  = active_cols - n_base;
     const int local_cols = remaining <= 0 ? 0 : (remaining < kWarpCols ? remaining : kWarpCols);
     const int cta_row0   = static_cast<int>(blockIdx.x) * kRowsPerCta;
@@ -71,16 +80,12 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
         cp_commit();
     };
 
-    const int b_rin     = lane & 7;
-    const int b_koff    = ((lane >> 3) & 1) << 3;
     const int warp_koff = k_split * kTileK;
-    float acc[kNt][4];
+    float acc[kWmmaNt][8];
 #pragma unroll
-    for (int ni = 0; ni < kNt; ++ni) {
-        acc[ni][0] = 0.0f;
-        acc[ni][1] = 0.0f;
-        acc[ni][2] = 0.0f;
-        acc[ni][3] = 0.0f;
+    for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+        for (int r = 0; r < 8; ++r) { acc[ni][r] = 0.0f; }
     }
 
     stage_codes(0);
@@ -93,64 +98,64 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
         const int group_k0 = group_index * kGroupK;
         const int k0       = group_k0 + warp_koff;
 
-        unsigned lane_scale_pair = 0;
-        if (lid < 2) {
-            const int scale_row = cta_row0 + gid + lid * 8;
-            lane_scale_pair     = *reinterpret_cast<const unsigned*>(
+        // WMMA C layout: lane l holds rows r + 8*(l>=16); each row has its own 32-K scale.
+        const int rb = (lane & 16) ? 8 : 0;
+        unsigned row_scale_pair[8];
+#pragma unroll
+        for (int rr = 0; rr < 8; ++rr) {
+            const int scale_row = cta_row0 + rb + rr;
+            row_scale_pair[rr]  = *reinterpret_cast<const unsigned*>(
                 scales + (static_cast<std::int64_t>(scale_row) * (Hidden / 32) + k0 / 32) * 2);
         }
-        const unsigned top_scale_pair = __shfl_sync(kMask, lane_scale_pair, lane & ~3);
-        const unsigned bot_scale_pair = __shfl_sync(kMask, lane_scale_pair, (lane & ~3) + 1);
 
 #pragma unroll
         for (int group = 0; group < 2; ++group) {
-            float group_acc[kNt][4];
+            float group_acc[kWmmaNt][8];
 #pragma unroll
-            for (int ni = 0; ni < kNt; ++ni) {
-                group_acc[ni][0] = 0.0f;
-                group_acc[ni][1] = 0.0f;
-                group_acc[ni][2] = 0.0f;
-                group_acc[ni][3] = 0.0f;
+            for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) { group_acc[ni][r] = 0.0f; }
             }
 #pragma unroll
             for (int ki = 0; ki < 2; ++ki) {
-                const int ks              = group * 2 + ki;
-                const int code_col        = ks * 16 + lid * 2;
-                const auto load_code_pair = [&](int code_row, int col) {
-                    const int chunk  = (warp_koff + col) >> 4;
-                    const int offset = (chunk ^ (code_row & 7)) * 16 + (col & 15);
-                    return static_cast<unsigned>(
-                        *reinterpret_cast<const unsigned short*>(&code_shared[code_row][offset]));
-                };
-                const unsigned af0 = w8_small_t_bf16_pair_from_s8(load_code_pair(gid, code_col));
-                const unsigned af1 =
-                    w8_small_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col));
-                const unsigned af2 =
-                    w8_small_t_bf16_pair_from_s8(load_code_pair(gid, code_col + 8));
-                const unsigned af3 =
-                    w8_small_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col + 8));
+                const int ks = group * 2 + ki;
+                // WMMA A fragment: active lane l holds row m = l>>1 and the full 16-K window.
+                const int m  = lane >> 1;
+                const int chunk = (warp_koff + ks * 16) >> 4;
+                const unsigned short* base = reinterpret_cast<const unsigned short*>(
+                    &code_shared[m][(chunk ^ (m & 7)) * 16]);
+                unsigned a_frag[8];
+                const bool a_active = wmma_a_lane_active(lane);
 #pragma unroll
-                for (int ni = 0; ni < kNt; ++ni) {
-                    unsigned bf0, bf1;
-                    const int br = ni * 8 + b_rin;
-                    ldmatrix_x2(
-                        bf0, bf1,
-                        smem_addr(&b_shared[warp][br * kTileK +
-                                                  w8_small_t_swizzle_64(br, ks * 16 + b_koff)]));
-                    mma_bf16(group_acc[ni][0], group_acc[ni][1], group_acc[ni][2], group_acc[ni][3],
-                             af0, af1, af2, af3, bf0, bf1);
+                for (int j = 0; j < 8; ++j) {
+                    const unsigned pair = w8_small_t_bf16_pair_from_s8(static_cast<unsigned>(base[j]));
+                    a_frag[j] = a_active ? pair : 0u;
+                }
+#pragma unroll
+                for (int ni = 0; ni < kWmmaNt; ++ni) {
+                    unsigned b_frag[8];
+                    const int col = ni * 16 + (lane & 15);
+                    wmma_load_b_bf16(b_frag, b_shared[warp], col, ks * 16, kTileK,
+                                     w8_small_t_swizzle_64);
+                    WmmaC8& c  = *reinterpret_cast<WmmaC8*>(group_acc[ni]);
+                    WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag);
+                    WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag);
+                    c          = wmma_bf16(a, b, c);
                 }
             }
-            const unsigned top_bits = group == 0 ? top_scale_pair & 0xffffu : top_scale_pair >> 16;
-            const unsigned bot_bits = group == 0 ? bot_scale_pair & 0xffffu : bot_scale_pair >> 16;
-            const float top_scale   = __half2float(__ushort_as_half(top_bits));
-            const float bot_scale   = __half2float(__ushort_as_half(bot_bits));
+            float row_scale[8];
 #pragma unroll
-            for (int ni = 0; ni < kNt; ++ni) {
-                acc[ni][0] = fmaf(group_acc[ni][0], top_scale, acc[ni][0]);
-                acc[ni][1] = fmaf(group_acc[ni][1], top_scale, acc[ni][1]);
-                acc[ni][2] = fmaf(group_acc[ni][2], bot_scale, acc[ni][2]);
-                acc[ni][3] = fmaf(group_acc[ni][3], bot_scale, acc[ni][3]);
+            for (int r = 0; r < 8; ++r) {
+                const unsigned bits = group == 0 ? row_scale_pair[r] & 0xffffu
+                                                 : row_scale_pair[r] >> 16;
+                row_scale[r]        = __half2float(__ushort_as_half(bits));
+            }
+#pragma unroll
+            for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    acc[ni][r] = fmaf(group_acc[ni][r], row_scale[r], acc[ni][r]);
+                }
             }
         }
 
@@ -167,25 +172,27 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
     auto* partial = reinterpret_cast<float*>(b_shared);
     if ((k_split & 1) != 0) {
 #pragma unroll
-        for (int ni = 0; ni < kNt; ++ni) {
-            store_vec(partial + ((warp * kNt + ni) * 32 + lane) * 4,
-                      make_float4(acc[ni][0], acc[ni][1], acc[ni][2], acc[ni][3]));
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                partial[((warp * kWmmaNt + ni) * 32 + lane) * 8 + r] = acc[ni][r];
+            }
         }
     }
     __syncthreads();
 
     if ((k_split & 1) == 0) {
 #pragma unroll
-        for (int ni = 0; ni < kNt; ++ni) {
-            const float4 partner =
-                load_vec<float4>(partial + (((warp + 1) * kNt + ni) * 32 + lane) * 4);
-            acc[ni][0] += partner.x;
-            acc[ni][1] += partner.y;
-            acc[ni][2] += partner.z;
-            acc[ni][3] += partner.w;
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                acc[ni][r] += partial[(((warp + 1) * kWmmaNt + ni) * 32 + lane) * 8 + r];
+            }
             if (k_split != 0) {
-                store_vec(partial + ((warp * kNt + ni) * 32 + lane) * 4,
-                          make_float4(acc[ni][0], acc[ni][1], acc[ni][2], acc[ni][3]));
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    partial[((warp * kWmmaNt + ni) * 32 + lane) * 8 + r] = acc[ni][r];
+                }
             }
         }
     }
@@ -194,16 +201,15 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
         __syncthreads();
         if (k_split == 0) {
 #pragma unroll
-            for (int ni = 0; ni < kNt; ++ni) {
+            for (int ni = 0; ni < kWmmaNt; ++ni) {
 #pragma unroll
                 for (int split = 2; split < KSplits; split += 2) {
                     const int partner_warp = n_group * KSplits + split;
-                    const float4 partner =
-                        load_vec<float4>(partial + ((partner_warp * kNt + ni) * 32 + lane) * 4);
-                    acc[ni][0] += partner.x;
-                    acc[ni][1] += partner.y;
-                    acc[ni][2] += partner.z;
-                    acc[ni][3] += partner.w;
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        acc[ni][r] +=
+                            partial[((partner_warp * kWmmaNt + ni) * 32 + lane) * 8 + r];
+                    }
                 }
             }
         }
@@ -212,20 +218,20 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
     if (k_split == 0) {
         const W8OutputTile output_tile = output.tile(cta_row0);
         const auto store               = [&](int row, int col, float value) {
-            __nv_bfloat16* destination = output_tile.at(row, col);
+            __hip_bfloat16* destination = output_tile.at(row, col);
             if constexpr (AddResidual) { value += __bfloat162float(*destination); }
             *destination = __float2bfloat16_rn(value);
         };
 #pragma unroll
-        for (int ni = 0; ni < kNt; ++ni) {
-            const int col0 = n_base + ni * 8 + 2 * lid;
-            if (col0 < active_cols) {
-                store(cta_row0 + gid, col0, acc[ni][0]);
-                store(cta_row0 + gid + 8, col0, acc[ni][2]);
-            }
-            if (col0 + 1 < active_cols) {
-                store(cta_row0 + gid, col0 + 1, acc[ni][1]);
-                store(cta_row0 + gid + 8, col0 + 1, acc[ni][3]);
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+            // WMMA C layout: lane l holds (row r + 8*(l>=16), col = n_base + ni*16 + (l&15)).
+            const int col       = n_base + ni * 16 + (lane & 15);
+            const int local_col = ni * 16 + (lane & 15);
+            const int row_lo    = cta_row0 + (lane < 16 ? 0 : 8);
+            if (local_col >= kWarpCols) { continue; }
+            if (col < active_cols) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) { store(row_lo + r, col, acc[ni][r]); }
             }
         }
     }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "artifact/reader.h"
 
 #include <nlohmann/json.hpp>

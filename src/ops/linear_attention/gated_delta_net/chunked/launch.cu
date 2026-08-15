@@ -1,9 +1,11 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_attention/gated_delta_net/launch.h"
 
 #include "core/device.h"
 #include "ops/linear_attention/gated_delta_net/chunked/launch.h"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -17,7 +19,7 @@ std::size_t chunked_workspace_bytes(std::int32_t value_heads, std::int32_t token
 void launch_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                     const Tensor& beta, float scale, const Tensor& ssm_state_in,
                     Tensor& ssm_state_out, Tensor& out, void* workspace,
-                    std::size_t workspace_bytes, cudaStream_t stream) {
+                    std::size_t workspace_bytes, hipStream_t stream) {
     const auto layout = chunked::compute_workspace_layout(v.ne[1], q.ne[2]);
     if (workspace == nullptr || workspace_bytes < layout.total_bytes) { throw std::bad_alloc(); }
 
@@ -32,44 +34,44 @@ void launch_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const Ten
     prepare.H_qk         = q.ne[1];
     prepare.H_v          = v.ne[1];
     prepare.L            = q.ne[2];
-    prepare.k            = static_cast<const __nv_bfloat16*>(k.data);
-    prepare.v            = static_cast<const __nv_bfloat16*>(v.data);
+    prepare.k            = static_cast<const __hip_bfloat16*>(k.data);
+    prepare.v            = static_cast<const __hip_bfloat16*>(v.data);
     prepare.g_in         = static_cast<const float*>(g.data);
     prepare.beta         = static_cast<const float*>(beta.data);
-    prepare.W            = static_cast<__nv_bfloat16*>(W.data);
-    prepare.U            = static_cast<__nv_bfloat16*>(U.data);
+    prepare.W            = static_cast<__hip_bfloat16*>(W.data);
+    prepare.U            = static_cast<__hip_bfloat16*>(U.data);
     prepare.g_cumsum_out = static_cast<float*>(g_cumsum.data);
     prepare.stream       = stream;
-    CUDA_CHECK(chunked::launch_prepare_wy_wu(prepare));
+    HIP_CHECK(chunked::launch_prepare_wy_wu(prepare));
 
     chunked::state_passing_config state{};
     state.H_qk      = q.ne[1];
     state.H_v       = v.ne[1];
     state.L         = q.ne[2];
-    state.W         = static_cast<const __nv_bfloat16*>(W.data);
-    state.U         = static_cast<const __nv_bfloat16*>(U.data);
-    state.k         = static_cast<const __nv_bfloat16*>(k.data);
+    state.W         = static_cast<const __hip_bfloat16*>(W.data);
+    state.U         = static_cast<const __hip_bfloat16*>(U.data);
+    state.k         = static_cast<const __hip_bfloat16*>(k.data);
     state.g_cumsum  = static_cast<const float*>(g_cumsum.data);
     state.state_in  = static_cast<const float*>(ssm_state_in.data);
-    state.v_new     = static_cast<__nv_bfloat16*>(v_new.data);
-    state.h_chunk   = static_cast<__nv_bfloat16*>(h_chunk.data);
+    state.v_new     = static_cast<__hip_bfloat16*>(v_new.data);
+    state.h_chunk   = static_cast<__hip_bfloat16*>(h_chunk.data);
     state.state_out = static_cast<float*>(ssm_state_out.data);
     state.stream    = stream;
-    CUDA_CHECK(chunked::launch_state_passing(state));
+    HIP_CHECK(chunked::launch_state_passing(state));
 
     chunked::chunk_output_config output{};
     output.H_qk     = q.ne[1];
     output.H_v      = v.ne[1];
     output.L        = q.ne[2];
-    output.q        = static_cast<const __nv_bfloat16*>(q.data);
-    output.k        = static_cast<const __nv_bfloat16*>(k.data);
-    output.v_new    = static_cast<const __nv_bfloat16*>(v_new.data);
+    output.q        = static_cast<const __hip_bfloat16*>(q.data);
+    output.k        = static_cast<const __hip_bfloat16*>(k.data);
+    output.v_new    = static_cast<const __hip_bfloat16*>(v_new.data);
     output.g_cumsum = static_cast<const float*>(g_cumsum.data);
-    output.h_chunk  = static_cast<const __nv_bfloat16*>(h_chunk.data);
-    output.attn_out = static_cast<__nv_bfloat16*>(out.data);
+    output.h_chunk  = static_cast<const __hip_bfloat16*>(h_chunk.data);
+    output.attn_out = static_cast<__hip_bfloat16*>(out.data);
     output.scale    = scale;
     output.stream   = stream;
-    CUDA_CHECK(chunked::launch_output(output));
+    HIP_CHECK(chunked::launch_output(output));
 }
 
 } // namespace ninfer::ops::detail::gated_delta_net

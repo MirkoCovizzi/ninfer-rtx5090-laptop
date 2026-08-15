@@ -13,7 +13,7 @@ struct ShapeCase {
     std::span<const std::int32_t> route_interiors;
 };
 
-bool cuda_available();
+bool hip_available();
 
 int run_w8_a16_shape(std::string_view label, const ShapeCase& shape);
 

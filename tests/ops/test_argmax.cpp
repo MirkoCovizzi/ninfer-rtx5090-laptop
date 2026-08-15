@@ -78,7 +78,7 @@ int run_case(std::int32_t physical_rows, std::int32_t valid_rows, std::int32_t t
     Tensor logits_tensor(device_logits.data(), DType::BF16, {physical_rows, tokens});
     Tensor output_tensor(device_output.data(), DType::I32, {tokens});
     ops::argmax(logits_tensor, output_tensor, valid_rows, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const auto actual =
         from_device<std::int32_t>(device_output.data(), static_cast<std::size_t>(tokens));
@@ -98,7 +98,7 @@ int run_case(std::int32_t physical_rows, std::int32_t valid_rows, std::int32_t t
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

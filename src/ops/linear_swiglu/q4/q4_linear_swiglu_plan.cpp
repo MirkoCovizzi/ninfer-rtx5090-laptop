@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
 
 #include "ninfer/ops/linear.h"
@@ -147,7 +148,7 @@ std::size_t q4_linear_swiglu_capacity_workspace_bytes(std::int32_t gate_up_rows,
 }
 
 void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor& x, const Weight& w,
-                                   Tensor& out, WorkspaceArena& ws, cudaStream_t stream) {
+                                   Tensor& out, WorkspaceArena& ws, hipStream_t stream) {
     const Q4LinearSwiGluProblem problem{w.n, out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     const Q4LinearSwiGluPlan resolved = q4_linear_swiglu_resolve_plan(problem);
     if (resolved.schedule != plan.schedule || resolved.workspace_bytes != plan.workspace_bytes) {
@@ -183,7 +184,7 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
 }
 
 void q4_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, WorkspaceArena& ws,
-                               cudaStream_t stream) {
+                               hipStream_t stream) {
     const Q4LinearSwiGluProblem problem{w.n, out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     const Q4LinearSwiGluPlan plan = q4_linear_swiglu_resolve_plan(problem);
     q4_linear_swiglu_execute_plan(plan, x, w, out, ws, stream);

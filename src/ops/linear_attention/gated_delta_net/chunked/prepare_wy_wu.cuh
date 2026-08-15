@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/mma.cuh"
@@ -15,15 +16,10 @@
 
 namespace ninfer::ops::detail::gated_delta_net::chunked::prepare_wy_wu {
 
-using ninfer::ops::mma_tf32;
 using ninfer::ops::Cache;
 using ninfer::ops::cp_async;
 using ninfer::ops::cp_commit;
 using ninfer::ops::cp_wait;
-using ninfer::ops::ldmatrix_x2;
-using ninfer::ops::ldmatrix_x4;
-using ninfer::ops::mma_bf16;
-using ninfer::ops::smem_addr;
 
 static_assert(kChunkSize == 64, "stage_prepare_wy_wu: kChunkSize must be 64 (kernel hard-codes "
                                 "BT=64 = 4 * BC=16)");
@@ -76,14 +72,14 @@ struct kernel_dims {
 
 template <int STRIDE>
 struct Bf16SmemTile {
-    __nv_bfloat16* __restrict__ base;
+    __hip_bfloat16* __restrict__ base;
     static_assert(STRIDE == 32 || STRIDE == 64);
 
     __device__ __forceinline__ int swizzled_col(int row, int col) const {
         return col ^ ((row & (STRIDE / 8 - 1)) << 3);
     }
 
-    __device__ __forceinline__ __nv_bfloat16* ptr(int row, int col) const {
+    __device__ __forceinline__ __hip_bfloat16* ptr(int row, int col) const {
         return base + row * STRIDE + swizzled_col(row, col);
     }
 };
@@ -116,6 +112,9 @@ scatter_frag_to_scr(const float frag[8], float* __restrict__ scr_smem, int warp,
 
 // 16x16x16 mma: A from raw row-major scratch (stride SCR_STRIDE),
 // B from swizzled M_view at offset (M_row_off, M_col_off).
+// Scalar: D += A_buf(16x16 raw) @ M[block]. Each lane owns its row-pair /
+// col-pair output element and contracts the full 16-wide A/M dimension by
+// reading shared memory (mma_tf32 has no gfx1151 fp32 WMMA counterpart).
 __device__ __forceinline__ void mma16_raw_x_swiz(float D[8], int lane,
                                                  const float* __restrict__ A_buf,
                                                  SmemTile<BT> M_view, int M_row_off,
@@ -123,43 +122,40 @@ __device__ __forceinline__ void mma16_raw_x_swiz(float D[8], int lane,
     const int lane_g = lane >> 2;
     const int lane_t = lane & 3;
 #pragma unroll
-    for (int kt = 0; kt < 2; ++kt) {
-        const int k_off = kt * MMA_K;
-        const float a0  = A_buf[lane_g * SCR_STRIDE + (k_off + lane_t)];
-        const float a1  = A_buf[(lane_g + 8) * SCR_STRIDE + (k_off + lane_t)];
-        const float a2  = A_buf[lane_g * SCR_STRIDE + (k_off + lane_t + 4)];
-        const float a3  = A_buf[(lane_g + 8) * SCR_STRIDE + (k_off + lane_t + 4)];
+    for (int nt = 0; nt < 2; ++nt) {
 #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
-            const int n_off = nt * MMA_N;
-            const float b0  = M_view.at(M_row_off + k_off + lane_t, M_col_off + n_off + lane_g);
-            const float b1  = M_view.at(M_row_off + k_off + lane_t + 4, M_col_off + n_off + lane_g);
-            mma_tf32(D[nt * 4 + 0], D[nt * 4 + 1], D[nt * 4 + 2], D[nt * 4 + 3], a0, a1, a2, a3, b0,
-                     b1);
+        for (int e = 0; e < 4; ++e) {
+            const int row = lane_g + (e >= 2 ? 8 : 0);
+            const int ocol = nt * MMA_N + 2 * lane_t + (e & 1);
+            float acc      = D[nt * 4 + e];
+#pragma unroll
+            for (int k = 0; k < 16; ++k) {
+                acc += A_buf[row * SCR_STRIDE + k] * M_view.at(M_row_off + k, M_col_off + ocol);
+            }
+            D[nt * 4 + e] = acc;
         }
     }
 }
 
 // 16x16x16 mma: A from swizzled M_view, B from raw row-major scratch.
+// Scalar: D += M[block] @ B_buf(16x16 raw); see mma16_raw_x_swiz.
 __device__ __forceinline__ void mma16_swiz_x_raw(float D[8], int lane, SmemTile<BT> M_view,
                                                  int M_row_off, int M_col_off,
                                                  const float* __restrict__ B_buf) {
     const int lane_g = lane >> 2;
     const int lane_t = lane & 3;
 #pragma unroll
-    for (int kt = 0; kt < 2; ++kt) {
-        const int k_off = kt * MMA_K;
-        const float a0  = M_view.at(M_row_off + lane_g, M_col_off + k_off + lane_t);
-        const float a1  = M_view.at(M_row_off + lane_g + 8, M_col_off + k_off + lane_t);
-        const float a2  = M_view.at(M_row_off + lane_g, M_col_off + k_off + lane_t + 4);
-        const float a3  = M_view.at(M_row_off + lane_g + 8, M_col_off + k_off + lane_t + 4);
+    for (int nt = 0; nt < 2; ++nt) {
 #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
-            const int n_off = nt * MMA_N;
-            const float b0  = B_buf[(k_off + lane_t) * SCR_STRIDE + (n_off + lane_g)];
-            const float b1  = B_buf[(k_off + lane_t + 4) * SCR_STRIDE + (n_off + lane_g)];
-            mma_tf32(D[nt * 4 + 0], D[nt * 4 + 1], D[nt * 4 + 2], D[nt * 4 + 3], a0, a1, a2, a3, b0,
-                     b1);
+        for (int e = 0; e < 4; ++e) {
+            const int orow = M_row_off + lane_g + (e >= 2 ? 8 : 0);
+            const int ocol = nt * MMA_N + 2 * lane_t + (e & 1);
+            float acc      = D[nt * 4 + e];
+#pragma unroll
+            for (int k = 0; k < 16; ++k) {
+                acc += M_view.at(orow, M_col_off + k) * B_buf[k * SCR_STRIDE + ocol];
+            }
+            D[nt * 4 + e] = acc;
         }
     }
 }
@@ -233,7 +229,7 @@ __device__ __forceinline__ void solve_diag_block(int lane, SmemTile<BT> M_view) 
 
 template <int WU_PANEL_COLS, int BLOCK_THREADS>
 __device__ __forceinline__ void
-load_scaled_wu_panel(SmemTile<WU_PANEL_COLS> panel, const __nv_bfloat16* __restrict__ input_row0,
+load_scaled_wu_panel(SmemTile<WU_PANEL_COLS> panel, const __hip_bfloat16* __restrict__ input_row0,
                      std::int64_t input_row_stride, const float* __restrict__ scale, int panel_col,
                      int tid) {
     constexpr int VEC_PER_ROW = WU_PANEL_COLS / 4;
@@ -272,8 +268,8 @@ load_scaled_wu_panel_from_smem(SmemTile<WU_PANEL_COLS> panel, Bf16SmemTile<WU_PA
 template <bool InterleaveOutput, int WU_PANEL_COLS, int BLOCK_WARPS>
 __device__ __forceinline__ void
 compute_store_wu_panel(SmemTile<BT> T_view, SmemTile<WU_PANEL_COLS> panel,
-                       __nv_bfloat16* __restrict__ output_smem,
-                       __nv_bfloat16* __restrict__ output_row0, std::int64_t output_row_stride,
+                       __hip_bfloat16* __restrict__ output_smem,
+                       __hip_bfloat16* __restrict__ output_row0, std::int64_t output_row_stride,
                        int panel_col, int warp, int lane) {
     static_assert(BLOCK_WARPS == 4 || BLOCK_WARPS == 8);
     constexpr int WARPS_PER_ROW   = BLOCK_WARPS / N_SUB;
@@ -288,29 +284,26 @@ compute_store_wu_panel(SmemTile<BT> T_view, SmemTile<WU_PANEL_COLS> panel,
     const int row_g1         = row_g0 + 8;
     const int col_pair       = lane_t << 1;
 
+    // Scalar U/W panel: D = T_inv @ panel over the full 64-token contraction.
+    // Each lane owns (row pair, col pair) output elements and reads T_inv and
+    // the pre-scaled FP32 panel directly from shared memory.
     float D[WU_N_TILES][4] = {};
 #pragma unroll
-    for (int k_tile = 0; k_tile < N_K_TILES; ++k_tile) {
-        const int k_off  = k_tile * MMA_K;
-        const int col_t0 = k_off + lane_t;
-        const int col_t1 = col_t0 + 4;
-        const float a0   = T_view.at(row_g0, col_t0);
-        const float a1   = T_view.at(row_g1, col_t0);
-        const float a2   = T_view.at(row_g0, col_t1);
-        const float a3   = T_view.at(row_g1, col_t1);
-
-        const int row_t0 = k_off + lane_t;
-        const int row_t1 = row_t0 + 4;
+    for (int n = 0; n < WU_N_TILES; ++n) {
 #pragma unroll
-        for (int n = 0; n < WU_N_TILES; ++n) {
-            const int col  = warp_panel_col + n * MMA_N + lane_g;
-            const float b0 = panel.at(row_t0, col);
-            const float b1 = panel.at(row_t1, col);
-            mma_tf32(D[n][0], D[n][1], D[n][2], D[n][3], a0, a1, a2, a3, b0, b1);
+        for (int e = 0; e < 4; ++e) {
+            const int row = row_tile * MMA_M + lane_g + (e >= 2 ? 8 : 0);
+            const int col = warp_panel_col + n * MMA_N + 2 * lane_t + (e & 1);
+            float acc     = D[n][e];
+#pragma unroll
+            for (int k = 0; k < BT; ++k) {
+                acc += T_view.at(row, k) * panel.at(k, col);
+            }
+            D[n][e] = acc;
         }
     }
 
-    __nv_bfloat16* const warp_output = output_smem + warp * MMA_M * WARP_PANEL_COLS;
+    __hip_bfloat16* const warp_output = output_smem + warp * MMA_M * WARP_PANEL_COLS;
 #pragma unroll
     for (int n = 0; n < WU_N_TILES; ++n) {
         const int col = n * MMA_N + col_pair;
@@ -352,9 +345,9 @@ compute_store_wu_panel(SmemTile<BT> T_view, SmemTile<WU_PANEL_COLS> panel,
 
 template <int K_PANEL_COLS, int WU_PANEL_COLS, int BLOCK_WARPS>
 __global__ void
-prepare_wy_wu_kernel(const __nv_bfloat16* __restrict__ k_in, const __nv_bfloat16* __restrict__ v_in,
+prepare_wy_wu_kernel(const __hip_bfloat16* __restrict__ k_in, const __hip_bfloat16* __restrict__ v_in,
                      const float* __restrict__ g_in, const float* __restrict__ beta_in,
-                     __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ U,
+                     __hip_bfloat16* __restrict__ W, __hip_bfloat16* __restrict__ U,
                      float* __restrict__ g_cumsum_out, head_map qk_map) {
     static_assert(BLOCK_WARPS == 4 || BLOCK_WARPS == 8);
     static_assert(BLOCK_WARPS % N_SUB == 0);
@@ -368,14 +361,14 @@ prepare_wy_wu_kernel(const __nv_bfloat16* __restrict__ k_in, const __nv_bfloat16
     extern __shared__ float smem[];
     float* const T_inv_smem = smem;
     float* const stage_smem = smem + dims::T_inv_floats;
-    auto* const output_smem = reinterpret_cast<__nv_bfloat16*>(stage_smem + dims::stage_floats);
+    auto* const output_smem = reinterpret_cast<__hip_bfloat16*>(stage_smem + dims::stage_floats);
     float* const g_smem     = stage_smem + dims::stage_floats + dims::output_stage_floats;
     float* const beta_smem  = g_smem + BT;
     float* const bg_smem    = beta_smem + BT;
 
     // stage_smem aliases BF16 K (WY-B), FP32 Schur scratch (WY-D), and one
     // pre-scaled FP32 V/K panel (WU). All handovers are block-barrier guarded.
-    auto* const K_smem    = reinterpret_cast<__nv_bfloat16*>(stage_smem);
+    auto* const K_smem    = reinterpret_cast<__hip_bfloat16*>(stage_smem);
     float* const scr_smem = stage_smem;
 
     SmemTile<BT> M_view{T_inv_smem};
@@ -426,11 +419,11 @@ prepare_wy_wu_kernel(const __nv_bfloat16* __restrict__ k_in, const __nv_bfloat16
         float partial = a + bv;
 #pragma unroll
         for (int o = 1; o < ninfer::ops::kWarpSize; o <<= 1) {
-            const float n = __shfl_up_sync(0xffffffffu, partial, o);
+            const float n = __shfl_up_sync(0xffffffffffffffffull, partial, o);
             if (lane >= o) partial += n;
         }
         // Inclusive -> exclusive shift: lane 0's prefix is 0.
-        const float prev_inc  = __shfl_up_sync(0xffffffffu, partial, 1);
+        const float prev_inc  = __shfl_up_sync(0xffffffffffffffffull, partial, 1);
         const float ex_prefix = (lane == 0) ? 0.0f : prev_inc;
 
         const float c0 = ex_prefix + a;
@@ -455,31 +448,36 @@ prepare_wy_wu_kernel(const __nv_bfloat16* __restrict__ k_in, const __nv_bfloat16
     constexpr int K_VECS_PER_ROW = K_PANEL_COLS / 8;
     constexpr int K_STAGE_VECS   = BT * K_VECS_PER_ROW;
 
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int b_rin    = lane & 7;
-    const int b_koff   = ((lane >> 3) & 1) << 3;
-
+    // Scalar bf16 KKT: A_reg[j_sub] = K[row-block] @ K[col-block]^T for the
+    // warp's owned columns (lower-triangular strip). Each lane accumulates the
+    // (token, token) KKT element it stores, reading the BF16 K operand directly
+    // from shared memory over the panel's state-dim window.
     auto kkt_strip = [&]<int N_OWNED>() {
+        const int r_g0 = warp * BC + lane_g;
+        const int r_g1 = r_g0 + 8;
 #pragma unroll
         for (int k_tile = 0; k_tile < dims::K_TILES_PER_PANEL; ++k_tile) {
             const int k_off = k_tile * BF16_MMA_K;
-            unsigned af[4];
-            ldmatrix_x4(af[0], af[1], af[2], af[3],
-                        smem_addr(K_view.ptr(warp * BC + a_rowoff, k_off + a_coloff)));
-
 #pragma unroll
-            for (int j_sub = 0; j_sub < N_OWNED; ++j_sub) {
+            for (int dk = 0; dk < BF16_MMA_K; ++dk) {
+                const int d    = k_off + dk;
+                const float k0 = __bfloat162float(*K_view.ptr(r_g0, d));
+                const float k1 = __bfloat162float(*K_view.ptr(r_g1, d));
 #pragma unroll
-                for (int n_tile = 0; n_tile < 2; ++n_tile) {
-                    const int row_b = j_sub * BC + n_tile * MMA_N + b_rin;
-                    unsigned bf[2];
-                    ldmatrix_x2(bf[0], bf[1], smem_addr(K_view.ptr(row_b, k_off + b_koff)));
-                    mma_bf16(A_reg[j_sub][n_tile * 4 + 0], A_reg[j_sub][n_tile * 4 + 1],
-                             A_reg[j_sub][n_tile * 4 + 2], A_reg[j_sub][n_tile * 4 + 3], af[0],
-                             af[1], af[2], af[3], bf[0], bf[1]);
+                for (int j_sub = 0; j_sub < N_OWNED; ++j_sub) {
+                    const int c0 = j_sub * BC + 2 * lane_t;
+                    const float kc0 = __bfloat162float(*K_view.ptr(c0, d));
+                    const float kc1 = __bfloat162float(*K_view.ptr(c0 + 1, d));
+                    const float kc2 = __bfloat162float(*K_view.ptr(c0 + 8, d));
+                    const float kc3 = __bfloat162float(*K_view.ptr(c0 + 9, d));
+                    A_reg[j_sub][0] += k0 * kc0;
+                    A_reg[j_sub][1] += k0 * kc1;
+                    A_reg[j_sub][2] += k1 * kc0;
+                    A_reg[j_sub][3] += k1 * kc1;
+                    A_reg[j_sub][4] += k0 * kc2;
+                    A_reg[j_sub][5] += k0 * kc3;
+                    A_reg[j_sub][6] += k1 * kc2;
+                    A_reg[j_sub][7] += k1 * kc3;
                 }
             }
         }
@@ -493,7 +491,7 @@ prepare_wy_wu_kernel(const __nv_bfloat16* __restrict__ k_in, const __nv_bfloat16
         for (int v = tid; v < K_STAGE_VECS; v += BLOCK_THREADS) {
             const int row            = v / K_VECS_PER_ROW;
             const int col8           = (v - row * K_VECS_PER_ROW) * 8;
-            const __nv_bfloat16* src = k_in + k_base + (int64_t)row * k_stride_t + panel_col + col8;
+            const __hip_bfloat16* src = k_in + k_base + (int64_t)row * k_stride_t + panel_col + col8;
             cp_async<16, Cache::cg>(K_view.ptr(row, col8), src);
         }
         cp_commit();

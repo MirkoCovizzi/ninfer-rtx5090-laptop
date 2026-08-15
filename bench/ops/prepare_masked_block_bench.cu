@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Public-Op benchmark for the exact anchor-and-mask block transform.
 
 #include "ninfer/ops/prepare_masked_block.h"
@@ -5,8 +6,8 @@
 #include "core/device.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 
 #include <cerrno>
 #include <cstdint>
@@ -154,12 +155,12 @@ public:
         const std::int32_t anchor = 42;
         const std::int32_t length = 4096;
         const std::int32_t valid  = block_size;
-        CUDA_CHECK(cudaMemcpy(anchor_.p, &anchor, sizeof(anchor), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(length_.p, &length, sizeof(length), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(valid_.p, &valid, sizeof(valid), cudaMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(anchor_.p, &anchor, sizeof(anchor), hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(length_.p, &length, sizeof(length), hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(valid_.p, &valid, sizeof(valid), hipMemcpyHostToDevice));
     }
 
-    void launch(cudaStream_t stream) {
+    void launch(hipStream_t stream) {
         ops::prepare_masked_block(anchor_tensor_, length_tensor_, valid_tensor_, kMaskId,
                                   ids_tensor_, positions_tensor_, stream);
     }
@@ -185,10 +186,10 @@ const char* execution_name(Execution execution) {
 const char* cache_name(CacheState cache) { return cache == CacheState::Cold ? "cold" : "warm"; }
 
 bench::ColdTiming measure(Case& data, Execution execution, CacheState cache,
-                          bench::TimedGraph* graph, DeviceBuffer& flush, cudaStream_t stream,
+                          bench::TimedGraph* graph, DeviceBuffer& flush, hipStream_t stream,
                           int warmup, int repeat) {
     if (execution == Execution::Eager) {
-        const auto launch = [&](cudaStream_t launch_stream) { data.launch(launch_stream); };
+        const auto launch = [&](hipStream_t launch_stream) { data.launch(launch_stream); };
         return cache == CacheState::Cold
                    ? bench::measure_cold_launch(launch, flush, stream, warmup, repeat)
                    : bench::measure_launch(launch, stream, warmup, repeat);
@@ -224,33 +225,33 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
     }
 }
 
-void profile(Case& data, const Options& options, DeviceBuffer& flush, cudaStream_t stream) {
+void profile(Case& data, const Options& options, DeviceBuffer& flush, hipStream_t stream) {
     const Execution execution = options.execution;
     const CacheState cache = options.cache == CacheMode::Cold ? CacheState::Cold : CacheState::Warm;
     bench::TimedGraph graph;
     if (execution == Execution::Graph) {
         data.launch(stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        graph.capture(stream, [&](cudaStream_t launch_stream) { data.launch(launch_stream); });
+        HIP_CHECK(hipStreamSynchronize(stream));
+        graph.capture(stream, [&](hipStream_t launch_stream) { data.launch(launch_stream); });
         for (int index = 0; index < options.warmup; ++index) { graph.launch(stream); }
     } else {
         for (int index = 0; index < options.warmup; ++index) { data.launch(stream); }
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
     if (cache == CacheState::Cold) {
         bench::flush_l2(flush, stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
     }
     std::printf("PROFILE entry=prepare_masked_block dispatch=public execution=%s cache=%s\n",
                 execution_name(execution), cache_name(cache));
     std::fflush(stdout);
-    CUDA_CHECK(cudaProfilerStart());
+    HIP_CHECK(hipProfilerStart());
     if (execution == Execution::Graph)
         graph.launch(stream);
     else
         data.launch(stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaProfilerStop());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipProfilerStop());
 }
 
 } // namespace
@@ -258,19 +259,19 @@ void profile(Case& data, const Options& options, DeviceBuffer& flush, cudaStream
 int main(int argc, char** argv) {
     try {
         int devices = 0;
-        if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+        if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
             std::printf("SKIP: no usable CUDA device\n");
             return 0;
         }
         const Options options = parse_options(argc, argv);
-        cudaStream_t stream   = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream   = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(kFlushBytes);
 
         if (options.profile) {
             Case data(options.block_sizes.front());
             profile(data, options, flush, stream);
-            CUDA_CHECK(cudaStreamDestroy(stream));
+            HIP_CHECK(hipStreamDestroy(stream));
             return 0;
         }
 
@@ -280,9 +281,9 @@ int main(int argc, char** argv) {
             bench::TimedGraph graph;
             if (options.execution != Execution::Eager) {
                 data.launch(stream);
-                CUDA_CHECK(cudaStreamSynchronize(stream));
+                HIP_CHECK(hipStreamSynchronize(stream));
                 graph.capture(stream,
-                              [&](cudaStream_t launch_stream) { data.launch(launch_stream); });
+                              [&](hipStream_t launch_stream) { data.launch(launch_stream); });
             }
             for (const Execution execution : {Execution::Eager, Execution::Graph}) {
                 if ((options.execution == Execution::Eager && execution != Execution::Eager) ||
@@ -304,7 +305,7 @@ int main(int argc, char** argv) {
             }
         }
         write_csv(options, results);
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_prepare_masked_block_bench: %s\n", error.what());

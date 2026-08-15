@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Public-contract qualification for sample().
 //
 // The deterministic branch is checked exactly against an independent CPU
@@ -178,7 +179,7 @@ RunResult run_batch(const std::vector<float>& logits, int physical_rows, int tok
     ops::sample(logits_tensor, out_tensor, token_domain,
                 static_cast<const ops::SamplingConfig*>(device_configs.p), positions_tensor,
                 purpose, workspace, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     RunResult result;
     result.tokens = from_device<int>(device_out.data(), static_cast<std::size_t>(batch));
@@ -260,7 +261,7 @@ RunResult run_repeated(const std::vector<float>& column, int token_domain, int t
                     static_cast<const ops::SamplingConfig*>(device_configs.p), positions_tensor,
                     purpose, workspace, nullptr);
     }
-    cuda_synchronize();
+    hip_synchronize();
 
     RunResult result;
     result.tokens = from_device<int>(collected.data(), static_cast<std::size_t>(total));
@@ -582,7 +583,7 @@ int workspace_route_boundary_contract() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

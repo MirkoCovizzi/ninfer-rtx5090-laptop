@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Exact-domain RoPE benchmark for Qwen3.6 Text and Vision geometries.
 // Examples:
 //   ./ninfer_rope_bench --text --geometry dflash --axes 1 \
@@ -11,7 +12,7 @@
 #include "ninfer_bench_common.h"
 #include "ops/kernel/rope.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -57,7 +58,7 @@ std::vector<int> parse_csv(const char* value) {
 
 DeviceBuffer copy_positions(const std::vector<std::int32_t>& host) {
     DeviceBuffer device(host.size() * sizeof(std::int32_t));
-    cudaMemcpy(device.p, host.data(), device.bytes, cudaMemcpyHostToDevice);
+    hipMemcpy(device.p, host.data(), device.bytes, hipMemcpyHostToDevice);
     return device;
 }
 
@@ -115,7 +116,7 @@ DeviceBuffer make_vision_positions(int patches) {
     return copy_positions(host);
 }
 
-__device__ __forceinline__ void copy_bf16x8(__nv_bfloat16* data, std::int64_t index) {
+__device__ __forceinline__ void copy_bf16x8(__hip_bfloat16* data, std::int64_t index) {
     void* address = data + index;
     unsigned int x, y, z, w;
     asm volatile("ld.global.v4.u32 {%0, %1, %2, %3}, [%4];"
@@ -130,7 +131,7 @@ __device__ __forceinline__ void copy_bf16x8(__nv_bfloat16* data, std::int64_t in
 
 template <ops::RopeKernelMode Mode, int HeadDim, int RotaryDim, int QHeads, int KHeads>
 __global__ void
-rope_payload_control_kernel(const std::int32_t* positions, __nv_bfloat16* q, __nv_bfloat16* k,
+rope_payload_control_kernel(const std::int32_t* positions, __hip_bfloat16* q, __hip_bfloat16* k,
                             int tokens, std::int64_t q_token_stride, std::int64_t k_token_stride) {
     const int token = static_cast<int>(blockIdx.x);
     if (token >= tokens) { return; }
@@ -157,7 +158,7 @@ rope_payload_control_kernel(const std::int32_t* positions, __nv_bfloat16* q, __n
     for (int combined_head = warp; combined_head < QHeads + KHeads; combined_head += block_warps) {
         const bool is_q             = combined_head < QHeads;
         const int head              = is_q ? combined_head : combined_head - QHeads;
-        __nv_bfloat16* data         = is_q ? q : k;
+        __hip_bfloat16* data         = is_q ? q : k;
         const std::int64_t stride_t = is_q ? q_token_stride : k_token_stride;
         const std::int64_t base =
             static_cast<std::int64_t>(token) * stride_t + static_cast<std::int64_t>(head) * HeadDim;
@@ -169,8 +170,8 @@ rope_payload_control_kernel(const std::int32_t* positions, __nv_bfloat16* q, __n
 
 template <ops::RopeKernelMode Mode, int HeadDim, int RotaryDim, int QHeads, int KHeads,
           int HeadsPerBlock>
-__global__ void rope_split_payload_control_kernel(const std::int32_t* positions, __nv_bfloat16* q,
-                                                  __nv_bfloat16* k, int tokens,
+__global__ void rope_split_payload_control_kernel(const std::int32_t* positions, __hip_bfloat16* q,
+                                                  __hip_bfloat16* k, int tokens,
                                                   std::int64_t q_token_stride,
                                                   std::int64_t k_token_stride) {
     constexpr int kHalf       = RotaryDim / 2;
@@ -200,7 +201,7 @@ __global__ void rope_split_payload_control_kernel(const std::int32_t* positions,
     if (local_head >= HeadsPerBlock || combined_head >= QHeads + KHeads) { return; }
     const bool is_q             = combined_head < QHeads;
     const int head              = is_q ? combined_head : combined_head - QHeads;
-    __nv_bfloat16* data         = is_q ? q : k;
+    __hip_bfloat16* data         = is_q ? q : k;
     const std::int64_t stride_t = is_q ? q_token_stride : k_token_stride;
     const std::int64_t base =
         static_cast<std::int64_t>(token) * stride_t + static_cast<std::int64_t>(head) * HeadDim;
@@ -226,42 +227,42 @@ int production_text_block(int tokens) {
 }
 
 template <int QHeads, int KHeads>
-void launch_text_control(const Tensor& positions, Tensor& q, Tensor& k, cudaStream_t stream) {
+void launch_text_control(const Tensor& positions, Tensor& q, Tensor& k, hipStream_t stream) {
     const int tokens = q.ne[2];
     const int block  = production_text_block<QHeads, KHeads>(tokens);
     if (positions.ne[1] == 1) {
         rope_payload_control_kernel<ops::RopeKernelMode::Text1D, kTextHeadDim, kTextRotaryDim,
                                     QHeads, KHeads><<<tokens, block, 0, stream>>>(
-            static_cast<const std::int32_t*>(positions.data), static_cast<__nv_bfloat16*>(q.data),
-            static_cast<__nv_bfloat16*>(k.data), tokens,
-            q.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
-            k.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)));
+            static_cast<const std::int32_t*>(positions.data), static_cast<__hip_bfloat16*>(q.data),
+            static_cast<__hip_bfloat16*>(k.data), tokens,
+            q.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)),
+            k.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)));
     } else {
         rope_payload_control_kernel<ops::RopeKernelMode::TextMrope, kTextHeadDim, kTextRotaryDim,
                                     QHeads, KHeads><<<tokens, block, 0, stream>>>(
-            static_cast<const std::int32_t*>(positions.data), static_cast<__nv_bfloat16*>(q.data),
-            static_cast<__nv_bfloat16*>(k.data), tokens,
-            q.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
-            k.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)));
+            static_cast<const std::int32_t*>(positions.data), static_cast<__hip_bfloat16*>(q.data),
+            static_cast<__hip_bfloat16*>(k.data), tokens,
+            q.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)),
+            k.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)));
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <ops::RopeKernelMode Mode, int QHeads, int KHeads>
 void launch_text_candidate_mode(const Tensor& positions, Tensor& q, Tensor& k, int block,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     const int tokens = q.ne[2];
     ops::rope_fixed_kernel<Mode, QHeads, KHeads><<<tokens, block, 0, stream>>>(
-        static_cast<const std::int32_t*>(positions.data), static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data), tokens,
-        q.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
-        k.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)));
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<const std::int32_t*>(positions.data), static_cast<__hip_bfloat16*>(q.data),
+        static_cast<__hip_bfloat16*>(k.data), tokens,
+        q.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)),
+        k.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)));
+    HIP_CHECK(hipGetLastError());
 }
 
 template <int QHeads, int KHeads>
 void launch_text_candidate(const Tensor& positions, Tensor& q, Tensor& k, int block,
-                           cudaStream_t stream) {
+                           hipStream_t stream) {
     if (positions.ne[1] == 1) {
         launch_text_candidate_mode<ops::RopeKernelMode::Text1D, QHeads, KHeads>(positions, q, k,
                                                                                 block, stream);
@@ -272,33 +273,33 @@ void launch_text_candidate(const Tensor& positions, Tensor& q, Tensor& k, int bl
 }
 
 void launch_dflash_fixed_control(const Tensor& positions, Tensor& q, Tensor& k, int block,
-                                 cudaStream_t stream) {
+                                 hipStream_t stream) {
     const int tokens = q.ne[2];
     rope_payload_control_kernel<ops::RopeKernelMode::DflashText1D, kDflashHeadDim, kDflashRotaryDim,
                                 kDflashQHeads, kDflashKHeads><<<tokens, block, 0, stream>>>(
-        static_cast<const std::int32_t*>(positions.data), static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data), tokens,
-        q.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
-        k.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)));
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<const std::int32_t*>(positions.data), static_cast<__hip_bfloat16*>(q.data),
+        static_cast<__hip_bfloat16*>(k.data), tokens,
+        q.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)),
+        k.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)));
+    HIP_CHECK(hipGetLastError());
 }
 
 template <int HeadsPerBlock>
 void launch_dflash_split_control(const Tensor& positions, Tensor& q, Tensor& k,
-                                 cudaStream_t stream) {
+                                 hipStream_t stream) {
     constexpr int kGroups = (kDflashQHeads + kDflashKHeads + HeadsPerBlock - 1) / HeadsPerBlock;
     constexpr int kBlock  = HeadsPerBlock * 32;
     rope_split_payload_control_kernel<ops::RopeKernelMode::DflashText1D, kDflashHeadDim,
                                       kDflashRotaryDim, kDflashQHeads, kDflashKHeads, HeadsPerBlock>
         <<<q.ne[2] * kGroups, kBlock, 0, stream>>>(
-            static_cast<const std::int32_t*>(positions.data), static_cast<__nv_bfloat16*>(q.data),
-            static_cast<__nv_bfloat16*>(k.data), q.ne[2],
-            q.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
-            k.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)));
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const std::int32_t*>(positions.data), static_cast<__hip_bfloat16*>(q.data),
+            static_cast<__hip_bfloat16*>(k.data), q.ne[2],
+            q.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)),
+            k.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)));
+    HIP_CHECK(hipGetLastError());
 }
 
-void launch_dflash_control(const Tensor& positions, Tensor& q, Tensor& k, cudaStream_t stream) {
+void launch_dflash_control(const Tensor& positions, Tensor& q, Tensor& k, hipStream_t stream) {
     if (q.ne[2] <= 16) {
         launch_dflash_split_control<5>(positions, q, k, stream);
     } else if (q.ne[2] <= 400) {
@@ -315,27 +316,27 @@ std::string dflash_production_route(int tokens) {
 }
 
 void launch_dflash_candidate(const Tensor& positions, Tensor& q, Tensor& k, int block,
-                             cudaStream_t stream) {
+                             hipStream_t stream) {
     launch_text_candidate_mode<ops::RopeKernelMode::DflashText1D, kDflashQHeads, kDflashKHeads>(
         positions, q, k, block, stream);
 }
 
 template <int HeadsPerBlock>
 void launch_dflash_split_candidate(const Tensor& positions, Tensor& q, Tensor& k,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     constexpr int kGroups = (kDflashQHeads + kDflashKHeads + HeadsPerBlock - 1) / HeadsPerBlock;
     constexpr int kBlock  = HeadsPerBlock <= 2 ? 64 : HeadsPerBlock * 32;
     ops::rope_fixed_split_kernel<ops::RopeKernelMode::DflashText1D, kDflashQHeads, kDflashKHeads,
                                  HeadsPerBlock><<<q.ne[2] * kGroups, kBlock, 0, stream>>>(
-        static_cast<const std::int32_t*>(positions.data), static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data), q.ne[2],
-        q.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
-        k.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)));
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<const std::int32_t*>(positions.data), static_cast<__hip_bfloat16*>(q.data),
+        static_cast<__hip_bfloat16*>(k.data), q.ne[2],
+        q.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)),
+        k.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)));
+    HIP_CHECK(hipGetLastError());
 }
 
 void launch_dflash_split_candidate(const Tensor& positions, Tensor& q, Tensor& k,
-                                   int heads_per_block, cudaStream_t stream) {
+                                   int heads_per_block, hipStream_t stream) {
     switch (heads_per_block) {
     case 1:
         launch_dflash_split_candidate<1>(positions, q, k, stream);
@@ -371,9 +372,9 @@ void run_text_single(int tokens, int axes, bool control, const char* geometry, c
     Tensor tpos(positions.p, DType::I32, {tokens, axes});
     Tensor tx(x.p, DType::BF16, {kTextHeadDim, Heads, tokens});
     const double bytes =
-        2.0 * static_cast<double>(Heads * kTextRotaryDim) * tokens * sizeof(__nv_bfloat16);
+        2.0 * static_cast<double>(Heads * kTextRotaryDim) * tokens * sizeof(__hip_bfloat16);
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 launch_text_control<Heads, 0>(tpos, tx, tx, stream);
             } else {
@@ -388,15 +389,15 @@ void run_text_single(int tokens, int axes, bool control, const char* geometry, c
     print_result(label.c_str(), result);
 }
 
-void launch_vision_control(const Tensor& positions, Tensor& q, Tensor& k, cudaStream_t stream) {
+void launch_vision_control(const Tensor& positions, Tensor& q, Tensor& k, hipStream_t stream) {
     constexpr int block = 128;
     rope_payload_control_kernel<ops::RopeKernelMode::Vision2D, kVisionHeadDim, kVisionHeadDim,
                                 kVisionHeads, kVisionHeads><<<q.ne[2], block, 0, stream>>>(
-        static_cast<const std::int32_t*>(positions.data), static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data), q.ne[2],
-        q.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
-        k.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)));
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<const std::int32_t*>(positions.data), static_cast<__hip_bfloat16*>(q.data),
+        static_cast<__hip_bfloat16*>(k.data), q.ne[2],
+        q.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)),
+        k.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)));
+    HIP_CHECK(hipGetLastError());
 }
 
 template <int QHeads, int KHeads>
@@ -410,9 +411,9 @@ void run_text(int tokens, int axes, bool control, int candidate_block, const cha
     Tensor tq(q.p, DType::BF16, {kTextHeadDim, QHeads, tokens});
     Tensor tk(k.p, DType::BF16, {kTextHeadDim, KHeads, tokens});
     const double bytes = 2.0 * static_cast<double>((QHeads + KHeads) * kTextRotaryDim) * tokens *
-                         sizeof(__nv_bfloat16);
+                         sizeof(__hip_bfloat16);
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 launch_text_control<QHeads, KHeads>(tpos, tq, tk, stream);
             } else if (candidate_block != 0) {
@@ -447,8 +448,8 @@ void run_dflash(int tokens, bool control, int candidate_block, int candidate_hea
     const int block    = candidate_block == 0 ? 160 : candidate_block;
     const double bytes = 2.0 *
                          static_cast<double>((kDflashQHeads + kDflashKHeads) * kDflashRotaryDim) *
-                         tokens * sizeof(__nv_bfloat16);
-    const auto launch = [&](cudaStream_t stream) {
+                         tokens * sizeof(__hip_bfloat16);
+    const auto launch = [&](hipStream_t stream) {
         if (control) {
             launch_dflash_control(tpos, tq, tk, stream);
         } else if (candidate_heads != 0) {
@@ -461,9 +462,9 @@ void run_dflash(int tokens, bool control, int candidate_block, int candidate_hea
     };
     if (profile) {
         for (int warmup = 0; warmup < 20; ++warmup) { launch(nullptr); }
-        CUDA_CHECK(cudaDeviceSynchronize());
+        HIP_CHECK(hipDeviceSynchronize());
         launch(nullptr);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        HIP_CHECK(hipDeviceSynchronize());
         if (candidate_heads != 0) {
             std::printf("profile rope dflash T=%d route=candidate-h%d\n", tokens, candidate_heads);
         } else {
@@ -491,17 +492,17 @@ void run_dflash_single_k(int tokens, bool control) {
     Tensor tpos(positions.p, DType::I32, {tokens});
     Tensor tx(x.p, DType::BF16, {kDflashHeadDim, kDflashKHeads, tokens});
     const double bytes = 2.0 * static_cast<double>(kDflashKHeads * kDflashRotaryDim) * tokens *
-                         sizeof(__nv_bfloat16);
+                         sizeof(__hip_bfloat16);
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 rope_payload_control_kernel<ops::RopeKernelMode::DflashText1D, kDflashHeadDim,
                                             kDflashRotaryDim, kDflashKHeads, 0>
                     <<<tokens, kDflashKHeads * 32, 0, stream>>>(
                         static_cast<const std::int32_t*>(tpos.data),
-                        static_cast<__nv_bfloat16*>(tx.data), nullptr, tokens,
-                        tx.nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16)), 0);
-                CUDA_CHECK(cudaGetLastError());
+                        static_cast<__hip_bfloat16*>(tx.data), nullptr, tokens,
+                        tx.nb[2] / static_cast<std::int64_t>(sizeof(__hip_bfloat16)), 0);
+                HIP_CHECK(hipGetLastError());
             } else {
                 ops::rope(tpos, kDflashRotaryDim, kTextTheta, tx, stream);
             }
@@ -524,9 +525,9 @@ void run_vision(int patches, bool control) {
     tk.data   = static_cast<unsigned char*>(packed.p) + hidden * 2;
     Tensor tpos(positions.p, DType::I32, {patches, 2});
     const double bytes = 2.0 * static_cast<double>(2 * kVisionHeads * kVisionHeadDim) * patches *
-                         sizeof(__nv_bfloat16);
+                         sizeof(__hip_bfloat16);
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 launch_vision_control(tpos, tq, tk, stream);
             } else {
@@ -646,7 +647,7 @@ Options parse_options(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

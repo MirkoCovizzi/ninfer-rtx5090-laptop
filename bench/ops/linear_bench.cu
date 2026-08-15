@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Cold-cache benchmark for the public pure Linear contract.
 //
 // Examples:
@@ -14,9 +15,9 @@
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -169,7 +170,7 @@ struct LinearBenchWeight {
     [[nodiscard]] std::uint64_t model_weight_bytes() const noexcept { return model_bytes; }
 };
 
-__global__ void fill_bf16_kernel(__nv_bfloat16* values, std::uint64_t count) {
+__global__ void fill_bf16_kernel(__hip_bfloat16* values, std::uint64_t count) {
     const std::uint64_t begin  = blockIdx.x * static_cast<std::uint64_t>(blockDim.x) + threadIdx.x;
     const std::uint64_t stride = gridDim.x * static_cast<std::uint64_t>(blockDim.x);
     for (std::uint64_t i = begin; i < count; i += stride) {
@@ -505,10 +506,10 @@ LinearBenchWeight make_weight(QType qtype, std::int32_t n, std::int32_t k) {
     return {std::move(packed.storage), packed.weight, model_bytes};
 }
 
-void fill_activation(DeviceBuffer& buffer, std::uint64_t elements, cudaStream_t stream) {
+void fill_activation(DeviceBuffer& buffer, std::uint64_t elements, hipStream_t stream) {
     fill_bf16_kernel<<<launch_grid(elements), 256, 0, stream>>>(
-        static_cast<__nv_bfloat16*>(buffer.p), elements);
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<__hip_bfloat16*>(buffer.p), elements);
+    HIP_CHECK(hipGetLastError());
 }
 
 std::string join_labels(const std::vector<std::string>& labels) {
@@ -564,7 +565,7 @@ Result make_result(const BenchPoint& point, const LinearBenchWeight& weight,
 }
 
 std::vector<Result> run_group(const PointGroup& group, const Options& opt, DeviceBuffer& flush,
-                              cudaStream_t stream) {
+                              hipStream_t stream) {
     const std::int32_t max_t =
         std::max_element(group.points.begin(), group.points.end(),
                          [](const BenchPoint& a, const BenchPoint& b) { return a.t < b.t; })
@@ -585,8 +586,8 @@ std::vector<Result> run_group(const PointGroup& group, const Options& opt, Devic
         group.qtype, group.n, group.k, group.policy, min_t, max_t);
     DeviceArena workspace(std::max<std::size_t>(workspace_capacity, 256));
     fill_activation(x, x_elements, stream);
-    CUDA_CHECK(cudaMemsetAsync(out.p, 0, out.bytes, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipMemsetAsync(out.p, 0, out.bytes, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<Result> results;
     results.reserve(group.points.size());
@@ -596,7 +597,7 @@ std::vector<Result> run_group(const PointGroup& group, const Options& opt, Devic
     for (const BenchPoint& point : group.points) {
         Tensor activation(x.p, DType::BF16, {group.k, point.t});
         Tensor output(out.p, DType::BF16, {group.n, point.t});
-        const auto launch = [&](cudaStream_t launch_stream) {
+        const auto launch = [&](hipStream_t launch_stream) {
             ops::linear(activation, weight.weight, output, group.policy, workspace, launch_stream);
         };
         const bench::ColdTiming timing =
@@ -617,7 +618,7 @@ std::vector<Result> run_group(const PointGroup& group, const Options& opt, Devic
 }
 
 void run_profile(const BenchPoint& point, const Options& opt, DeviceBuffer& flush,
-                 cudaStream_t stream) {
+                 hipStream_t stream) {
     const std::uint64_t x_elements =
         checked_mul(static_cast<std::uint64_t>(point.k), point.t, "activation allocation");
     const std::uint64_t out_elements =
@@ -629,8 +630,8 @@ void run_profile(const BenchPoint& point, const Options& opt, DeviceBuffer& flus
         point.qtype, point.n, point.k, point.policy, point.t, point.t);
     DeviceArena workspace(std::max<std::size_t>(workspace_capacity, 256));
     fill_activation(x, x_elements, stream);
-    CUDA_CHECK(cudaMemsetAsync(out.p, 0, out.bytes, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipMemsetAsync(out.p, 0, out.bytes, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     Tensor activation(x.p, DType::BF16, {point.k, point.t});
     Tensor output(out.p, DType::BF16, {point.n, point.t});
@@ -641,9 +642,9 @@ void run_profile(const BenchPoint& point, const Options& opt, DeviceBuffer& flus
         bench::flush_l2(flush, stream);
         launch();
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
     bench::flush_l2(flush, stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     const std::uint64_t x_bytes     = checked_mul(x_elements, 2, "activation bytes");
     const std::uint64_t out_bytes   = checked_mul(out_elements, 2, "output bytes");
@@ -657,17 +658,17 @@ void run_profile(const BenchPoint& point, const Options& opt, DeviceBuffer& flus
                 static_cast<unsigned long long>(model_bytes), useful_flops);
     std::fflush(stdout);
 
-    CUDA_CHECK(cudaProfilerStart());
+    HIP_CHECK(hipProfilerStart());
     launch();
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaProfilerStop());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipProfilerStop());
 }
 
 void print_header() {
     int device = 0;
-    CUDA_CHECK(cudaGetDevice(&device));
-    cudaDeviceProp properties{};
-    CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
+    HIP_CHECK(hipGetDevice(&device));
+    hipDeviceProp_t properties{};
+    HIP_CHECK(hipGetDeviceProperties(&properties, device));
     std::printf("# actual_gpu=%s sm=%d%d reference_gpu=RTX_5090\n", properties.name,
                 properties.major, properties.minor);
     std::printf("# dram_spec_gbs=%.1f sustained_read_gbs=%.1f cache=cold\n", kRtx5090DramGBs,
@@ -744,20 +745,20 @@ int main(int argc, char** argv) {
     try {
         const Options opt = parse_args(argc, argv);
         int device_count  = 0;
-        if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
             std::printf("SKIP: no usable CUDA device\n");
             return 0;
         }
 
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(opt.flush_bytes);
         const std::vector<BenchPoint> points = expand_points(opt);
 
         print_header();
         if (opt.profile) {
             run_profile(points.front(), opt, flush, stream);
-            CUDA_CHECK(cudaStreamDestroy(stream));
+            HIP_CHECK(hipStreamDestroy(stream));
             return 0;
         }
 
@@ -769,7 +770,7 @@ int main(int argc, char** argv) {
         }
         print_results(results);
         if (!opt.csv_out.empty()) { write_csv(opt.csv_out, results); }
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_linear_bench: %s\n", error.what());

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/attn_input_proj/w8/w8_attn_input_kernels.h"
 
 #include "core/device.h"
@@ -22,12 +23,12 @@ constexpr int kLastCompanionExactCols = 32;
 using TargetOutput                    = W8SplitOutput4<4096, 512, 4096, 512>;
 using CompanionOutput                 = W8SplitOutput3<4096, 1024, 1024>;
 using TargetLauncher    = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, Tensor&, Tensor&,
-                                cudaStream_t);
+                                hipStream_t);
 using CompanionLauncher = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, Tensor&,
-                                   cudaStream_t);
+                                   hipStream_t);
 
 template <int ActiveCols, int Rows, class Output>
-void launch_output(const Tensor& x, const Weight& weight, Output output, cudaStream_t stream) {
+void launch_output(const Tensor& x, const Weight& weight, Output output, hipStream_t stream) {
     constexpr int TileCols = ActiveCols <= 8    ? 8
                              : ActiveCols <= 16 ? 16
                              : ActiveCols <= 24 ? 24
@@ -38,28 +39,28 @@ void launch_output(const Tensor& x, const Weight& weight, Output output, cudaStr
     using Schedule         = W8SmallTMmaDefaultSchedule<TileCols, ActiveCols>;
     w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule>
         <<<Rows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output);
 }
 
 template <int ActiveCols>
 void launch_target_active_cols(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                               Tensor& k, Tensor& v, cudaStream_t stream) {
+                               Tensor& k, Tensor& v, hipStream_t stream) {
     static_assert((4096 % kRowsPerCta) == 0 && (512 % kRowsPerCta) == 0);
     const TargetOutput output{
-        static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
-        static_cast<__nv_bfloat16*>(gate.data), static_cast<__nv_bfloat16*>(v.data)};
+        static_cast<__hip_bfloat16*>(q.data), static_cast<__hip_bfloat16*>(k.data),
+        static_cast<__hip_bfloat16*>(gate.data), static_cast<__hip_bfloat16*>(v.data)};
     launch_output<ActiveCols, kTargetRows>(x, weight, output, stream);
 }
 
 template <int ActiveCols>
 void launch_companion_active_cols(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k,
-                                  Tensor& v, cudaStream_t stream) {
+                                  Tensor& v, hipStream_t stream) {
     static_assert((4096 % kRowsPerCta) == 0 && (1024 % kRowsPerCta) == 0);
-    const CompanionOutput output{static_cast<__nv_bfloat16*>(q.data),
-                                 static_cast<__nv_bfloat16*>(k.data),
-                                 static_cast<__nv_bfloat16*>(v.data)};
+    const CompanionOutput output{static_cast<__hip_bfloat16*>(q.data),
+                                 static_cast<__hip_bfloat16*>(k.data),
+                                 static_cast<__hip_bfloat16*>(v.data)};
     launch_output<ActiveCols, kCompanionRows>(x, weight, output, stream);
 }
 
@@ -82,28 +83,28 @@ constexpr auto kCompanionLaunchers = make_companion_launchers(
 
 template <int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_target_medium_cols(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                               Tensor& k, Tensor& v, cudaStream_t stream) {
+                               Tensor& k, Tensor& v, hipStream_t stream) {
     static_assert((4096 % kRowsPerCta) == 0 && (512 % kRowsPerCta) == 0);
     const TargetOutput output{
-        static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
-        static_cast<__nv_bfloat16*>(gate.data), static_cast<__nv_bfloat16*>(v.data)};
+        static_cast<__hip_bfloat16*>(q.data), static_cast<__hip_bfloat16*>(k.data),
+        static_cast<__hip_bfloat16*>(gate.data), static_cast<__hip_bfloat16*>(v.data)};
     w8_rowsplit_medium_t_splitk_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
         <<<kTargetRows / kRowsPerCta, KSplits * NGroups * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
 }
 
 template <int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_companion_medium_cols(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k,
-                                  Tensor& v, cudaStream_t stream) {
+                                  Tensor& v, hipStream_t stream) {
     static_assert((4096 % kRowsPerCta) == 0 && (1024 % kRowsPerCta) == 0);
-    const CompanionOutput output{static_cast<__nv_bfloat16*>(q.data),
-                                 static_cast<__nv_bfloat16*>(k.data),
-                                 static_cast<__nv_bfloat16*>(v.data)};
+    const CompanionOutput output{static_cast<__hip_bfloat16*>(q.data),
+                                 static_cast<__hip_bfloat16*>(k.data),
+                                 static_cast<__hip_bfloat16*>(v.data)};
     w8_rowsplit_medium_t_splitk_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
         <<<kCompanionRows / kRowsPerCta, KSplits * NGroups * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
 }
@@ -111,7 +112,7 @@ void launch_companion_medium_cols(const Tensor& x, const Weight& weight, Tensor&
 } // namespace
 
 void w8_attn_input_splitk_mma_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                     Tensor& k, Tensor& v, cudaStream_t stream) {
+                                     Tensor& k, Tensor& v, hipStream_t stream) {
     if (x.ne[1] < kFirstExactCols || x.ne[1] > 64) {
         throw std::invalid_argument("W8 attention input split-K MMA requires T=2..64");
     }
@@ -120,11 +121,11 @@ void w8_attn_input_splitk_mma_launch(const Tensor& x, const Weight& weight, Tens
     } else {
         launch_target_medium_cols<64, 4, 2, 2>(x, weight, q, gate, k, v, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void w8_attn_input_splitk_mma_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k,
-                                     Tensor& v, cudaStream_t stream) {
+                                     Tensor& v, hipStream_t stream) {
     if (x.ne[1] < kFirstExactCols || x.ne[1] > 96) {
         throw std::invalid_argument("W8 companion attention input split-K MMA requires T=2..96");
     }
@@ -137,7 +138,7 @@ void w8_attn_input_splitk_mma_launch(const Tensor& x, const Weight& weight, Tens
     } else {
         launch_companion_medium_cols<96, 2, 4, 3>(x, weight, q, k, v, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

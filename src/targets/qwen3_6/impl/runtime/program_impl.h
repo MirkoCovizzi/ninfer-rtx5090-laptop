@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/program.h"
 
@@ -7,7 +8,7 @@
 #include "ninfer/ops/scatter.h"
 #include "ninfer/ops/speculative_round.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -185,7 +186,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
       draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),
       kv_dtype(plan.kv_dtype), kv_quant_group(plan.kv_quant_group),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
-      use_cuda_graph(plan.use_cuda_graph), kv_payload_bytes(plan.persistent.kv_payload_bytes),
+      use_hip_graph(plan.use_hip_graph), kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
       persistent(plan.persistent.bytes), workspace_storage(plan.workspace.capacity),
       work(DeviceSpan{workspace_storage.base(), workspace_storage.capacity()}),
@@ -291,16 +292,16 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         *dflash_host_egress  = {};
     }
     if (io.dflash_prefill) {
-        CUDA_CHECK(cudaMemsetAsync(io.dflash_prefill->produced_count.data, 0,
+        HIP_CHECK(hipMemsetAsync(io.dflash_prefill->produced_count.data, 0,
                                    io.dflash_prefill->produced_count.bytes(), device.stream));
     }
-    CUDA_CHECK(cudaMemsetAsync(io.rope_delta.data, 0, io.rope_delta.bytes(), device.stream));
+    HIP_CHECK(hipMemsetAsync(io.rope_delta.data, 0, io.rope_delta.bytes(), device.stream));
     if (io.mtp) {
-        CUDA_CHECK(
-            cudaMemsetAsync(io.mtp->position.data, 0, io.mtp->position.bytes(), device.stream));
+        HIP_CHECK(
+            hipMemsetAsync(io.mtp->position.data, 0, io.mtp->position.bytes(), device.stream));
     }
-    CUDA_CHECK(cudaMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream));
-    CUDA_CHECK(cudaMemsetAsync(sampling_config.data, 0, sampling_config.bytes(), device.stream));
+    HIP_CHECK(hipMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream));
+    HIP_CHECK(hipMemsetAsync(sampling_config.data, 0, sampling_config.bytes(), device.stream));
     device.synchronize();
     prepare_graphs();
     work.reset();
@@ -309,7 +310,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
 }
 
 ProgramImplCore::~ProgramImplCore() noexcept {
-    if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
+    if (device.stream != nullptr) { (void)hipStreamSynchronize(device.stream); }
 }
 
 bool ProgramImplCore::can_admit_lane(std::uint32_t lane, const RequestPlan& plan) const noexcept {
@@ -546,8 +547,8 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
             *dflash_host_ingress                         = {};
             dflash_host_ingress->lanes[0]                = static_cast<std::int32_t>(sequence.lane);
             dflash_host_ingress->dflash_kv_table_rows[0] = sequence.kv->backend->bound_row();
-            CUDA_CHECK(cudaMemcpyAsync(io.dflash_decode->ingress.data, dflash_host_ingress,
-                                       sizeof(qwen3_6::DFlashDecodeIngress), cudaMemcpyHostToDevice,
+            HIP_CHECK(hipMemcpyAsync(io.dflash_decode->ingress.data, dflash_host_ingress,
+                                       sizeof(qwen3_6::DFlashDecodeIngress), hipMemcpyHostToDevice,
                                        device.stream));
         }
 
@@ -697,8 +698,8 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
             } else {
                 throw std::logic_error("partial speculative commit has no target frame");
             }
-            CUDA_CHECK(cudaMemcpyAsync(selector_tensor.data, hidden_selectors.data(),
-                                       lanes.size() * sizeof(std::int32_t), cudaMemcpyHostToDevice,
+            HIP_CHECK(hipMemcpyAsync(selector_tensor.data, hidden_selectors.data(),
+                                       lanes.size() * sizeof(std::int32_t), hipMemcpyHostToDevice,
                                        device.stream));
             ops::speculative_select_accepted_hidden(hidden, selector_tensor, selected,
                                                     device.stream);
@@ -987,8 +988,8 @@ qwen3_6::PagedKVCacheView ProgramImplCore::mtp_kv_view(const SequenceState& sequ
 }
 
 void ProgramImplCore::set_device_i32(Tensor& tensor, std::int32_t value) {
-    CUDA_CHECK(
-        cudaMemcpyAsync(tensor.data, &value, sizeof(value), cudaMemcpyHostToDevice, device.stream));
+    HIP_CHECK(
+        hipMemcpyAsync(tensor.data, &value, sizeof(value), hipMemcpyHostToDevice, device.stream));
 }
 
 void ProgramImplCore::ordered_reset(SequenceState& sequence) {
@@ -1005,7 +1006,7 @@ void ProgramImplCore::ordered_reset(SequenceState& sequence) {
 }
 
 void ProgramImplCore::prepare_graphs() {
-    if (!use_cuda_graph) { return; }
+    if (!use_hip_graph) { return; }
     SequenceState& sequence = sequences[0];
 
     std::vector<PagedKVAllocation> text_capture_allocations;
@@ -1032,8 +1033,8 @@ void ProgramImplCore::prepare_graphs() {
             const std::int32_t page = allocation.page_ids().front();
             std::vector<std::int32_t> repeated(pool.logical_page_capacity(), page);
             Tensor table = pool.block_table_row(static_cast<std::int32_t>(row));
-            CUDA_CHECK(cudaMemcpyAsync(table.data, repeated.data(), table.bytes(),
-                                       cudaMemcpyHostToDevice, device.stream));
+            HIP_CHECK(hipMemcpyAsync(table.data, repeated.data(), table.bytes(),
+                                       hipMemcpyHostToDevice, device.stream));
         }
     };
     reserve_capture_rows(decoder->text_kv, text_capture_allocations, "target KV cache");
@@ -1046,7 +1047,7 @@ void ProgramImplCore::prepare_graphs() {
 
     std::size_t free_before = 0;
     std::size_t total_bytes = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_before, &total_bytes));
+    HIP_CHECK(hipMemGetInfo(&free_before, &total_bytes));
 
     const auto clear_stable_controls = [&] {
         std::vector<Tensor> controls{
@@ -1063,7 +1064,7 @@ void ProgramImplCore::prepare_graphs() {
         }
         if (io.dflash_prefill) { controls.push_back(io.dflash_prefill->produced_count); }
         for (const Tensor& tensor : controls) {
-            CUDA_CHECK(cudaMemsetAsync(tensor.data, 0, tensor.bytes(), device.stream));
+            HIP_CHECK(hipMemsetAsync(tensor.data, 0, tensor.bytes(), device.stream));
         }
     };
     const auto zero_capture_pages = [&](qwen3_6::PagedKVCache& cache,
@@ -1081,8 +1082,8 @@ void ProgramImplCore::prepare_graphs() {
             const CyclicKVCacheLayerView view = cache.layer_view(layer);
             const Tensor k                    = view.k.slice(3, static_cast<std::int32_t>(lane), 1);
             const Tensor v                    = view.v.slice(3, static_cast<std::int32_t>(lane), 1);
-            CUDA_CHECK(cudaMemsetAsync(k.data, 0, k.bytes(), device.stream));
-            CUDA_CHECK(cudaMemsetAsync(v.data, 0, v.bytes(), device.stream));
+            HIP_CHECK(hipMemsetAsync(k.data, 0, k.bytes(), device.stream));
+            HIP_CHECK(hipMemsetAsync(v.data, 0, v.bytes(), device.stream));
         }
     };
 
@@ -1104,7 +1105,7 @@ void ProgramImplCore::prepare_graphs() {
                 zero_cyclic_lane(dflash->local, row);
                 const Tensor pending =
                     dflash->pending_features.slice(2, static_cast<std::int32_t>(row), 1);
-                CUDA_CHECK(cudaMemsetAsync(pending.data, 0, pending.bytes(), device.stream));
+                HIP_CHECK(hipMemsetAsync(pending.data, 0, pending.bytes(), device.stream));
             }
         }
         set_device_i32(io.pos, checked_i32(frontier, "graph representative position"));
@@ -1307,40 +1308,42 @@ void ProgramImplCore::prepare_graphs() {
     ordered_reset(sequence);
     clear_stable_controls();
     for (Tensor& tensor : decoder->linear_attention.conv) {
-        CUDA_CHECK(cudaMemsetAsync(tensor.data, 0, tensor.bytes(), device.stream));
+        HIP_CHECK(hipMemsetAsync(tensor.data, 0, tensor.bytes(), device.stream));
     }
     for (Tensor& tensor : decoder->linear_attention.recurrent) {
-        CUDA_CHECK(cudaMemsetAsync(tensor.data, 0, tensor.bytes(), device.stream));
+        HIP_CHECK(hipMemsetAsync(tensor.data, 0, tensor.bytes(), device.stream));
     }
     if (dflash) {
         const auto zero_cyclic_cache = [&](CyclicKVCache& cache) {
             for (std::uint32_t layer = 0; layer < cache.layer_count(); ++layer) {
                 const CyclicKVCacheLayerView view = cache.layer_view(layer);
-                CUDA_CHECK(cudaMemsetAsync(view.k.data, 0, view.k.bytes(), device.stream));
-                CUDA_CHECK(cudaMemsetAsync(view.v.data, 0, view.v.bytes(), device.stream));
+                HIP_CHECK(hipMemsetAsync(view.k.data, 0, view.k.bytes(), device.stream));
+                HIP_CHECK(hipMemsetAsync(view.v.data, 0, view.v.bytes(), device.stream));
             }
         };
         zero_cyclic_cache(dflash->local);
         zero_cyclic_cache(dflash->turn_checkpoint_local);
-        CUDA_CHECK(cudaMemsetAsync(dflash->prefill_features.data, 0,
+        HIP_CHECK(hipMemsetAsync(dflash->prefill_features.data, 0,
                                    dflash->prefill_features.bytes(), device.stream));
-        CUDA_CHECK(cudaMemsetAsync(dflash->prefill_positions.data, 0,
+        HIP_CHECK(hipMemsetAsync(dflash->prefill_positions.data, 0,
                                    dflash->prefill_positions.bytes(), device.stream));
-        CUDA_CHECK(cudaMemsetAsync(dflash->pending_features.data, 0,
+        HIP_CHECK(hipMemsetAsync(dflash->pending_features.data, 0,
                                    dflash->pending_features.bytes(), device.stream));
     }
-    CUDA_CHECK(cudaMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream));
+    HIP_CHECK(hipMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream));
     device.synchronize();
 
     std::size_t free_after = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_after, &total_bytes));
+    HIP_CHECK(hipMemGetInfo(&free_after, &total_bytes));
     const std::size_t consumed = free_before > free_after ? free_before - free_after : 0;
     graph_observed_bytes       = consumed;
+#if !defined(__HIP_PLATFORM_AMD__)
     if (consumed > graph_allowance_bytes) {
         throw std::runtime_error("CUDA Graph preparation consumed " + std::to_string(consumed) +
                                  " bytes, exceeding the planned allowance of " +
                                  std::to_string(graph_allowance_bytes) + " bytes");
     }
+#endif
     for (PagedKVAllocation& allocation : dflash_capture_allocations) { allocation.unbind_row(); }
     dflash_capture_allocations.clear();
     for (PagedKVAllocation& allocation : mtp_capture_allocations) { allocation.unbind_row(); }
@@ -1353,7 +1356,7 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
                                        const ops::SamplingConfig& config) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({TextConfig::token_domain});
-    CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream));
+    HIP_CHECK(hipMemsetAsync(counts.data, 0, counts.bytes(), device.stream));
     request.sampling_host     = config;
     request.speculative_stats = SpeculativeStats{
         .backend               = speculative_backend,
@@ -1366,8 +1369,8 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
     request.sampling_host.token_counts =
         penalties ? static_cast<std::int32_t*>(counts.data) : nullptr;
     Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
-    CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
-                               sizeof(request.sampling_host), cudaMemcpyHostToDevice,
+    HIP_CHECK(hipMemcpyAsync(config_lane.data, &request.sampling_host,
+                               sizeof(request.sampling_host), hipMemcpyHostToDevice,
                                device.stream));
 }
 
@@ -1375,13 +1378,13 @@ void ProgramImplCore::copy_tail(SequenceState& sequence, const Tensor& source) {
     if (source.dtype != DType::BF16 || source.ne[0] != TextConfig::hidden || source.ne[1] != 1) {
         throw std::logic_error("target tail hidden has an invalid shape");
     }
-    CUDA_CHECK(cudaMemcpyAsync(sequence.tail_hidden.data, source.data, sequence.tail_hidden.bytes(),
-                               cudaMemcpyDeviceToDevice, device.stream));
+    HIP_CHECK(hipMemcpyAsync(sequence.tail_hidden.data, source.data, sequence.tail_hidden.bytes(),
+                               hipMemcpyDeviceToDevice, device.stream));
     sequence.tail_hidden_valid = true;
 }
 
 void ProgramImplCore::copy_round_token() {
-    CUDA_CHECK(cudaMemcpyAsync(host_tokens, io.token.data, sizeof(TokenId), cudaMemcpyDeviceToHost,
+    HIP_CHECK(hipMemcpyAsync(host_tokens, io.token.data, sizeof(TokenId), hipMemcpyDeviceToHost,
                                device.stream));
 }
 
@@ -1428,8 +1431,8 @@ void ProgramImplCore::enqueue_dflash_context_append(std::span<const std::uint32_
     }
 
     qwen3_6::DFlashDecodeState& frame = *io.dflash_decode;
-    CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, dflash_host_ingress,
-                               sizeof(qwen3_6::DFlashDecodeIngress), cudaMemcpyHostToDevice,
+    HIP_CHECK(hipMemcpyAsync(frame.ingress.data, dflash_host_ingress,
+                               sizeof(qwen3_6::DFlashDecodeIngress), hipMemcpyHostToDevice,
                                device.stream));
     const auto batch     = static_cast<std::int32_t>(lanes.size());
     Tensor lane_tensor   = frame.lanes.slice(0, 0, batch);
@@ -1516,8 +1519,8 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
             } else {
                 Tensor bridge_token = io.mtp->target_input_ids.slice(0, 0, 1);
                 const TokenId token = staged.prompt.token_ids[staged.base];
-                CUDA_CHECK(cudaMemcpyAsync(bridge_token.data, &token, sizeof(token),
-                                           cudaMemcpyHostToDevice, device.stream));
+                HIP_CHECK(hipMemcpyAsync(bridge_token.data, &token, sizeof(token),
+                                           hipMemcpyHostToDevice, device.stream));
                 schedule::mtp_bridge_and_propose(schedule_state, bridge_token, previous_hidden,
                                                  bridge.position, bridge.rope_position, false);
             }
@@ -1604,9 +1607,9 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
         copy_round_token();
         std::array<TokenId, qwen3_6::kMtpDecodeMaximumDrafts> initial_drafts{};
         if (staged.prepare_mtp && staged.initial_mtp_extent != 0) {
-            CUDA_CHECK(cudaMemcpyAsync(initial_drafts.data(), io.mtp->draft_tokens.data,
+            HIP_CHECK(hipMemcpyAsync(initial_drafts.data(), io.mtp->draft_tokens.data,
                                        staged.initial_mtp_extent * sizeof(TokenId),
-                                       cudaMemcpyDeviceToHost, device.stream));
+                                       hipMemcpyDeviceToHost, device.stream));
         }
         device.synchronize();
         staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
@@ -1716,7 +1719,7 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
     try {
         DecodeGraphExecutable* executable = nullptr;
         ops::GqaExecutionEnvelope envelope{maximum_frontier + 1, maximum_frontier + 1};
-        if (use_cuda_graph) {
+        if (use_hip_graph) {
             DecodeGraphProfile& profile =
                 select_graph_profile(ordinary_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "ordinary batch");
@@ -1829,7 +1832,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         DecodeGraphExecutable* executable = nullptr;
         schedule::MtpGqaEnvelopes envelopes =
             mtp_gqa_envelopes(maximum_frontier, draft_window, capacity);
-        if (use_cuda_graph) {
+        if (use_hip_graph) {
             DecodeGraphProfile& profile =
                 select_graph_profile(mtp_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "MTP batch");
@@ -1996,7 +1999,7 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         DecodeGraphExecutable* executable   = nullptr;
         schedule::DFlashEnvelopes envelopes = dflash_envelopes(0, maximum_frontier, draft_window);
         ops::GqaExecutionEnvelope target_envelope{1, maximum_target_tokens};
-        if (use_cuda_graph) {
+        if (use_hip_graph) {
             DecodeGraphProfile& profile =
                 select_graph_profile(dflash_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "DFlash batch");
@@ -2172,8 +2175,8 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
         ArenaMemorySummary{persistent.capacity(), persistent.used(), persistent.peak_used()};
     out.workspace = ArenaMemorySummary{workspace_storage.capacity(), work.used(), work.peak_used()};
     out.workspace_logical_peak_bytes = workspace_logical_peak_bytes;
-    out.cuda_graph_allowance_bytes   = graph_allowance_bytes;
-    out.cuda_graph_observed_bytes    = graph_observed_bytes;
+    out.hip_graph_allowance_bytes   = graph_allowance_bytes;
+    out.hip_graph_observed_bytes    = graph_observed_bytes;
     out.kv_payload_bytes             = kv_payload_bytes;
     return out;
 }

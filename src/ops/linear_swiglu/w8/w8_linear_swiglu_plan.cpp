@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/w8/w8_linear_swiglu_plan.h"
 
 #include "ops/linear_swiglu/w8/w8_linear_swiglu_kernels.h"
@@ -104,7 +105,7 @@ W8LinearSwiGluPlan w8_linear_swiglu_resolve_plan(const W8LinearSwiGluProblem& pr
 }
 
 void w8_linear_swiglu_execute_plan(const W8LinearSwiGluPlan& plan, const Tensor& x, const Weight& w,
-                                   Tensor& out, cudaStream_t stream) {
+                                   Tensor& out, hipStream_t stream) {
     const W8LinearSwiGluProblem problem{w.n, out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     const W8LinearSwiGluPlan resolved = w8_linear_swiglu_resolve_plan(problem);
     if (resolved.schedule != plan.schedule) {
@@ -148,7 +149,7 @@ void w8_linear_swiglu_execute_plan(const W8LinearSwiGluPlan& plan, const Tensor&
     throw std::logic_error("W8 LinearSwiGLU: unknown schedule");
 }
 
-void w8_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void w8_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     const W8LinearSwiGluProblem problem{w.n, out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     w8_linear_swiglu_execute_plan(w8_linear_swiglu_resolve_plan(problem), x, w, out, stream);
 }

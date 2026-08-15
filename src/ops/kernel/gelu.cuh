@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Implements: include/ninfer/ops/gelu.h
@@ -7,7 +8,8 @@
 #include "ops/common/bf16_vector.cuh"
 #include "ops/common/memory.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -27,7 +29,7 @@ __device__ __forceinline__ float gelu_one(float value) {
 }
 
 template <bool TanhApprox>
-__device__ __forceinline__ __nv_bfloat162 gelu_pair(__nv_bfloat162 input) {
+__device__ __forceinline__ __hip_bfloat162 gelu_pair(__hip_bfloat162 input) {
     return __floats2bfloat162_rn(gelu_one<TanhApprox>(__low2float(input)),
                                  gelu_one<TanhApprox>(__high2float(input)));
 }
@@ -48,7 +50,7 @@ __launch_bounds__(Block) __global__ void gelu_bf16x8_kernel(Bf16x8Pack* x, std::
 
 template <bool TanhApprox, int Block>
 __launch_bounds__(Block) __global__
-    void gelu_bf16x2_kernel(__nv_bfloat162* x, std::int64_t pairs, __nv_bfloat16* scalar,
+    void gelu_bf16x2_kernel(__hip_bfloat162* x, std::int64_t pairs, __hip_bfloat16* scalar,
                             bool has_scalar) {
     const std::int64_t first =
         (static_cast<std::int64_t>(blockIdx.x) * Block + threadIdx.x) * kGeluPairsPerThread;
@@ -63,7 +65,7 @@ __launch_bounds__(Block) __global__
 }
 
 template <bool TanhApprox>
-__global__ void gelu_kernel(__nv_bfloat16* x, std::int64_t n) {
+__global__ void gelu_kernel(__hip_bfloat16* x, std::int64_t n) {
     const std::int64_t start  = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
     for (std::int64_t i = start; i < n; i += stride) {

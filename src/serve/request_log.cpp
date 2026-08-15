@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #include "serve/request_log.h"
 #include "product/speculative_options.h"
 #include "serve/console_log.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -44,12 +45,12 @@ std::filesystem::path normalized_absolute_path(const std::string& value) {
     return error ? std::filesystem::path(value).lexically_normal() : path.lexically_normal();
 }
 
-std::string cuda_version_string(int version) {
+std::string hip_version_string(int version) {
     if (version <= 0) { return {}; }
     return std::to_string(version / 1000) + '.' + std::to_string((version % 1000) / 10);
 }
 
-std::string cuda_uuid_string(const cudaUUID_t& uuid) {
+std::string hip_uuid_string(const hipUUID& uuid) {
     std::ostringstream out;
     out << "GPU-" << std::hex << std::setfill('0');
     for (int i = 0; i < 16; ++i) {
@@ -385,7 +386,7 @@ std::string format_server_start_json(
           {"log_stats_interval_ms", options.log_stats_interval_ms},
           {"kv_cache", kv_cache_name(options.kv_cache)},
           {"vision", options.enable_vision},
-          {"cuda_graph", options.use_cuda_graph},
+          {"hip_graph", options.use_hip_graph},
           {"prefix_reuse", options.allow_prefix_reuse},
           {"speculative_backend", product::speculative_backend_name(options.speculative.backend)},
           {"speculative_draft_window", options.speculative.draft_tokens},
@@ -408,8 +409,8 @@ std::string format_server_start_json(
              {"available_after_startup_bytes", memory.available_after_startup_bytes},
              {"kv_capacity_headroom_bytes", memory.kv_capacity_headroom_bytes},
              {"planned_slack_bytes", memory.planned_slack_bytes},
-             {"cuda_graph_allowance_bytes", memory.cuda_graph_allowance_bytes},
-             {"cuda_graph_observed_bytes", memory.cuda_graph_observed_bytes},
+             {"hip_graph_allowance_bytes", memory.hip_graph_allowance_bytes},
+             {"hip_graph_observed_bytes", memory.hip_graph_observed_bytes},
              {"kv_payload_bytes", memory.kv_payload_bytes}};
     record["environment"] =
         Json{{"device", environment.device},
@@ -418,9 +419,9 @@ std::string format_server_start_json(
              {"total_device_memory_bytes", environment.total_device_memory_bytes},
              {"compute_capability_major", environment.compute_capability_major},
              {"compute_capability_minor", environment.compute_capability_minor},
-             {"cuda_compile_version", environment.cuda_compile_version},
-             {"cuda_runtime_version", environment.cuda_runtime_version},
-             {"cuda_driver_version", environment.cuda_driver_version}};
+             {"hip_compile_version", environment.hip_compile_version},
+             {"hip_runtime_version", environment.hip_runtime_version},
+             {"hip_driver_version", environment.hip_driver_version}};
     record["argv"] = options.startup_argv;
     return record.dump();
 }
@@ -498,20 +499,27 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
 ServerLogEnvironment query_server_log_environment(int device) {
     ServerLogEnvironment environment;
     environment.device               = device;
-    environment.cuda_compile_version = cuda_version_string(CUDART_VERSION);
+#if defined(CUDART_VERSION)
+    environment.hip_compile_version = hip_version_string(CUDART_VERSION);
+#else
+    // HIP encodes the compile-time version as major*10000 + minor*100 + patch;
+    // hip_version_string expects CUDA's major*1000 + minor*10 layout.
+    environment.hip_compile_version =
+        hip_version_string(HIP_VERSION_MAJOR * 1000 + HIP_VERSION_MINOR * 10);
+#endif
 
     int runtime_version = 0;
-    if (cudaRuntimeGetVersion(&runtime_version) == cudaSuccess) {
-        environment.cuda_runtime_version = cuda_version_string(runtime_version);
+    if (hipRuntimeGetVersion(&runtime_version) == hipSuccess) {
+        environment.hip_runtime_version = hip_version_string(runtime_version);
     }
     int driver_version = 0;
-    if (cudaDriverGetVersion(&driver_version) == cudaSuccess) {
-        environment.cuda_driver_version = cuda_version_string(driver_version);
+    if (hipDriverGetVersion(&driver_version) == hipSuccess) {
+        environment.hip_driver_version = hip_version_string(driver_version);
     }
-    cudaDeviceProp properties{};
-    if (cudaGetDeviceProperties(&properties, device) == cudaSuccess) {
+    hipDeviceProp_t properties{};
+    if (hipGetDeviceProperties(&properties, device) == hipSuccess) {
         environment.gpu_name                  = properties.name;
-        environment.gpu_uuid                  = cuda_uuid_string(properties.uuid);
+        environment.gpu_uuid                  = hip_uuid_string(properties.uuid);
         environment.total_device_memory_bytes = properties.totalGlobalMem;
         environment.compute_capability_major  = properties.major;
         environment.compute_capability_minor  = properties.minor;

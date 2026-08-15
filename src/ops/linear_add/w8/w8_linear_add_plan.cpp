@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/w8/w8_linear_add_plan.h"
 
 #include "ops/linear_add/w8/w8_linear_add_kernels.h"
@@ -211,7 +212,7 @@ W8LinearAddPlan w8_linear_add_resolve_plan(const W8LinearAddProblem& problem) {
 }
 
 void w8_linear_add_execute_plan(const W8LinearAddPlan& plan, const Tensor& x, const Weight& w,
-                                Tensor& residual_out, cudaStream_t stream) {
+                                Tensor& residual_out, hipStream_t stream) {
     const W8LinearAddProblem problem{residual_out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     const W8LinearAddPlan resolved = w8_linear_add_resolve_plan(problem);
     if (resolved.schedule != plan.schedule) {
@@ -288,7 +289,7 @@ void w8_linear_add_execute_plan(const W8LinearAddPlan& plan, const Tensor& x, co
 }
 
 void w8_linear_add_dispatch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                            cudaStream_t stream) {
+                            hipStream_t stream) {
     const W8LinearAddProblem problem{residual_out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     w8_linear_add_execute_plan(w8_linear_add_resolve_plan(problem), x, w, residual_out, stream);
 }

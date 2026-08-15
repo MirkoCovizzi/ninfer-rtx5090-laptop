@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include <ninfer/targets/qwen3_6_35b_a3b/package.h>
 
 #include "artifact/binder.h"
@@ -38,7 +39,7 @@ struct Options {
     std::uint32_t draft_tokens     = 15;
     std::uint32_t batch_size       = 1;
     ninfer::ProposalHead proposal  = ninfer::ProposalHead::Optimized;
-    bool use_cuda_graph            = true;
+    bool use_hip_graph            = true;
 };
 
 void print_usage(const char* executable) {
@@ -46,7 +47,7 @@ void print_usage(const char* executable) {
               << " [--artifact <model.ninfer>] [--device <id>] [--context <tokens>]"
                  " [--warmup <n>] [--reps <n>] [--draft-tokens <1..15>]"
                  " [--batch <1..8>]"
-                 " [--proposal-head full|optimized] [--no-cuda-graph]\n";
+                 " [--proposal-head full|optimized] [--no-hip-graph]\n";
 }
 
 std::uint32_t parse_u32(const char* text, const char* label) {
@@ -91,8 +92,8 @@ Options parse_options(int argc, char** argv) {
             } else {
                 throw std::invalid_argument("--proposal-head must be full or optimized");
             }
-        } else if (argument == "--no-cuda-graph") {
-            options.use_cuda_graph = false;
+        } else if (argument == "--no-hip-graph") {
+            options.use_hip_graph = false;
         } else if (argument == "-h" || argument == "--help") {
             print_usage(argc > 0 ? argv[0] : "ninfer_qwen3_6_35b_a3b_dflash_round_bench");
             std::exit(0);
@@ -143,7 +144,7 @@ RoundMeasurement measure_round(target::Package::Program& program, ninfer::Device
     const auto lane_span = std::span<const std::uint32_t>(lanes.data(), batch_size);
     const auto budget_span =
         std::span<const ninfer::runtime::RoundBudget>(budgets.data(), batch_size);
-    ninfer::CudaEventTimer timer(device);
+    ninfer::HipEventTimer timer(device);
     const auto wall_start = Clock::now();
     timer.start();
     const auto round = program.decode_batch(lane_span, budget_span);
@@ -207,7 +208,7 @@ int run(const Options& options) {
     engine.speculative.backend       = ninfer::SpeculativeBackend::DFlash;
     engine.speculative.draft_tokens  = options.draft_tokens;
     engine.speculative.proposal_head = options.proposal;
-    engine.use_cuda_graph            = options.use_cuda_graph;
+    engine.use_hip_graph            = options.use_hip_graph;
     engine.max_concurrency           = options.batch_size;
 
     ninfer::DeviceContext device(options.device);
@@ -227,7 +228,7 @@ int run(const Options& options) {
     const std::uint64_t required_bytes = weight_bytes + sequence_bytes;
     std::size_t free_bytes             = 0;
     std::size_t total_bytes            = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    HIP_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
     if (required_bytes > free_bytes) {
         throw std::invalid_argument(
             "benchmark configuration requires " + std::to_string(required_bytes) +
@@ -322,7 +323,7 @@ int run(const Options& options) {
     std::cout << "proposal_head,"
               << (options.proposal == ninfer::ProposalHead::Optimized ? "optimized" : "full")
               << '\n';
-    std::cout << "cuda_graph," << (options.use_cuda_graph ? "true" : "false") << '\n';
+    std::cout << "hip_graph," << (options.use_hip_graph ? "true" : "false") << '\n';
     std::cout << "warmup," << options.warmup << '\n';
     std::cout << "repetitions," << options.repetitions << '\n';
     std::cout << "steady_round_gpu_mean_ms," << mean_gpu_ms << '\n';

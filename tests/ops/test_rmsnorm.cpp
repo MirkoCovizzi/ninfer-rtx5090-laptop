@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/rmsnorm.h"
 #include "ops/norm_test_common.h"
 
@@ -60,7 +61,7 @@ int run_case(const char* label, const Shape& shape, bool unit_offset, std::uint3
     Tensor weight_tensor(device_weight.data, DType::BF16, {shape.d});
     Tensor output_tensor = tensor_for(output_data, shape);
     ops::rmsnorm(input_tensor, weight_tensor, kEps, unit_offset, output_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_reduction(label, from_device_bf16(output_data, count), reference,
                                     rmsnorm_bf16_criterion());
@@ -73,7 +74,7 @@ int run_case(const char* label, const Shape& shape, bool unit_offset, std::uint3
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

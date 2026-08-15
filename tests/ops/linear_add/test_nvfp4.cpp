@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/linear_add.h"
 
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -124,7 +125,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
             QType::NVFP4, n, k, invocation.policy, invocation.tokens, invocation.tokens);
         WorkspaceArena workspace(std::max<std::size_t>(capacity, 256));
         ops::linear_add(x, weight, residual, invocation.policy, workspace, nullptr);
-        cuda_check(cudaDeviceSynchronize(), "synchronize NVFP4 linear_add");
+        hip_check(hipDeviceSynchronize(), "synchronize NVFP4 linear_add");
 
         const bool a4           = invocation.policy == ops::LinearPolicy::AllowA4;
         const std::string label = "NVFP4 linear_add [" + std::to_string(n) + "," +
@@ -177,7 +178,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
 } // namespace
 
 int main() {
-    if (ninfer::test::cuda_unavailable()) {
+    if (ninfer::test::hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

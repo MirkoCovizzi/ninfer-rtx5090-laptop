@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Implements: include/ninfer/ops/rope.h
@@ -5,7 +6,8 @@
 // D/R=128/128, plus packed Vision 16Q/16K at D/R=72/72. One CTA owns one token and shares its
 // rotary coefficients across heads.
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cmath>
 #include <cstdint>
@@ -99,14 +101,14 @@ __device__ __forceinline__ void fixed_sincos(const std::int32_t* positions, int 
 }
 
 template <int HeadDim, int Half>
-__device__ __forceinline__ void apply_rope_head(__nv_bfloat16* data, std::int64_t token_stride,
+__device__ __forceinline__ void apply_rope_head(__hip_bfloat16* data, std::int64_t token_stride,
                                                 int head, int token, int lane, float c0, float c1,
                                                 float s0, float s1) {
     constexpr int kHalfPair = Half / 2;
     if (lane >= kHalfPair) { return; }
     const std::int64_t base =
         static_cast<std::int64_t>(token) * token_stride + static_cast<std::int64_t>(head) * HeadDim;
-    auto* data2         = reinterpret_cast<__nv_bfloat162*>(data + base);
+    auto* data2         = reinterpret_cast<__hip_bfloat162*>(data + base);
     const float2 first  = __bfloat1622float2(data2[lane]);
     const float2 second = __bfloat1622float2(data2[lane + kHalfPair]);
     data2[lane] = __floats2bfloat162_rn(first.x * c0 - second.x * s0, first.y * c1 - second.y * s1);
@@ -115,7 +117,7 @@ __device__ __forceinline__ void apply_rope_head(__nv_bfloat16* data, std::int64_
 }
 
 template <RopeKernelMode Mode, int QHeads, int KHeads>
-__global__ void rope_fixed_kernel(const std::int32_t* positions, __nv_bfloat16* q, __nv_bfloat16* k,
+__global__ void rope_fixed_kernel(const std::int32_t* positions, __hip_bfloat16* q, __hip_bfloat16* k,
                                   std::int32_t tokens, std::int64_t q_token_stride,
                                   std::int64_t k_token_stride) {
     constexpr int kHeadDim = Mode == RopeKernelMode::Vision2D       ? 72
@@ -158,8 +160,8 @@ __global__ void rope_fixed_kernel(const std::int32_t* positions, __nv_bfloat16* 
 }
 
 template <RopeKernelMode Mode, int QHeads, int KHeads, int HeadsPerBlock>
-__global__ void rope_fixed_split_kernel(const std::int32_t* positions, __nv_bfloat16* q,
-                                        __nv_bfloat16* k, std::int32_t tokens,
+__global__ void rope_fixed_split_kernel(const std::int32_t* positions, __hip_bfloat16* q,
+                                        __hip_bfloat16* k, std::int32_t tokens,
                                         std::int64_t q_token_stride, std::int64_t k_token_stride) {
     static_assert(Mode == RopeKernelMode::DflashText1D);
     constexpr int kHeadDim       = 128;
@@ -209,7 +211,7 @@ __device__ __forceinline__ void generic_axis_frequency(int axes, int head_dim, i
 }
 
 static __global__ void rope_generic_kernel(const std::int32_t* positions, std::int32_t axes,
-                                           __nv_bfloat16* q, __nv_bfloat16* k,
+                                           __hip_bfloat16* q, __hip_bfloat16* k,
                                            std::int32_t head_dim, std::int32_t rotary_dim,
                                            float theta, std::int32_t q_heads, std::int32_t k_heads,
                                            std::int32_t tokens, std::int64_t q_token_stride,
@@ -244,7 +246,7 @@ static __global__ void rope_generic_kernel(const std::int32_t* positions, std::i
          combined_head += block_warps) {
         const bool is_q             = combined_head < q_heads;
         const int head              = is_q ? combined_head : combined_head - q_heads;
-        __nv_bfloat16* data         = is_q ? q : k;
+        __hip_bfloat16* data         = is_q ? q : k;
         const std::int64_t stride_t = is_q ? q_token_stride : k_token_stride;
         const std::int64_t base     = static_cast<std::int64_t>(token) * stride_t +
                                   static_cast<std::int64_t>(head) * head_dim;

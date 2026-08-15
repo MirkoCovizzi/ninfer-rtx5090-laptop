@@ -1,11 +1,12 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/linear_add.h"
 
 #include "core/device.h"
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -147,8 +148,8 @@ int main(int argc, char** argv) {
             *std::max_element(options.t_sweep.begin(), options.t_sweep.end());
         const std::int32_t min_t =
             *std::min_element(options.t_sweep.begin(), options.t_sweep.end());
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(kFlushBytes);
         DeviceBuffer input    = bench::make_bf16(static_cast<std::size_t>(options.k) * max_t);
         DeviceBuffer residual = bench::make_bf16(static_cast<std::size_t>(options.n) * max_t);
@@ -158,7 +159,7 @@ int main(int argc, char** argv) {
         WorkspaceArena workspace(std::max<std::size_t>(workspace_capacity, 256));
 
         const auto make_launch = [&](std::int32_t tokens) {
-            return [&, tokens](cudaStream_t launch_stream) {
+            return [&, tokens](hipStream_t launch_stream) {
                 Tensor x(input.p, DType::BF16, {options.k, tokens});
                 Tensor out(residual.p, DType::BF16, {options.n, tokens});
                 ops::linear_add(x, packed.weight, out, options.policy, workspace, launch_stream);
@@ -172,17 +173,17 @@ int main(int argc, char** argv) {
                 bench::flush_l2(flush, stream);
                 launch(stream);
             }
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            HIP_CHECK(hipStreamSynchronize(stream));
             bench::flush_l2(flush, stream);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            HIP_CHECK(hipStreamSynchronize(stream));
             std::printf("PROFILE linear_add weight_type=NVFP4 policy=%s N=%d K=%d T=%d\n",
                         policy_name(options.policy), options.n, options.k, tokens);
             std::fflush(stdout);
-            CUDA_CHECK(cudaProfilerStart());
+            HIP_CHECK(hipProfilerStart());
             launch(stream);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
-            CUDA_CHECK(cudaProfilerStop());
-            CUDA_CHECK(cudaStreamDestroy(stream));
+            HIP_CHECK(hipStreamSynchronize(stream));
+            HIP_CHECK(hipProfilerStop());
+            HIP_CHECK(hipStreamDestroy(stream));
             return 0;
         }
 
@@ -207,7 +208,7 @@ int main(int argc, char** argv) {
             results.push_back({tokens, timing, effective_gbs, useful_tflops});
         }
         write_csv(options, results, packed.model_weight_bytes());
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_nvfp4_linear_add_bench: %s\n", error.what());

@@ -38,7 +38,7 @@ bool overlaps(const Tensor& lhs, const Tensor& rhs) {
 
 void prepare_masked_block(const Tensor& anchors, const Tensor& lengths, const Tensor& valid_columns,
                           std::int32_t mask_id, Tensor& ids, Tensor& positions,
-                          cudaStream_t stream) {
+                          hipStream_t stream) {
     const std::int32_t block_size = ids.ne[0];
     const std::int32_t batch_size = ids.ne[1];
     if (block_size < 1 || block_size > 16) {

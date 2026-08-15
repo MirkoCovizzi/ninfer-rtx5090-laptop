@@ -46,7 +46,7 @@ void run(int tokens) {
     Tensor tout(out.p, DType::BF16, {kIntermediate, tokens});
 
     const double bytes = 3.0 * static_cast<double>(n) * 2.0; // read gate + read up + write out
-    const Result r     = bench_loop([&](cudaStream_t s) { ops::silu_mul(tg, tu, tout, s); }, bytes);
+    const Result r     = bench_loop([&](hipStream_t s) { ops::silu_mul(tg, tu, tout, s); }, bytes);
     char tag[96];
     std::snprintf(tag, sizeof(tag), "silu_mul [17408,%d]", tokens);
     print_result(tag, r);
@@ -56,7 +56,7 @@ void run(int tokens) {
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

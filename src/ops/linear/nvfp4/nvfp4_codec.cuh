@@ -1,24 +1,26 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp4.h>
-#include <cuda_fp8.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp4.h>
+#include <hip/hip_fp8.h>
 
 #include <cstdint>
 
 namespace ninfer::ops::detail {
 
 __device__ __forceinline__ float2 decode_nvfp4_e2m1x2(std::uint8_t storage) {
-    __nv_fp4x2_e2m1 value;
+    __hip_fp4x2_e2m1 value;
     value.__x = storage;
     return static_cast<float2>(value);
 }
 
 __device__ __forceinline__ float decode_nvfp4_e4m3(std::uint8_t storage) {
-    __nv_fp8x2_e4m3 value;
+    __hip_fp8x2_e4m3_fnuz value;
     value.__x = static_cast<std::uint16_t>(storage) | (static_cast<std::uint16_t>(storage) << 8);
     return static_cast<float2>(value).x;
 }
@@ -60,7 +62,7 @@ pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint
                    "f"(values[6].x), "f"(values[6].y), "f"(values[7].x), "f"(values[7].y));
 }
 
-__device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __nv_bfloat16* source,
+__device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __hip_bfloat16* source,
                                                                 float input_scale_divisor) {
     const uint4 packed0                = load_vec<uint4>(source);
     const uint4 packed1                = load_vec<uint4>(source + 8);
@@ -79,7 +81,7 @@ __device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __nv_bfloa
 
     Nvfp4QuantizedK16 result{};
     const float scale_unencoded = __fdiv_rn(input_scale_divisor * max_abs, 6.0F);
-    result.scale                = __nv_cvt_float_to_fp8(scale_unencoded, __NV_SATFINITE, __NV_E4M3);
+    result.scale                = __hip_cvt_float_to_fp8(scale_unencoded, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
     if (result.scale == 0) { return result; }
 
     const float decoded_scale = decode_nvfp4_e4m3(result.scale);

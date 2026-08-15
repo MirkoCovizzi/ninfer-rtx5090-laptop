@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer_bench_common.h"
 #include "ops/launcher/sigmoid_gate_mul.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -58,7 +59,7 @@ void run(int tokens, int heads, bool control, int candidate_block) {
     Tensor tx(x.p, DType::BF16, {256, heads, tokens});
 
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 constexpr int block   = 256;
                 constexpr int maxGrid = 4096;
@@ -91,7 +92,7 @@ void run(int tokens, int heads, bool control, int candidate_block) {
 
 int main(int argc, char** argv) {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

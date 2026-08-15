@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gdn_input_proj.h"
 
 #include "ops/input_projection_test_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -48,7 +49,7 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_we
     Tensor output   = qkv.tensor();
     Tensor z_output = z.tensor();
     ops::gdn_input_proj(x, query_key.view(), value_z_weight.view(), output, z_output, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string suffix = " Q4/Q5 A16 T=" + std::to_string(tokens);
     int failures             = qkv.verify_guards("gdn qkv" + suffix);
@@ -93,7 +94,7 @@ int run_w8_case(DevicePackedWeight& parent, std::int32_t tokens) {
     Tensor qkv_output = qkv.tensor();
     Tensor z_output   = z.tensor();
     ops::gdn_input_proj(x, parent.view(), qkv_output, z_output, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string suffix = " W8 A16 T=" + std::to_string(tokens);
     int failures             = qkv.verify_guards("gdn qkv" + suffix);
@@ -170,7 +171,7 @@ int run_nvfp4_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearP
         QType::NVFP4, kRows, kHidden, policy, tokens, tokens);
     WorkspaceArena workspace(std::max<std::size_t>(capacity, 256));
     ops::gdn_input_proj(x, parent.view(), qkv_output, z_output, policy, workspace, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const bool a4                       = policy == ops::LinearPolicy::AllowA4;
     const ReductionCriterion& criterion = a4 ? kGdnInputProjA4Tolerance : kGdnInputProjA16Tolerance;
@@ -220,7 +221,7 @@ int run_nvfp4() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

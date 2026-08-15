@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/swa.h"
 
 #include "core/layout.h"
@@ -91,7 +92,7 @@ std::size_t swa_workspace_capacity_bytes(SwaContextExecutionEnvelope envelope,
 void swa(const Tensor& q, const Tensor& query_k, const Tensor& query_v, const Tensor& positions,
          const Tensor& valid_columns, const Tensor& lanes, float scale,
          const CyclicKVCacheLayerView& context, SwaContextExecutionEnvelope envelope,
-         WorkspaceArena& workspace, Tensor& out, cudaStream_t stream) {
+         WorkspaceArena& workspace, Tensor& out, hipStream_t stream) {
     constexpr const char* op = "swa";
     if (q.dtype != DType::BF16 || query_k.dtype != DType::BF16 || query_v.dtype != DType::BF16 ||
         out.dtype != DType::BF16) {

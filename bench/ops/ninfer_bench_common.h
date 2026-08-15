@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 //
 // ninfer_bench_common.h — shared bench harness for L1 op performance binaries.
@@ -14,7 +15,7 @@
 #include "core/arena.h"
 #include "core/device.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cmath>
@@ -54,7 +55,7 @@ inline DeviceBuffer make_zeros(std::size_t bytes) {
     return d;
 }
 
-// cudaDeviceProp memory-clock fields were removed in CUDA 13; the in-process
+// hipDeviceProp_t memory-clock fields were removed in CUDA 13; the in-process
 // GB/s is informational anyway (ncu is the acceptance gate), so report against
 // the known RTX 5090 roofline constant.
 inline double device_peak_bw_gbs(int /*dev*/ = 0) { return kRooflineGBs; }
@@ -68,59 +69,59 @@ struct ColdTiming {
 class TimedGraph {
 public:
     TimedGraph() {
-        CUDA_CHECK(cudaEventCreate(&start_));
-        CUDA_CHECK(cudaEventCreate(&stop_));
+        HIP_CHECK(hipEventCreate(&start_));
+        HIP_CHECK(hipEventCreate(&stop_));
     }
 
     ~TimedGraph() {
-        if (exec_ != nullptr) { cudaGraphExecDestroy(exec_); }
-        if (graph_ != nullptr) { cudaGraphDestroy(graph_); }
-        if (start_ != nullptr) { cudaEventDestroy(start_); }
-        if (stop_ != nullptr) { cudaEventDestroy(stop_); }
+        if (exec_ != nullptr) { hipGraphExecDestroy(exec_); }
+        if (graph_ != nullptr) { hipGraphDestroy(graph_); }
+        if (start_ != nullptr) { hipEventDestroy(start_); }
+        if (stop_ != nullptr) { hipEventDestroy(stop_); }
     }
 
     TimedGraph(const TimedGraph&)            = delete;
     TimedGraph& operator=(const TimedGraph&) = delete;
 
     template <class Body>
-    void capture(cudaStream_t stream, Body&& body) {
+    void capture(hipStream_t stream, Body&& body) {
         if (graph_ != nullptr || exec_ != nullptr) {
             throw std::logic_error("benchmark graph is already captured");
         }
-        CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+        HIP_CHECK(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal));
         try {
             body(stream);
         } catch (...) {
-            cudaGraph_t discard = nullptr;
-            cudaStreamEndCapture(stream, &discard);
-            if (discard != nullptr) { cudaGraphDestroy(discard); }
+            hipGraph_t discard = nullptr;
+            hipStreamEndCapture(stream, &discard);
+            if (discard != nullptr) { hipGraphDestroy(discard); }
             throw;
         }
-        CUDA_CHECK(cudaStreamEndCapture(stream, &graph_));
-        CUDA_CHECK(cudaGraphInstantiate(&exec_, graph_, 0));
-        CUDA_CHECK(cudaGraphGetNodes(graph_, nullptr, &nodes_));
+        HIP_CHECK(hipStreamEndCapture(stream, &graph_));
+        HIP_CHECK(hipGraphInstantiate(&exec_, graph_, 0));
+        HIP_CHECK(hipGraphGetNodes(graph_, nullptr, &nodes_));
         if (nodes_ == 0) { throw std::runtime_error("captured benchmark graph is empty"); }
     }
 
-    void launch(cudaStream_t stream) const { CUDA_CHECK(cudaGraphLaunch(exec_, stream)); }
+    void launch(hipStream_t stream) const { HIP_CHECK(hipGraphLaunch(exec_, stream)); }
 
-    double launch_timed(cudaStream_t stream) const {
-        CUDA_CHECK(cudaEventRecord(start_, stream));
+    double launch_timed(hipStream_t stream) const {
+        HIP_CHECK(hipEventRecord(start_, stream));
         launch(stream);
-        CUDA_CHECK(cudaEventRecord(stop_, stream));
-        CUDA_CHECK(cudaEventSynchronize(stop_));
+        HIP_CHECK(hipEventRecord(stop_, stream));
+        HIP_CHECK(hipEventSynchronize(stop_));
         float milliseconds = 0.0F;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start_, stop_));
+        HIP_CHECK(hipEventElapsedTime(&milliseconds, start_, stop_));
         return static_cast<double>(milliseconds) * 1000.0;
     }
 
     [[nodiscard]] std::size_t nodes() const noexcept { return nodes_; }
 
 private:
-    cudaGraph_t graph_    = nullptr;
-    cudaGraphExec_t exec_ = nullptr;
-    cudaEvent_t start_    = nullptr;
-    cudaEvent_t stop_     = nullptr;
+    hipGraph_t graph_    = nullptr;
+    hipGraphExec_t exec_ = nullptr;
+    hipEvent_t start_    = nullptr;
+    hipEvent_t stop_     = nullptr;
     std::size_t nodes_    = 0;
 };
 
@@ -137,42 +138,42 @@ inline ColdTiming summarize_timings(std::vector<double> samples) {
 }
 
 template <class Launch>
-ColdTiming measure_launch(Launch&& launch, cudaStream_t stream, int warmup, int repeat) {
+ColdTiming measure_launch(Launch&& launch, hipStream_t stream, int warmup, int repeat) {
     if (warmup < 0 || repeat <= 0) {
         throw std::invalid_argument("benchmark requires nonnegative warmup and positive repeat");
     }
 
-    cudaEvent_t start = nullptr;
-    cudaEvent_t stop  = nullptr;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
+    hipEvent_t start = nullptr;
+    hipEvent_t stop  = nullptr;
+    HIP_CHECK(hipEventCreate(&start));
+    HIP_CHECK(hipEventCreate(&stop));
     for (int index = 0; index < warmup; ++index) { launch(stream); }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
     for (int index = 0; index < repeat; ++index) {
-        CUDA_CHECK(cudaEventRecord(start, stream));
+        HIP_CHECK(hipEventRecord(start, stream));
         launch(stream);
-        CUDA_CHECK(cudaEventRecord(stop, stream));
-        CUDA_CHECK(cudaEventSynchronize(stop));
+        HIP_CHECK(hipEventRecord(stop, stream));
+        HIP_CHECK(hipEventSynchronize(stop));
         float milliseconds = 0.0F;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+        HIP_CHECK(hipEventElapsedTime(&milliseconds, start, stop));
         samples.push_back(static_cast<double>(milliseconds) * 1000.0);
     }
 
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
+    HIP_CHECK(hipEventDestroy(start));
+    HIP_CHECK(hipEventDestroy(stop));
     return summarize_timings(std::move(samples));
 }
 
-inline ColdTiming measure_graph(const TimedGraph& graph, cudaStream_t stream, int warmup,
+inline ColdTiming measure_graph(const TimedGraph& graph, hipStream_t stream, int warmup,
                                 int repeat) {
     if (warmup < 0 || repeat <= 0) {
         throw std::invalid_argument("benchmark requires nonnegative warmup and positive repeat");
     }
     for (int index = 0; index < warmup; ++index) { graph.launch(stream); }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
@@ -180,44 +181,44 @@ inline ColdTiming measure_graph(const TimedGraph& graph, cudaStream_t stream, in
     return summarize_timings(std::move(samples));
 }
 
-inline void flush_l2(DeviceBuffer& flush, cudaStream_t stream) {
-    CUDA_CHECK(cudaMemsetAsync(flush.p, 0xa5, flush.bytes, stream));
+inline void flush_l2(DeviceBuffer& flush, hipStream_t stream) {
+    HIP_CHECK(hipMemsetAsync(flush.p, 0xa5, flush.bytes, stream));
 }
 
 template <class Launch>
-ColdTiming measure_cold_launch(Launch&& launch, DeviceBuffer& flush, cudaStream_t stream,
+ColdTiming measure_cold_launch(Launch&& launch, DeviceBuffer& flush, hipStream_t stream,
                                int warmup, int repeat) {
     if (warmup < 0 || repeat <= 0) {
         throw std::invalid_argument(
             "cold benchmark requires nonnegative warmup and positive repeat");
     }
 
-    cudaEvent_t start = nullptr;
-    cudaEvent_t stop  = nullptr;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
+    hipEvent_t start = nullptr;
+    hipEvent_t stop  = nullptr;
+    HIP_CHECK(hipEventCreate(&start));
+    HIP_CHECK(hipEventCreate(&stop));
 
     for (int index = 0; index < warmup; ++index) {
         flush_l2(flush, stream);
         launch(stream);
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
     for (int index = 0; index < repeat; ++index) {
         flush_l2(flush, stream);
-        CUDA_CHECK(cudaEventRecord(start, stream));
+        HIP_CHECK(hipEventRecord(start, stream));
         launch(stream);
-        CUDA_CHECK(cudaEventRecord(stop, stream));
-        CUDA_CHECK(cudaEventSynchronize(stop));
+        HIP_CHECK(hipEventRecord(stop, stream));
+        HIP_CHECK(hipEventSynchronize(stop));
         float milliseconds = 0.0F;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+        HIP_CHECK(hipEventElapsedTime(&milliseconds, start, stop));
         samples.push_back(static_cast<double>(milliseconds) * 1000.0);
     }
 
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
+    HIP_CHECK(hipEventDestroy(start));
+    HIP_CHECK(hipEventDestroy(stop));
     std::sort(samples.begin(), samples.end());
     return {
         samples[samples.size() / 2],
@@ -228,7 +229,7 @@ ColdTiming measure_cold_launch(Launch&& launch, DeviceBuffer& flush, cudaStream_
 }
 
 inline ColdTiming measure_cold_graph(const TimedGraph& graph, DeviceBuffer& flush,
-                                     cudaStream_t stream, int warmup, int repeat) {
+                                     hipStream_t stream, int warmup, int repeat) {
     if (warmup < 0 || repeat <= 0) {
         throw std::invalid_argument(
             "cold benchmark requires nonnegative warmup and positive repeat");
@@ -237,7 +238,7 @@ inline ColdTiming measure_cold_graph(const TimedGraph& graph, DeviceBuffer& flus
         flush_l2(flush, stream);
         graph.launch(stream);
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
@@ -265,28 +266,28 @@ struct Result {
     double gbs       = 0.0; // from median
 };
 
-using launch_fn = std::function<void(cudaStream_t)>;
+using launch_fn = std::function<void(hipStream_t)>;
 
 inline Result bench_loop(const launch_fn& launch, double bytes_moved, int warmup = 20,
                          int repeat = 100, int min_time_ms = 500) {
-    cudaStream_t stream = nullptr;
-    cudaEvent_t a, b;
-    cudaEventCreate(&a);
-    cudaEventCreate(&b);
+    hipStream_t stream = nullptr;
+    hipEvent_t a, b;
+    hipEventCreate(&a);
+    hipEventCreate(&b);
 
     for (int i = 0; i < warmup; ++i) launch(stream);
-    cudaStreamSynchronize(stream);
+    hipStreamSynchronize(stream);
 
     // Auto-size inner_iters so each timed batch is ~500us (amortize sync wait).
     int inner = 0;
     {
         constexpr int probe = 4;
-        cudaEventRecord(a, stream);
+        hipEventRecord(a, stream);
         for (int i = 0; i < probe; ++i) launch(stream);
-        cudaEventRecord(b, stream);
-        cudaEventSynchronize(b);
+        hipEventRecord(b, stream);
+        hipEventSynchronize(b);
         float ms = 0.f;
-        cudaEventElapsedTime(&ms, a, b);
+        hipEventElapsedTime(&ms, a, b);
         const double per_us = double(ms) * 1000.0 / probe;
         inner = std::max(1, std::min(1024, int(std::ceil(500.0 / std::max(per_us, 1.0)))));
     }
@@ -294,19 +295,19 @@ inline Result bench_loop(const launch_fn& launch, double bytes_moved, int warmup
     std::vector<double> samples;
     long long total_us = 0;
     while (int(samples.size()) < repeat || total_us < (long long)min_time_ms * 1000) {
-        cudaEventRecord(a, stream);
+        hipEventRecord(a, stream);
         for (int i = 0; i < inner; ++i) launch(stream);
-        cudaEventRecord(b, stream);
-        cudaEventSynchronize(b);
+        hipEventRecord(b, stream);
+        hipEventSynchronize(b);
         float ms = 0.f;
-        cudaEventElapsedTime(&ms, a, b);
+        hipEventElapsedTime(&ms, a, b);
         const double batch_us = double(ms) * 1000.0;
         samples.push_back(batch_us / inner);
         total_us += (long long)batch_us;
         if (samples.size() > 100000) break;
     }
-    cudaEventDestroy(a);
-    cudaEventDestroy(b);
+    hipEventDestroy(a);
+    hipEventDestroy(b);
 
     std::vector<double> sorted = samples;
     std::sort(sorted.begin(), sorted.end());

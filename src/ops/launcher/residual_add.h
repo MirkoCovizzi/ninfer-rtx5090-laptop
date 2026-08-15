@@ -6,11 +6,11 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops::detail {
 
 // Host entry; assumes inputs already validated by the wrapper.
-void residual_add_launch(const Tensor& y, Tensor& x, cudaStream_t stream);
+void residual_add_launch(const Tensor& y, Tensor& x, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

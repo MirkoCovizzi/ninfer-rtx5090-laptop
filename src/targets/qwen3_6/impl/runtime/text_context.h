@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 #include "targets/qwen3_6/impl/runtime/instance.h"
 // Qwen3.6 family runtime implementation; instantiated only by exact variants.
@@ -142,8 +143,8 @@ struct DFlashFeatureSink {
     std::int32_t active_tokens  = 0;
 
     void begin(const Tensor& value);
-    void capture_layer(int layer, const Tensor& value, cudaStream_t stream);
-    void capture_positions(const Tensor& source, cudaStream_t stream);
+    void capture_layer(int layer, const Tensor& value, hipStream_t stream);
+    void capture_positions(const Tensor& source, hipStream_t stream);
     void consume_prefill_chunk(std::int32_t tokens, bool turn_checkpoint);
 };
 

@@ -2,7 +2,7 @@
 
 #include <type_traits>
 
-#if defined(__CUDACC__)
+#if defined(__HIPCC__)
 #    define NINFER_KERNEL_HD __host__ __device__
 #else
 #    define NINFER_KERNEL_HD

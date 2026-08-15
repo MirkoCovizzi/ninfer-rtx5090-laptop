@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/attn_input_proj/w8/w8_attn_input_plan.h"
 
 #include "ops/attn_input_proj/w8/w8_attn_input_kernels.h"
@@ -114,7 +115,7 @@ W8AttnInputPlan w8_attn_input_resolve_plan(const W8AttnInputProblem& problem) {
 
 void w8_attn_input_execute_plan(const W8AttnInputPlan& plan, const Tensor& x, const Weight& weight,
                                 Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     const W8AttnInputProblem problem{x.ne[0], q.ne[0], k.ne[0], weight.n, weight.padded_shape[1],
                                      x.ne[1]};
     const W8AttnInputPlan resolved = w8_attn_input_resolve_plan(problem);
@@ -150,7 +151,7 @@ void w8_attn_input_execute_plan(const W8AttnInputPlan& plan, const Tensor& x, co
 }
 
 void w8_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                            Tensor& k, Tensor& v, cudaStream_t stream) {
+                            Tensor& k, Tensor& v, hipStream_t stream) {
     const W8AttnInputProblem problem{x.ne[0], q.ne[0], k.ne[0], weight.n, weight.padded_shape[1],
                                      x.ne[1]};
     w8_attn_input_execute_plan(w8_attn_input_resolve_plan(problem), x, weight, q, gate, k, v,
@@ -158,7 +159,7 @@ void w8_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q, Te
 }
 
 void w8_attn_input_execute_plan(const W8AttnInputPlan& plan, const Tensor& x, const Weight& weight,
-                                Tensor& q, Tensor& k, Tensor& v, cudaStream_t stream) {
+                                Tensor& q, Tensor& k, Tensor& v, hipStream_t stream) {
     const W8AttnInputProblem problem{x.ne[0], q.ne[0], k.ne[0], weight.n, weight.padded_shape[1],
                                      x.ne[1]};
     const W8AttnInputPlan resolved = w8_attn_input_resolve_plan(problem);
@@ -203,7 +204,7 @@ void w8_attn_input_execute_plan(const W8AttnInputPlan& plan, const Tensor& x, co
 }
 
 void w8_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Tensor& v,
-                            cudaStream_t stream) {
+                            hipStream_t stream) {
     const W8AttnInputProblem problem{x.ne[0], q.ne[0], k.ne[0], weight.n, weight.padded_shape[1],
                                      x.ne[1]};
     w8_attn_input_execute_plan(w8_attn_input_resolve_plan(problem), x, weight, q, k, v, stream);

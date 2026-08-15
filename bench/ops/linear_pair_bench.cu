@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Cold-cache CUDA Graph benchmark for the public DFlash LinearPair contract.
 
 #include "ninfer/ops/linear_pair.h"
@@ -6,7 +7,7 @@
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -176,11 +177,11 @@ int main(int argc, char** argv) {
             *std::max_element(options.tokens.begin(), options.tokens.end());
 
         int device = 0;
-        CUDA_CHECK(cudaGetDevice(&device));
-        cudaDeviceProp properties{};
-        CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        HIP_CHECK(hipGetDevice(&device));
+        hipDeviceProp_t properties{};
+        HIP_CHECK(hipGetDeviceProperties(&properties, device));
+        hipStream_t stream = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
 
         DeviceBuffer flush(options.flush_bytes);
         DeviceBuffer input = bench::make_bf16(static_cast<std::size_t>(kHidden) * maximum_tokens);
@@ -202,11 +203,11 @@ int main(int argc, char** argv) {
             Tensor first(first_output.p, DType::BF16, {kRows, tokens});
             Tensor second(second_output.p, DType::BF16, {kRows, tokens});
             bench::TimedGraph graph;
-            graph.capture(stream, [&](cudaStream_t capture_stream) {
+            graph.capture(stream, [&](hipStream_t capture_stream) {
                 ops::linear_pair(x, first_weight, second_weight, first, second, capture_stream);
             });
             graph.launch(stream);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            HIP_CHECK(hipStreamSynchronize(stream));
             const bench::ColdTiming timing =
                 bench::measure_cold_graph(graph, flush, stream, options.warmup, options.repeat);
             if (tokens == 1) { t1_median = timing.median_us; }
@@ -233,7 +234,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_linear_pair_bench: %s\n", error.what());

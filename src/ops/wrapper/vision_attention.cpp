@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/vision_attention.h"
 
 #include "core/layout.h"
@@ -65,7 +66,7 @@ std::size_t vision_attention_workspace_capacity_bytes(std::int32_t min_patches,
 }
 
 void vision_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& cu_seqlens,
-                      WorkspaceArena& workspace, Tensor& out, cudaStream_t stream) {
+                      WorkspaceArena& workspace, Tensor& out, hipStream_t stream) {
     const std::int32_t patches  = q.ne[2];
     const std::int32_t segments = cu_seqlens.ne[0] - 1;
     if (patches <= 0) { throw std::invalid_argument("vision_attention: P must be positive"); }
@@ -88,7 +89,7 @@ void vision_attention(const Tensor& q, const Tensor& k, const Tensor& v, const T
 }
 
 void vision_attention(const Tensor& q, const Tensor& k, const Tensor& v,
-                      std::int32_t segment_length, Tensor& out, cudaStream_t stream) {
+                      std::int32_t segment_length, Tensor& out, hipStream_t stream) {
     const std::int32_t patches = q.ne[2];
     if (patches <= 0) { throw std::invalid_argument("vision_attention: P must be positive"); }
     require_qkv(q, patches, "q");

@@ -25,14 +25,14 @@ T load(const GuardedDeviceBuffer& buffer) {
     return value;
 }
 
-int set_and_increment_i32_contract(cudaStream_t stream) {
+int set_and_increment_i32_contract(hipStream_t stream) {
     GuardedDeviceBuffer state(sizeof(std::int32_t));
     store<std::int32_t>(state, -918273);
     Tensor scalar(state.data(), DType::I32, {1});
 
     constexpr std::int32_t assigned = 123456789;
     ops::set_i32_scalar(scalar, assigned, stream);
-    cuda_synchronize(stream);
+    hip_synchronize(stream);
 
     int failures = 0;
     failures += verify_exact("set_i32_scalar transition",
@@ -42,7 +42,7 @@ int set_and_increment_i32_contract(cudaStream_t stream) {
 
     const std::int32_t expected_increment = assigned + 1;
     ops::increment_i32_scalar(scalar, stream);
-    cuda_synchronize(stream);
+    hip_synchronize(stream);
     failures += verify_exact("increment_i32_scalar transition",
                              std::vector<std::int32_t>{load<std::int32_t>(state)},
                              std::vector<std::int32_t>{expected_increment});
@@ -50,7 +50,7 @@ int set_and_increment_i32_contract(cudaStream_t stream) {
     return failures;
 }
 
-int assign_i32_contract(cudaStream_t stream) {
+int assign_i32_contract(hipStream_t stream) {
     GuardedDeviceBuffer source(sizeof(std::int32_t));
     GuardedDeviceBuffer destination(sizeof(std::int32_t));
     constexpr std::int32_t source_value      = -19088743;
@@ -61,7 +61,7 @@ int assign_i32_contract(cudaStream_t stream) {
     Tensor destination_tensor(destination.data(), DType::I32, {1});
 
     ops::assign_i32_scalar(source_tensor, destination_tensor, stream);
-    cuda_synchronize(stream);
+    hip_synchronize(stream);
 
     int failures = 0;
     failures += verify_exact("assign_i32_scalar destination transition",
@@ -75,7 +75,7 @@ int assign_i32_contract(cudaStream_t stream) {
     return failures;
 }
 
-int add_i32_contract(cudaStream_t stream) {
+int add_i32_contract(hipStream_t stream) {
     GuardedDeviceBuffer lhs(sizeof(std::int32_t));
     GuardedDeviceBuffer rhs(sizeof(std::int32_t));
     GuardedDeviceBuffer destination(sizeof(std::int32_t));
@@ -89,7 +89,7 @@ int add_i32_contract(cudaStream_t stream) {
     Tensor destination_tensor(destination.data(), DType::I32, {1});
 
     ops::add_i32_scalars(lhs_tensor, rhs_tensor, destination_tensor, stream);
-    cuda_synchronize(stream);
+    hip_synchronize(stream);
 
     int failures = 0;
     failures += verify_exact("add_i32_scalars destination transition",
@@ -107,14 +107,14 @@ int add_i32_contract(cudaStream_t stream) {
     return failures;
 }
 
-int increment_i64_contract(cudaStream_t stream) {
+int increment_i64_contract(hipStream_t stream) {
     GuardedDeviceBuffer state(sizeof(std::int64_t));
     constexpr std::int64_t initial = (std::int64_t{1} << 45) + 987654321;
     store<std::int64_t>(state, initial);
     Tensor scalar(state.data(), DType::I64, {1});
 
     ops::increment_i64_scalar(scalar, stream);
-    cuda_synchronize(stream);
+    hip_synchronize(stream);
 
     int failures = 0;
     failures += verify_exact("increment_i64_scalar transition",
@@ -127,13 +127,13 @@ int increment_i64_contract(cudaStream_t stream) {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
-    cudaStream_t stream = nullptr;
-    cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreate");
+    hipStream_t stream = nullptr;
+    hip_check(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking), "hipStreamCreate");
 
     int failures = 0;
     failures += set_and_increment_i32_contract(stream);
@@ -141,7 +141,7 @@ int main() {
     failures += add_i32_contract(stream);
     failures += increment_i64_contract(stream);
 
-    cuda_check(cudaStreamDestroy(stream), "cudaStreamDestroy");
+    hip_check(hipStreamDestroy(stream), "hipStreamDestroy");
     std::cout << (failures == 0 ? "OK" : "FAIL") << " scalar public contract\n";
     return failures == 0 ? 0 : 1;
 }

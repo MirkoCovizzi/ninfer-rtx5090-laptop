@@ -49,7 +49,7 @@ int pack_case(std::int32_t hidden, std::int32_t tokens) {
     Tensor hidden_tensor(device_hidden.data(), DType::BF16, {hidden, tokens});
     Tensor output_tensor(device_output.data(), DType::BF16, {output_rows, tokens});
     ops::mtp_pack_fc_input(embedding_tensor, hidden_tensor, output_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label =
         "mtp_pack_fc_input D=" + std::to_string(hidden) + " T=" + std::to_string(tokens);
@@ -111,7 +111,7 @@ int split_case(std::int32_t tokens) {
     Tensor value_tensor(device_value.data(), DType::BF16, {256, 4, tokens});
     ops::mtp_split_attn_in(input_tensor, query_tensor, key_tensor, gate_tensor, value_tensor,
                            nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = "mtp_split_attn_in T=" + std::to_string(tokens);
     int failures            = 0;
@@ -140,7 +140,7 @@ int split_case(std::int32_t tokens) {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

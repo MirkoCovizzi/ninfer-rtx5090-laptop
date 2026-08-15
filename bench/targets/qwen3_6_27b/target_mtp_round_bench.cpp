@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include <ninfer/targets/qwen3_6_27b/package.h>
 
 #include "artifact/binder.h"
@@ -7,7 +8,7 @@
 #include "runtime/engine/kv_capacity.h"
 #include "runtime/engine/request_memory.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -35,14 +36,14 @@ struct Options {
     int repetitions                = 10;
     std::uint32_t draft_tokens     = 5;
     ninfer::ProposalHead proposal  = ninfer::ProposalHead::Optimized;
-    bool use_cuda_graph            = true;
+    bool use_hip_graph            = true;
 };
 
 void print_usage(const char* executable) {
     std::cout << "usage: " << executable
               << " [--artifact <model.ninfer>] [--device <id>] [--warmup <n>] [--reps <n>]"
                  " [--draft-tokens <1..5>] [--proposal-head full|optimized]"
-                 " [--no-cuda-graph]\n";
+                 " [--no-hip-graph]\n";
 }
 
 Options parse_options(int argc, char** argv) {
@@ -74,8 +75,8 @@ Options parse_options(int argc, char** argv) {
             } else {
                 throw std::invalid_argument("--proposal-head must be full or optimized");
             }
-        } else if (argument == "--no-cuda-graph") {
-            options.use_cuda_graph = false;
+        } else if (argument == "--no-hip-graph") {
+            options.use_hip_graph = false;
         } else if (argument == "-h" || argument == "--help") {
             print_usage(argc > 0 ? argv[0] : "ninfer_qwen3_6_27b_mtp_round_bench");
             std::exit(0);
@@ -102,7 +103,7 @@ RoundMeasurement measure_round(target::Package::Program& program, ninfer::Device
     constexpr std::array<std::uint32_t, 1> lanes{0};
     const std::array<ninfer::runtime::RoundBudget, 1> budgets{
         ninfer::runtime::RoundBudget{.generated_tokens_remaining = draft_tokens + 1}};
-    ninfer::CudaEventTimer timer(device);
+    ninfer::HipEventTimer timer(device);
     timer.start();
     const auto round = program.decode_batch(lanes, budgets);
     const std::uint32_t licensed =
@@ -137,7 +138,7 @@ int run(const Options& options) {
     engine.speculative.backend = ninfer::SpeculativeBackend::Mtp;
     engine.speculative.draft_tokens  = options.draft_tokens;
     engine.speculative.proposal_head = options.proposal;
-    engine.use_cuda_graph            = options.use_cuda_graph;
+    engine.use_hip_graph            = options.use_hip_graph;
 
     ninfer::DeviceContext device(options.device);
     ninfer::artifact::Reader reader(options.artifact);
@@ -208,7 +209,7 @@ int run(const Options& options) {
     std::cout << "proposal_head,"
               << (options.proposal == ninfer::ProposalHead::Optimized ? "optimized" : "full")
               << '\n';
-    std::cout << "cuda_graph," << (options.use_cuda_graph ? "true" : "false") << '\n';
+    std::cout << "hip_graph," << (options.use_hip_graph ? "true" : "false") << '\n';
     std::cout << "warmup," << options.warmup << '\n';
     std::cout << "repetitions," << options.repetitions << '\n';
     std::cout << "mtp_round_mean_ms," << mean_ms << '\n';

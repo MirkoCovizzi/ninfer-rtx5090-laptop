@@ -1,10 +1,11 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_pair/linear_pair_test_common.h"
 
 #include "ninfer/ops/linear_pair.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -189,10 +190,10 @@ OutputRead read_output(const void* device, std::int32_t t, std::span<const std::
     std::size_t nonfinite_count = 0;
     for (std::size_t begin = 0; begin < total_words; begin += chunk.size()) {
         const std::size_t count = std::min(chunk.size(), total_words - begin);
-        test::cuda_check(
-            cudaMemcpy(chunk.data(),
+        test::hip_check(
+            hipMemcpy(chunk.data(),
                        static_cast<const std::uint8_t*>(device) + begin * sizeof(std::uint16_t),
-                       count * sizeof(std::uint16_t), cudaMemcpyDeviceToHost),
+                       count * sizeof(std::uint16_t), hipMemcpyDeviceToHost),
             "copy linear_pair output");
         for (const std::uint16_t bits : std::span<const std::uint16_t>(chunk.data(), count)) {
             if (bits == 0xffffU) { ++poison_count; }
@@ -231,7 +232,7 @@ int verify_preserved(const test::GuardedDeviceBuffer& device,
 
 } // namespace
 
-bool cuda_available() { return !test::cuda_unavailable(); }
+bool hip_available() { return !test::hip_unavailable(); }
 
 int run_w8_a16_shape(std::string_view label, const ShapeCase& shape) {
     const std::vector<std::int32_t> tokens = conformance_tokens(shape);
@@ -288,7 +289,7 @@ int run_w8_a16_shape(std::string_view label, const ShapeCase& shape) {
             std::string(label) + " [1024," + std::to_string(shape.k) + "] T=" + std::to_string(t);
         try {
             ops::linear_pair(input, first_weight, second_weight, first, second, nullptr);
-            test::cuda_check(cudaDeviceSynchronize(), "synchronize linear_pair");
+            test::hip_check(hipDeviceSynchronize(), "synchronize linear_pair");
         } catch (const std::exception& error) {
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
             ++failures;

@@ -1,15 +1,17 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/math.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
 namespace ninfer::ops::detail {
 
 struct SnapshotHistoryPublish {
-    __nv_bfloat16* state_write;
+    __hip_bfloat16* state_write;
     const std::int32_t* snapshot_base_slots;
     std::int32_t channels;
 
@@ -25,7 +27,7 @@ struct SnapshotHistoryPublish {
 };
 
 struct RecordColumnPublish {
-    __nv_bfloat16* record;
+    __hip_bfloat16* record;
     std::int32_t channels;
     std::int32_t width;
 
@@ -46,13 +48,13 @@ struct NoHistoryPublish {
 // effect after the convolution has consumed that accumulator.
 template <class Publish>
 struct GdnConvEpilogue {
-    const __nv_bfloat16* conv_weight;
-    const __nv_bfloat16* state_read;
+    const __hip_bfloat16* conv_weight;
+    const __hip_bfloat16* state_read;
     const std::int32_t* initial_slots;
     const std::int32_t* valid_columns;
-    __nv_bfloat16* query;
-    __nv_bfloat16* key;
-    __nv_bfloat16* value;
+    __hip_bfloat16* query;
+    __hip_bfloat16* key;
+    __hip_bfloat16* value;
     std::int32_t channels;
     std::int32_t query_rows;
     std::int32_t key_rows;
@@ -101,7 +103,7 @@ struct GdnConvEpilogue {
             conv                       = fmaf(w1, s1, conv);
             conv                       = fmaf(w2, s2, conv);
             conv                       = fmaf(w3, p, conv);
-            const __nv_bfloat16 output = __float2bfloat16_rn(silu(conv));
+            const __hip_bfloat16 output = __float2bfloat16_rn(silu(conv));
             if (row < query_rows) {
                 query[column * query_rows + row] = output;
             } else if (row < query_rows + key_rows) {

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/linear/bf16/bf16_config.h"
@@ -5,15 +6,16 @@
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
 namespace ninfer::ops::detail {
 
 template <int Values>
-struct alignas(Values* static_cast<int>(sizeof(__nv_bfloat16))) Bf16GemvPack {
+struct alignas(Values* static_cast<int>(sizeof(__hip_bfloat16))) Bf16GemvPack {
     static_assert(Values == 4 || Values == 8 || Values == 16);
     std::uint32_t words[Values / 2];
 };
@@ -23,7 +25,7 @@ static_assert(sizeof(Bf16GemvPack<8>) == 16);
 static_assert(sizeof(Bf16GemvPack<16>) == 32);
 
 template <int Values>
-__device__ __forceinline__ Bf16GemvPack<Values> load_bf16_pack(const __nv_bfloat16* pointer) {
+__device__ __forceinline__ Bf16GemvPack<Values> load_bf16_pack(const __hip_bfloat16* pointer) {
     if constexpr (Values <= 8) {
         return load_vec<Bf16GemvPack<Values>>(pointer);
     } else {
@@ -41,21 +43,12 @@ __device__ __forceinline__ Bf16GemvPack<Values> load_bf16_pack(const __nv_bfloat
 
 template <Bf16WeightCache Cache, int Values>
 __device__ __forceinline__ Bf16GemvPack<Values>
-load_bf16_weight_pack(const __nv_bfloat16* pointer) {
+load_bf16_weight_pack(const __hip_bfloat16* pointer) {
     if constexpr (Cache == Bf16WeightCache::Default) {
         return load_bf16_pack<Values>(pointer);
-    } else if constexpr (Values == 4) {
-        uint2 bits;
-        asm volatile("ld.global.cg.v2.u32 {%0, %1}, [%2];\n"
-                     : "=r"(bits.x), "=r"(bits.y)
-                     : "l"(pointer));
-        return load_vec<Bf16GemvPack<Values>>(&bits);
-    } else if constexpr (Values == 8) {
-        uint4 bits;
-        asm volatile("ld.global.cg.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-                     : "=r"(bits.x), "=r"(bits.y), "=r"(bits.z), "=r"(bits.w)
-                     : "l"(pointer));
-        return load_vec<Bf16GemvPack<Values>>(&bits);
+    } else if constexpr (Values == 4 || Values == 8) {
+        // RDNA has no ld.global.cg PTX; a plain vector load has the same effect.
+        return load_vec<Bf16GemvPack<Values>>(pointer);
     } else {
         Bf16GemvPack<Values> result;
         const Bf16GemvPack<8> low  = load_bf16_weight_pack<Cache, 8>(pointer);
@@ -86,9 +79,9 @@ __device__ __forceinline__ void accumulate_bf16_packs(const Bf16GemvPack<Values>
 }
 
 struct Bf16ContiguousOutput {
-    __nv_bfloat16* data;
+    __hip_bfloat16* data;
 
-    __device__ __forceinline__ void store(std::int32_t parent_row, __nv_bfloat16 value) const {
+    __device__ __forceinline__ void store(std::int32_t parent_row, __hip_bfloat16 value) const {
         data[parent_row] = value;
     }
 };
@@ -107,13 +100,13 @@ struct Bf16GemvSharedStorage {
         Schedule::kActivationAccess == Bf16ActivationAccess::Shared ? Geometry::kInputRows : 8;
     static constexpr int kReductionWarps = Schedule::kWarpsPerRow > 1 ? Schedule::kWarpsPerRow : 1;
 
-    alignas(16) __nv_bfloat16 activation[kActivationElements];
+    alignas(16) __hip_bfloat16 activation[kActivationElements];
     float partials[Schedule::kRowGroupsPerCta][Schedule::kRowsPerWarp][kReductionWarps];
 };
 
 template <class Geometry, class Schedule>
-__device__ __forceinline__ const __nv_bfloat16*
-prepare_bf16_activation(const __nv_bfloat16* x, Bf16GemvSharedStorage<Geometry, Schedule>& shared) {
+__device__ __forceinline__ const __hip_bfloat16*
+prepare_bf16_activation(const __hip_bfloat16* x, Bf16GemvSharedStorage<Geometry, Schedule>& shared) {
     if constexpr (Schedule::kActivationAccess == Bf16ActivationAccess::Direct) {
         return x;
     } else {
@@ -138,14 +131,14 @@ __device__ __forceinline__ std::int32_t bf16_phase_offset(int phase, int warp_in
 
 template <class Geometry, class Schedule>
 __device__ __forceinline__ Bf16GemvPack<Schedule::kValuesPerLane>
-load_bf16_activation_phase(const __nv_bfloat16* activation, int phase, int warp_in_row, int lane) {
+load_bf16_activation_phase(const __hip_bfloat16* activation, int phase, int warp_in_row, int lane) {
     const int offset = bf16_phase_offset<Geometry, Schedule>(phase, warp_in_row, lane);
     return load_bf16_pack<Schedule::kValuesPerLane>(activation + offset);
 }
 
 template <class Geometry, class Schedule>
 __device__ __forceinline__ Bf16GemvPack<Schedule::kValuesPerLane>
-load_bf16_weight_phase(const __nv_bfloat16* weight, int row, int phase, int warp_in_row, int lane) {
+load_bf16_weight_phase(const __hip_bfloat16* weight, int row, int phase, int warp_in_row, int lane) {
     const int offset = bf16_phase_offset<Geometry, Schedule>(phase, warp_in_row, lane);
     return load_bf16_weight_pack<Schedule::kWeightCache, Schedule::kValuesPerLane>(
         weight + static_cast<std::int64_t>(row) * Geometry::kInputRows + offset);
@@ -165,7 +158,7 @@ __device__ __forceinline__ int bf16_phase_index(int iteration, int row0) {
 
 template <class Geometry, class Schedule>
 __device__ __forceinline__ void compute_bf16_gemv_rows(
-    const __nv_bfloat16* activation, const __nv_bfloat16* weight, int row0, int warp_in_row,
+    const __hip_bfloat16* activation, const __hip_bfloat16* weight, int row0, int warp_in_row,
     int lane, float (&accumulators)[Schedule::kRowsPerWarp][Schedule::kAccumulatorChains]) {
     constexpr int kValuesPerPhase = Schedule::kWarpsPerRow * kWarpSize * Schedule::kValuesPerLane;
     static_assert((Geometry::kInputRows % kValuesPerPhase) == 0);
@@ -227,12 +220,12 @@ __device__ __forceinline__ void compute_bf16_gemv_rows(
 
 template <class Geometry, class Schedule, class Output, class Epilogue = Bf16StoreEpilogue>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_gemv_kernel(
-    const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ weight, Output output,
+    const __hip_bfloat16* __restrict__ x, const __hip_bfloat16* __restrict__ weight, Output output,
     Epilogue epilogue = {}) {
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
 
     __shared__ Bf16GemvSharedStorage<Geometry, Schedule> shared;
-    const __nv_bfloat16* activation = prepare_bf16_activation<Geometry, Schedule>(x, shared);
+    const __hip_bfloat16* activation = prepare_bf16_activation<Geometry, Schedule>(x, shared);
 
     const int lane        = static_cast<int>(threadIdx.x) & (kWarpSize - 1);
     const int warp        = static_cast<int>(threadIdx.x) / kWarpSize;

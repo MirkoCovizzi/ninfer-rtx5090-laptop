@@ -39,7 +39,7 @@ int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::ui
     Tensor source_tensor(device_source.data(), DType::FP32, {rows, columns});
     Tensor destination_tensor(device_destination.data(), DType::BF16, {rows, columns});
     ops::cast_fp32_to_bf16(source_tensor, destination_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures =
         verify_exact(label, from_device<std::uint16_t>(device_destination.data(), count), expected);
@@ -53,7 +53,7 @@ int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::ui
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

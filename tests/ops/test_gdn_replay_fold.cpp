@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/gdn_replay.h"
@@ -9,7 +10,7 @@
 #include "ops/input_projection_test_common.h"
 #include "ops/op_tester.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <bit>
@@ -149,7 +150,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     DeviceBuffer record_storage(record_bytes + 2 * kGuardBytes);
     record_storage.fill(0xa5);
     void* record_base = offset_pointer(record_storage.p, kGuardBytes);
-    cuda_check(cudaMemset(record_base, 0xff, record_bytes), "initialize replay records");
+    hip_check(hipMemset(record_base, 0xff, record_bytes), "initialize replay records");
     const GdnReplayRecords records({record_base, record_bytes}, record_layout);
 
     std::vector<std::uint16_t> conv_records(records.conv.numel(), 0xffffU);
@@ -205,17 +206,17 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             }
         }
     }
-    cuda_check(cudaMemcpy(records.conv.data, conv_records.data(), records.conv.bytes(),
-                          cudaMemcpyHostToDevice),
+    hip_check(hipMemcpy(records.conv.data, conv_records.data(), records.conv.bytes(),
+                          hipMemcpyHostToDevice),
                "upload conv records");
-    cuda_check(cudaMemcpy(records.key.data, key_records.data(), records.key.bytes(),
-                          cudaMemcpyHostToDevice),
+    hip_check(hipMemcpy(records.key.data, key_records.data(), records.key.bytes(),
+                          hipMemcpyHostToDevice),
                "upload key records");
-    cuda_check(cudaMemcpy(records.value.data, value_records.data(), records.value.bytes(),
-                          cudaMemcpyHostToDevice),
+    hip_check(hipMemcpy(records.value.data, value_records.data(), records.value.bytes(),
+                          hipMemcpyHostToDevice),
                "upload value records");
-    cuda_check(cudaMemcpy(records.gate.data, gate_records.data(), records.gate.bytes(),
-                          cudaMemcpyHostToDevice),
+    hip_check(hipMemcpy(records.gate.data, gate_records.data(), records.gate.bytes(),
+                          hipMemcpyHostToDevice),
                "upload gate records");
 
     LayoutBuilder state_builder;
@@ -232,7 +233,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     DeviceBuffer state_storage(state_bytes + 2 * kGuardBytes);
     state_storage.fill(0xa5);
     void* state_base = offset_pointer(state_storage.p, kGuardBytes);
-    cuda_check(cudaMemset(state_base, 0, state_bytes), "initialize all-layer state");
+    hip_check(hipMemset(state_base, 0, state_bytes), "initialize all-layer state");
     LinearAttentionStatePool state_pool({state_base, state_bytes}, state_layout);
 
     DeviceBuffer expected_conv(static_cast<std::size_t>(profile.layers) * rows * conv_slot_bytes);
@@ -250,8 +251,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             }
             const Tensor destination = state_pool.conv_slot(static_cast<std::uint32_t>(layer),
                                                             slots[static_cast<std::size_t>(row)]);
-            cuda_check(cudaMemcpy(destination.data, initial.data(), conv_slot_bytes,
-                                  cudaMemcpyHostToDevice),
+            hip_check(hipMemcpy(destination.data, initial.data(), conv_slot_bytes,
+                                  hipMemcpyHostToDevice),
                        "upload initial conv state");
 
             std::vector<std::uint16_t> expected = initial;
@@ -284,8 +285,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             }
             void* expected_destination = offset_pointer(
                 expected_conv.p, static_cast<std::size_t>(layer * rows + row) * conv_slot_bytes);
-            cuda_check(cudaMemcpy(expected_destination, expected.data(), conv_slot_bytes,
-                                  cudaMemcpyHostToDevice),
+            hip_check(hipMemcpy(expected_destination, expected.data(), conv_slot_bytes,
+                                  hipMemcpyHostToDevice),
                        "upload expected conv state");
         }
     }
@@ -328,14 +329,14 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             const std::vector<float> initial_recurrent(recurrent_slot_elements, initial_value);
             const Tensor actual_initial = state_pool.recurrent_slot(
                 static_cast<std::uint32_t>(layer), slots[static_cast<std::size_t>(row)]);
-            cuda_check(cudaMemcpy(actual_initial.data, initial_recurrent.data(),
-                                  recurrent_slot_bytes, cudaMemcpyHostToDevice),
+            hip_check(hipMemcpy(actual_initial.data, initial_recurrent.data(),
+                                  recurrent_slot_bytes, hipMemcpyHostToDevice),
                        "upload initial recurrent state");
-            cuda_check(cudaMemcpy(offset_pointer(local_snapshot_state.p,
+            hip_check(hipMemcpy(offset_pointer(local_snapshot_state.p,
                                                  static_cast<std::size_t>(local_initial_slot) *
                                                      recurrent_slot_bytes),
                                   initial_recurrent.data(), recurrent_slot_bytes,
-                                  cudaMemcpyHostToDevice),
+                                  hipMemcpyHostToDevice),
                        "upload local snapshot initial state");
 
             const std::int32_t commit = commits[static_cast<std::size_t>(row)];
@@ -343,8 +344,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
                 offset_pointer(expected_recurrent.p,
                                static_cast<std::size_t>(layer * rows + row) * recurrent_slot_bytes);
             if (commit == 0) {
-                cuda_check(cudaMemcpy(expected, initial_recurrent.data(), recurrent_slot_bytes,
-                                      cudaMemcpyHostToDevice),
+                hip_check(hipMemcpy(expected, initial_recurrent.data(), recurrent_slot_bytes,
+                                      hipMemcpyHostToDevice),
                            "save unchanged recurrent state");
                 continue;
             }
@@ -376,8 +377,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             const void* selected =
                 offset_pointer(local_snapshot_state.p,
                                static_cast<std::size_t>(commit - 1) * recurrent_slot_bytes);
-            cuda_check(cudaMemcpyAsync(expected, selected, recurrent_slot_bytes,
-                                       cudaMemcpyDeviceToDevice, nullptr),
+            hip_check(hipMemcpyAsync(expected, selected, recurrent_slot_bytes,
+                                       hipMemcpyDeviceToDevice, nullptr),
                        "save snapshot recurrent state");
         }
     }
@@ -390,7 +391,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
                                                     commits[static_cast<std::size_t>(row)]};
     }
     ops::gdn_replay_fold(records, state_pool.all_layers_view(), fold_rows, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures             = 0;
     const std::string suffix = " L=" + std::to_string(profile.layers) +
@@ -404,14 +405,14 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
         for (std::int32_t row = 0; row < rows; ++row) {
             const Tensor actual_state = state_pool.recurrent_slot(
                 static_cast<std::uint32_t>(layer), slots[static_cast<std::size_t>(row)]);
-            cuda_check(cudaMemcpy(actual_recurrent.data(), actual_state.data, recurrent_slot_bytes,
-                                  cudaMemcpyDeviceToHost),
+            hip_check(hipMemcpy(actual_recurrent.data(), actual_state.data, recurrent_slot_bytes,
+                                  hipMemcpyDeviceToHost),
                        "download folded recurrent state");
             const void* expected_state =
                 offset_pointer(expected_recurrent.p,
                                static_cast<std::size_t>(layer * rows + row) * recurrent_slot_bytes);
-            cuda_check(cudaMemcpy(expected_recurrent_host.data(), expected_state,
-                                  recurrent_slot_bytes, cudaMemcpyDeviceToHost),
+            hip_check(hipMemcpy(expected_recurrent_host.data(), expected_state,
+                                  recurrent_slot_bytes, hipMemcpyDeviceToHost),
                        "download expected recurrent state");
             if (actual_recurrent != expected_recurrent_host) {
                 std::cerr << "fold recurrent state differs from snapshot" << suffix
@@ -426,13 +427,13 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
 
             const Tensor actual_history = state_pool.conv_slot(
                 static_cast<std::uint32_t>(layer), slots[static_cast<std::size_t>(row)]);
-            cuda_check(cudaMemcpy(actual_conv.data(), actual_history.data, conv_slot_bytes,
-                                  cudaMemcpyDeviceToHost),
+            hip_check(hipMemcpy(actual_conv.data(), actual_history.data, conv_slot_bytes,
+                                  hipMemcpyDeviceToHost),
                        "download folded conv state");
             const void* expected_history = offset_pointer(
                 expected_conv.p, static_cast<std::size_t>(layer * rows + row) * conv_slot_bytes);
-            cuda_check(cudaMemcpy(expected_conv_host.data(), expected_history, conv_slot_bytes,
-                                  cudaMemcpyDeviceToHost),
+            hip_check(hipMemcpy(expected_conv_host.data(), expected_history, conv_slot_bytes,
+                                  hipMemcpyDeviceToHost),
                        "download expected conv state");
             if (actual_conv != expected_conv_host) {
                 std::cerr << "fold conv history differs" << suffix << " layer=" << layer
@@ -449,8 +450,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             if (std::find(slots.begin(), slots.end(), slot) != slots.end()) { continue; }
             const Tensor recurrent =
                 state_pool.recurrent_slot(static_cast<std::uint32_t>(layer), slot);
-            cuda_check(cudaMemcpy(inactive_recurrent.data(), recurrent.data, recurrent_slot_bytes,
-                                  cudaMemcpyDeviceToHost),
+            hip_check(hipMemcpy(inactive_recurrent.data(), recurrent.data, recurrent_slot_bytes,
+                                  hipMemcpyDeviceToHost),
                        "download inactive recurrent state");
             if (!std::all_of(inactive_recurrent.begin(), inactive_recurrent.end(),
                              [](float value) { return value == 0.0F; })) {
@@ -459,8 +460,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
                 return failures + 1;
             }
             const Tensor conv = state_pool.conv_slot(static_cast<std::uint32_t>(layer), slot);
-            cuda_check(cudaMemcpy(inactive_conv.data(), conv.data, conv_slot_bytes,
-                                  cudaMemcpyDeviceToHost),
+            hip_check(hipMemcpy(inactive_conv.data(), conv.data, conv_slot_bytes,
+                                  hipMemcpyDeviceToHost),
                        "download inactive conv state");
             if (!std::all_of(inactive_conv.begin(), inactive_conv.end(),
                              [](std::uint16_t value) { return value == 0; })) {
@@ -554,8 +555,8 @@ int run_record_fold_rounds() {
         const std::vector<float> recurrent(recurrent_slot_elements, initial_value);
         const Tensor recurrent_slot =
             state_pool.recurrent_slot(static_cast<std::uint32_t>(layer), kInitialSlot);
-        cuda_check(cudaMemcpy(recurrent_slot.data, recurrent.data(), recurrent_slot.bytes(),
-                              cudaMemcpyHostToDevice),
+        hip_check(hipMemcpy(recurrent_slot.data, recurrent.data(), recurrent_slot.bytes(),
+                              hipMemcpyHostToDevice),
                    "upload pair initial recurrent state");
 
         std::vector<std::uint16_t> conv(conv_slot_elements);
@@ -567,8 +568,8 @@ int run_record_fold_rounds() {
         }
         const Tensor conv_slot =
             state_pool.conv_slot(static_cast<std::uint32_t>(layer), kInitialSlot);
-        cuda_check(
-            cudaMemcpy(conv_slot.data, conv.data(), conv_slot.bytes(), cudaMemcpyHostToDevice),
+        hip_check(
+            hipMemcpy(conv_slot.data, conv.data(), conv_slot.bytes(), hipMemcpyHostToDevice),
             "upload pair initial conv state");
     }
 
@@ -652,7 +653,7 @@ int run_record_fold_rounds() {
                                                kScale, recurrent_states, valid, initial_selector,
                                                layer_records.key, layer_records.value,
                                                layer_records.gate, record_output, nullptr);
-            cuda_synchronize();
+            hip_synchronize();
 
             const std::string label = "record-fold pair round=" + std::to_string(round) +
                                       " layer=" + std::to_string(layer);
@@ -682,7 +683,7 @@ int run_record_fold_rounds() {
         const std::int32_t commit = round + 1;
         const std::array fold_rows{ops::GdnReplayFoldRow{kInitialSlot, commit}};
         ops::gdn_replay_fold(records, state_pool.all_layers_view(), fold_rows, nullptr);
-        cuda_synchronize();
+        hip_synchronize();
         for (std::int32_t layer = 0; layer < kProfile.layers; ++layer) {
             const Tensor folded_recurrent =
                 state_pool.recurrent_slot(static_cast<std::uint32_t>(layer), kInitialSlot);
@@ -713,7 +714,7 @@ int run_record_fold_rounds() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // ninfer::ops — silu_mul kernel: out = silu(gate) * up, elementwise.
@@ -7,7 +8,8 @@
 
 #include "ops/common/math.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -15,14 +17,14 @@ namespace ninfer::ops {
 
 inline constexpr int kSiluAndMulPairsPerThread = 4;
 
-__device__ __forceinline__ __nv_bfloat162 silu_mul_pair(__nv_bfloat162 g, __nv_bfloat162 u) {
+__device__ __forceinline__ __hip_bfloat162 silu_mul_pair(__hip_bfloat162 g, __hip_bfloat162 u) {
     const float r0 = silu(__low2float(g)) * __low2float(u);
     const float r1 = silu(__high2float(g)) * __high2float(u);
     return __floats2bfloat162_rn(r0, r1);
 }
 
-__global__ void silu_and_mul_scalar_kernel(const __nv_bfloat16* gate, const __nv_bfloat16* up,
-                                           __nv_bfloat16* out, std::int64_t n) {
+__global__ void silu_and_mul_scalar_kernel(const __hip_bfloat16* gate, const __hip_bfloat16* up,
+                                           __hip_bfloat16* out, std::int64_t n) {
     const std::int64_t start  = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
     for (std::int64_t i = start; i < n; i += stride) {
@@ -31,7 +33,7 @@ __global__ void silu_and_mul_scalar_kernel(const __nv_bfloat16* gate, const __nv
 }
 
 __global__ void silu_and_mul_strided_input_kernel(
-    const __nv_bfloat16* gate, const __nv_bfloat16* up, __nv_bfloat16* out, std::int64_t n,
+    const __hip_bfloat16* gate, const __hip_bfloat16* up, __hip_bfloat16* out, std::int64_t n,
     std::int32_t ne0, std::int32_t ne1, std::int32_t ne2, std::int64_t gnb0, std::int64_t gnb1,
     std::int64_t gnb2, std::int64_t gnb3, std::int64_t unb0, std::int64_t unb1, std::int64_t unb2,
     std::int64_t unb3) {
@@ -54,24 +56,24 @@ __global__ void silu_and_mul_strided_input_kernel(
         const std::int64_t uoff =
             static_cast<std::int64_t>(d0) * unb0 + static_cast<std::int64_t>(d1) * unb1 +
             static_cast<std::int64_t>(d2) * unb2 + static_cast<std::int64_t>(d3) * unb3;
-        const auto gv = *reinterpret_cast<const __nv_bfloat16*>(gate_bytes + goff);
-        const auto uv = *reinterpret_cast<const __nv_bfloat16*>(up_bytes + uoff);
+        const auto gv = *reinterpret_cast<const __hip_bfloat16*>(gate_bytes + goff);
+        const auto uv = *reinterpret_cast<const __hip_bfloat16*>(up_bytes + uoff);
         out[i]        = __float2bfloat16(silu(__bfloat162float(gv)) * __bfloat162float(uv));
     }
 }
 
 __launch_bounds__(256) __global__
-    void silu_and_mul_dim0_split_kernel(const __nv_bfloat16* gate, const __nv_bfloat16* up,
-                                        __nv_bfloat16* out, std::int32_t rows,
+    void silu_and_mul_dim0_split_kernel(const __hip_bfloat16* gate, const __hip_bfloat16* up,
+                                        __hip_bfloat16* out, std::int32_t rows,
                                         std::int64_t gate_col_stride, std::int64_t up_col_stride) {
     const int col            = blockIdx.y;
     const std::int64_t pair0 = (blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x) *
                                kSiluAndMulPairsPerThread;
     const std::int64_t row_pairs = rows / 2;
 
-    const auto* gate2 = reinterpret_cast<const __nv_bfloat162*>(gate + col * gate_col_stride);
-    const auto* up2   = reinterpret_cast<const __nv_bfloat162*>(up + col * up_col_stride);
-    auto* out2 = reinterpret_cast<__nv_bfloat162*>(out + col * static_cast<std::int64_t>(rows));
+    const auto* gate2 = reinterpret_cast<const __hip_bfloat162*>(gate + col * gate_col_stride);
+    const auto* up2   = reinterpret_cast<const __hip_bfloat162*>(up + col * up_col_stride);
+    auto* out2 = reinterpret_cast<__hip_bfloat162*>(out + col * static_cast<std::int64_t>(rows));
 
     for (int p = 0; p < kSiluAndMulPairsPerThread; ++p) {
         const std::int64_t j = pair0 + p;
@@ -80,26 +82,26 @@ __launch_bounds__(256) __global__
 }
 
 __launch_bounds__(256) __global__
-    void silu_and_mul_kernel(const __nv_bfloat16* gate, const __nv_bfloat16* up, __nv_bfloat16* out,
+    void silu_and_mul_kernel(const __hip_bfloat16* gate, const __hip_bfloat16* up, __hip_bfloat16* out,
                              std::int64_t n) {
     const std::int64_t tid = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
     const std::int64_t stride =
         static_cast<std::int64_t>(gridDim.x) * blockDim.x * kSiluAndMulPairsPerThread;
     const std::int64_t n2 = n / 2;
 
-    const auto* gate2 = reinterpret_cast<const __nv_bfloat162*>(gate);
-    const auto* up2   = reinterpret_cast<const __nv_bfloat162*>(up);
-    auto* out2        = reinterpret_cast<__nv_bfloat162*>(out);
+    const auto* gate2 = reinterpret_cast<const __hip_bfloat162*>(gate);
+    const auto* up2   = reinterpret_cast<const __hip_bfloat162*>(up);
+    auto* out2        = reinterpret_cast<__hip_bfloat162*>(out);
     for (std::int64_t j = tid * kSiluAndMulPairsPerThread; j < n2; j += stride) {
-        const __nv_bfloat162 g0 = gate2[j];
-        const __nv_bfloat162 u0 = up2[j];
+        const __hip_bfloat162 g0 = gate2[j];
+        const __hip_bfloat162 u0 = up2[j];
         if (j + 3 < n2) {
-            const __nv_bfloat162 g1 = gate2[j + 1];
-            const __nv_bfloat162 u1 = up2[j + 1];
-            const __nv_bfloat162 g2 = gate2[j + 2];
-            const __nv_bfloat162 u2 = up2[j + 2];
-            const __nv_bfloat162 g3 = gate2[j + 3];
-            const __nv_bfloat162 u3 = up2[j + 3];
+            const __hip_bfloat162 g1 = gate2[j + 1];
+            const __hip_bfloat162 u1 = up2[j + 1];
+            const __hip_bfloat162 g2 = gate2[j + 2];
+            const __hip_bfloat162 u2 = up2[j + 2];
+            const __hip_bfloat162 g3 = gate2[j + 3];
+            const __hip_bfloat162 u3 = up2[j + 3];
             out2[j]                 = silu_mul_pair(g0, u0);
             out2[j + 1]             = silu_mul_pair(g1, u1);
             out2[j + 2]             = silu_mul_pair(g2, u2);

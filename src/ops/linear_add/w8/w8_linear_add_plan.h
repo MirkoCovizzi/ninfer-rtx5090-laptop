@@ -2,7 +2,7 @@
 
 #include "core/arena.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -45,8 +45,8 @@ bool w8_linear_add_admits(const W8LinearAddProblem& problem) noexcept;
 W8LinearAddPlan w8_linear_add_resolve_plan(const W8LinearAddProblem& problem);
 
 void w8_linear_add_execute_plan(const W8LinearAddPlan& plan, const Tensor& x, const Weight& w,
-                                Tensor& residual_out, cudaStream_t stream);
+                                Tensor& residual_out, hipStream_t stream);
 void w8_linear_add_dispatch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                            cudaStream_t stream);
+                            hipStream_t stream);
 
 } // namespace ninfer::ops::detail

@@ -1,15 +1,17 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
 
 #include "core/device.h"
 #include "ops/linear/bf16/bf16_gemv.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 namespace ninfer::ops::detail {
 namespace {
 
 struct Bf16LinearAddDecodeOutput {
-    __nv_bfloat16* residual;
+    __hip_bfloat16* residual;
 };
 
 struct Bf16LinearAddDecodeEpilogue {
@@ -23,17 +25,17 @@ struct Bf16LinearAddDecodeEpilogue {
 } // namespace
 
 void bf16_linear_add_decode_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     using Geometry = Bf16GemvGeometry<5120, 6144>;
     using Schedule = Bf16LinearDecodeSchedule<Geometry>;
 
-    const Bf16LinearAddDecodeOutput output{static_cast<__nv_bfloat16*>(residual.data)};
+    const Bf16LinearAddDecodeOutput output{static_cast<__hip_bfloat16*>(residual.data)};
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
     bf16_gemv_kernel<Geometry, Schedule, Bf16LinearAddDecodeOutput, Bf16LinearAddDecodeEpilogue>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.qdata), output);
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.qdata), output);
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

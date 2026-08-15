@@ -4,7 +4,7 @@
 #include "core/tensor.h"
 #include "ninfer/ops/sparse_moe.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -96,6 +96,6 @@ resolve_sparse_moe_prefill_plan(std::int32_t tokens, QType routed_gate_up, QType
 
 void sparse_moe_prefill_launch(const Tensor& x, const SparseMoeWeights& weights,
                                Tensor& destination, const SparseMoePrefillPlan& plan,
-                               const SparseMoePrefillWorkspace& workspace, cudaStream_t stream);
+                               const SparseMoePrefillWorkspace& workspace, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

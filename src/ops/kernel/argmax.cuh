@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Implements: include/ninfer/ops/argmax.h
@@ -6,10 +7,11 @@
 // Algorithm assumptions: one CTA reduces each blockDim.x-row tile and an atomic
 // winner selects the exact value/lower-id maximum per column.
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 #include <cstdint>
 #include <climits>
-#include <math_constants.h>
+#include <hip/hip_math_constants.h>
 
 namespace ninfer::ops {
 
@@ -25,7 +27,7 @@ __device__ __forceinline__ bool argmax_better(float value, std::int32_t index, f
 }
 
 __device__ __forceinline__ void argmax_warp_reduce(float& value, std::int32_t& index) {
-    constexpr unsigned int kMask = 0xffffffffu;
+    constexpr unsigned long long kMask = 0xffffffffull;
     for (int offset = 16; offset > 0; offset >>= 1) {
         const float other_value        = __shfl_down_sync(kMask, value, offset);
         const std::int32_t other_index = __shfl_down_sync(kMask, index, offset);
@@ -49,13 +51,13 @@ __device__ __forceinline__ void argmax_block_reduce(float& value, std::int32_t& 
     }
     __syncthreads();
 
-    value = (lane < (blockDim.x >> 5)) ? warp_values[lane] : -CUDART_INF_F;
+    value = (lane < (blockDim.x >> 5)) ? warp_values[lane] : -HIP_INF_F;
     index = (lane < (blockDim.x >> 5)) ? warp_indices[lane] : INT32_MAX;
     if (warp == 0) { argmax_warp_reduce(value, index); }
 }
 
 __launch_bounds__(kArgmaxBlock) __global__
-    void argmax_kernel(const __nv_bfloat16* logits, std::int32_t* out, std::int32_t valid_rows,
+    void argmax_kernel(const __hip_bfloat16* logits, std::int32_t* out, std::int32_t valid_rows,
                        std::int32_t physical_rows) {
     const std::int32_t t    = static_cast<std::int32_t>(blockIdx.x);
     const std::int64_t base = static_cast<std::int64_t>(t) * physical_rows;
@@ -93,14 +95,14 @@ __launch_bounds__(kArgmaxBlock) __global__
 }
 
 __launch_bounds__(kArgmaxBlock) __global__
-    void argmax_tiled_atomic_kernel(const __nv_bfloat16* logits, std::int32_t* out,
+    void argmax_tiled_atomic_kernel(const __hip_bfloat16* logits, std::int32_t* out,
                                     std::int32_t valid_rows, std::int32_t physical_rows) {
     const std::int32_t t    = static_cast<std::int32_t>(blockIdx.y);
     const std::int64_t base = static_cast<std::int64_t>(t) * physical_rows;
     const std::int32_t tile_start =
         static_cast<std::int32_t>(blockIdx.x) * blockDim.x * kArgmaxItemsPerThread;
 
-    float best_value        = -CUDART_INF_F;
+    float best_value        = -HIP_INF_F;
     std::int32_t best_index = INT32_MAX;
 #pragma unroll
     for (int item = 0; item < kArgmaxItemsPerThread; ++item) {

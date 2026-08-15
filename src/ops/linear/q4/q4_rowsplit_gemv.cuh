@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/pdl.cuh"
@@ -5,8 +6,9 @@
 #include "ops/common/warp.cuh"
 #include "ops/linear/q4/q4_rowsplit_storage.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -159,7 +161,7 @@ template <class Schedule>
 __device__ __forceinline__ float
 q4_gemv_consume_word_tile(const uint4* __restrict__ shared_codes,
                           const std::uint32_t* __restrict__ shared_scale_pairs,
-                          const __nv_bfloat16* __restrict__ activation, int group_begin,
+                          const __hip_bfloat16* __restrict__ activation, int group_begin,
                           int active_groups, int lane, float accumulator) {
     static_assert(Schedule::kLaneMapping == Q4GemvLaneMapping::PackedWord8);
     static_assert(Schedule::kDecodeMode == Q4GemvDecodeMode::Fp16Mantissa);
@@ -204,7 +206,7 @@ q4_gemv_consume_word_tile(const uint4* __restrict__ shared_codes,
 template <class Schedule>
 __device__ __forceinline__ float q4_gemv_dot_word_async(
     Q4GemvTileStorage<Schedule>& shared_tiles, int cta_warp,
-    const __nv_bfloat16* __restrict__ activation, const std::uint8_t* __restrict__ code_row,
+    const __hip_bfloat16* __restrict__ activation, const std::uint8_t* __restrict__ code_row,
     const std::uint8_t* __restrict__ scale_row, int group_begin, int group_end, int lane) {
     constexpr int kGroupsPerTile    = Schedule::kGroupsPerWarpTile;
     constexpr int kPipelineStages   = Schedule::kPipelineStages;
@@ -259,7 +261,7 @@ __device__ __forceinline__ float q4_gemv_dot_word_async(
 template <class Schedule, int GroupsPerWarp>
 __device__ __forceinline__ float
 q4_gemv_dot_byte_static(Q4GemvTileStorage<Schedule>& shared_tiles, int cta_warp,
-                        const __nv_bfloat16* __restrict__ activation,
+                        const __hip_bfloat16* __restrict__ activation,
                         const std::uint8_t* __restrict__ code_row,
                         const std::uint8_t* __restrict__ scale_row, int group_begin, int lane) {
     static_assert(Schedule::kLaneMapping == Q4GemvLaneMapping::PackedByte2);
@@ -286,7 +288,7 @@ q4_gemv_dot_byte_static(Q4GemvTileStorage<Schedule>& shared_tiles, int cta_warp,
     }
 
     const auto* tile_codes       = reinterpret_cast<const std::uint8_t*>(shared_codes);
-    const auto* activation_pairs = reinterpret_cast<const __nv_bfloat162*>(activation);
+    const auto* activation_pairs = reinterpret_cast<const __hip_bfloat162*>(activation);
     float accumulator            = 0.0f;
 #pragma unroll
     for (int local_group = 0; local_group < GroupsPerWarp; ++local_group) {
@@ -309,7 +311,7 @@ q4_gemv_dot_byte_static(Q4GemvTileStorage<Schedule>& shared_tiles, int cta_warp,
 template <class Schedule>
 __device__ __forceinline__ float q4_gemv_dot_byte_sync(Q4GemvTileStorage<Schedule>& shared_tiles,
                                                        int cta_warp,
-                                                       const __nv_bfloat16* __restrict__ activation,
+                                                       const __hip_bfloat16* __restrict__ activation,
                                                        const std::uint8_t* __restrict__ code_row,
                                                        const std::uint8_t* __restrict__ scale_row,
                                                        int group_begin, int group_end, int lane) {
@@ -365,7 +367,7 @@ __device__ __forceinline__ float q4_gemv_dot_byte_sync(Q4GemvTileStorage<Schedul
             const int k_begin0 =
                 (tile_group_begin + local_group) * Q4RowSplitStorage::kGroupK + lane * 2;
             const int k_begin1           = k_begin0 + Q4RowSplitStorage::kGroupK;
-            const auto* activation_pairs = reinterpret_cast<const __nv_bfloat162*>(activation);
+            const auto* activation_pairs = reinterpret_cast<const __hip_bfloat162*>(activation);
             const float2 x0              = __bfloat1622float2(activation_pairs[k_begin0 >> 1]);
             const float2 x1              = __bfloat1622float2(activation_pairs[k_begin1 >> 1]);
 
@@ -380,7 +382,7 @@ __device__ __forceinline__ float q4_gemv_dot_byte_sync(Q4GemvTileStorage<Schedul
 }
 
 template <bool SplitOutput, int SplitRow>
-__device__ __forceinline__ void q4_gemv_store(__nv_bfloat16* out, __nv_bfloat16* out_tail,
+__device__ __forceinline__ void q4_gemv_store(__hip_bfloat16* out, __hip_bfloat16* out_tail,
                                               int output_row, float value) {
     if constexpr (SplitOutput) {
         if (output_row < SplitRow) {
@@ -396,7 +398,7 @@ __device__ __forceinline__ void q4_gemv_store(__nv_bfloat16* out, __nv_bfloat16*
 // clang-format off
 struct Q4GemvStoreEpilogue {
     template <bool SplitOutput, int SplitRow>
-    __device__ __forceinline__ void operator()(__nv_bfloat16* out, __nv_bfloat16* out_tail,
+    __device__ __forceinline__ void operator()(__hip_bfloat16* out, __hip_bfloat16* out_tail,
                                                int row, float value) const {
         q4_gemv_store<SplitOutput, SplitRow>(out, out_tail, row, value);
     }
@@ -406,11 +408,11 @@ template <class Schedule, bool SplitOutput = false, int SplitRow = 0,
           class Epilogue = Q4GemvStoreEpilogue, bool TriggerPdl = false, bool JoinPdl = false>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kLaunchBoundsMinBlocks)
 void q4_rowsplit_gemv_kernel(
-    const __nv_bfloat16* __restrict__ x,
+    const __hip_bfloat16* __restrict__ x,
     const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales,
-    __nv_bfloat16* __restrict__ out,
-    __nv_bfloat16* __restrict__ out_tail,
+    __hip_bfloat16* __restrict__ out,
+    __hip_bfloat16* __restrict__ out_tail,
     std::int32_t rows,
     std::int32_t k,
     Epilogue epilogue = {}) {
@@ -428,7 +430,7 @@ void q4_rowsplit_gemv_kernel(
     __shared__ float row_partials[kRowsPerCta][kWarpsPerRow];
     extern __shared__ __align__(16) unsigned char dynamic_shared[];
 
-    auto* shared_x = reinterpret_cast<__nv_bfloat16*>(dynamic_shared);
+    auto* shared_x = reinterpret_cast<__hip_bfloat16*>(dynamic_shared);
     if constexpr (Schedule::kActivationAccess == Q4GemvActivationAccess::CtaSharedFullK) {
         const auto* global_vectors = reinterpret_cast<const uint4*>(x);
         auto* shared_vectors       = reinterpret_cast<uint4*>(shared_x);
@@ -471,7 +473,7 @@ void q4_rowsplit_gemv_kernel(
                                                Q4RowSplitStorage::kCodeBytesPerGroup;
     const std::uint8_t* scale_row = scales + static_cast<std::int64_t>(row) * groups_per_row *
                                                  Q4RowSplitStorage::kScaleBytesPerGroup;
-    const __nv_bfloat16* activation =
+    const __hip_bfloat16* activation =
         Schedule::kActivationAccess == Q4GemvActivationAccess::CtaSharedFullK ? shared_x : x;
 
     float accumulator = 0.0f;

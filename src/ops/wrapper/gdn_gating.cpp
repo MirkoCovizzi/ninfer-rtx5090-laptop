@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - gdn_gating wrapper: public api validation and launcher dispatch.
 #include "ninfer/ops/gdn_gating.h"
 
@@ -57,7 +58,7 @@ void require_same_gate_shape(const Tensor& ref, const Tensor& t, const char* lab
 } // namespace
 
 void gdn_gating(const Tensor& a, const Tensor& b, const Tensor& A_log, const Tensor& dt_bias,
-                Tensor& g, Tensor& beta, cudaStream_t stream) {
+                Tensor& g, Tensor& beta, hipStream_t stream) {
     if (a.dtype != DType::BF16 || b.dtype != DType::BF16) {
         throw std::invalid_argument("gdn_gating: a/b must be BF16");
     }

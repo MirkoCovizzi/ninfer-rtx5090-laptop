@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/text_context.h"
 #include "targets/qwen3_6/impl/runtime/workspace_recipe.h"
@@ -30,7 +31,7 @@
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer/ops/silu_mul.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -39,18 +40,22 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#include <cstdlib>
+
+#include <hip/hip_bf16.h>
 #include <vector>
 
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS::schedule {
 namespace {
 
-void copy_i32(const std::int32_t* source, Tensor& destination, cudaStream_t stream) {
+void copy_i32(const std::int32_t* source, Tensor& destination, hipStream_t stream) {
     if (source == nullptr || destination.dtype != DType::I32 || !destination.is_contiguous() ||
         destination.data == nullptr) {
         throw std::invalid_argument("copy_i32: invalid host source or I32 destination");
     }
-    CUDA_CHECK(cudaMemcpyAsync(destination.data, source, destination.bytes(),
-                               cudaMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(destination.data, source, destination.bytes(),
+                               hipMemcpyHostToDevice, stream));
 }
 
 void require_tensor_shape(const Tensor& t, DType dtype, std::initializer_list<std::int32_t> shape,
@@ -154,7 +159,7 @@ void DFlashFeatureSink::begin(const Tensor& value) {
     }
 }
 
-void DFlashFeatureSink::capture_layer(int layer, const Tensor& value, cudaStream_t stream) {
+void DFlashFeatureSink::capture_layer(int layer, const Tensor& value, hipStream_t stream) {
     const auto it = std::find(layers.begin(), layers.end(), layer);
     if (it == layers.end()) { return; }
     const std::size_t index = static_cast<std::size_t>(it - layers.begin());
@@ -181,13 +186,13 @@ void DFlashFeatureSink::capture_layer(int layer, const Tensor& value, cudaStream
     const std::size_t source_pitch  = static_cast<std::size_t>(value.nb[1]);
     const std::size_t target_pitch  = static_cast<std::size_t>(features->nb[1]);
     auto* target                    = static_cast<std::byte*>(features->data) + index * width_bytes;
-    CUDA_CHECK(cudaMemcpy2DAsync(target, target_pitch, value.data, source_pitch, width_bytes,
-                                 static_cast<std::size_t>(active_tokens), cudaMemcpyDeviceToDevice,
+    HIP_CHECK(hipMemcpy2DAsync(target, target_pitch, value.data, source_pitch, width_bytes,
+                                 static_cast<std::size_t>(active_tokens), hipMemcpyDeviceToDevice,
                                  stream));
     captured_mask |= 1U << index;
 }
 
-void DFlashFeatureSink::capture_positions(const Tensor& source, cudaStream_t stream) {
+void DFlashFeatureSink::capture_positions(const Tensor& source, hipStream_t stream) {
     const std::uint32_t complete_mask = layers.size() == 32 ? ~0U : ((1U << layers.size()) - 1U);
     if (captured_mask != complete_mask) {
         throw std::logic_error("DFlash target call did not publish every feature layer");
@@ -203,9 +208,9 @@ void DFlashFeatureSink::capture_positions(const Tensor& source, cudaStream_t str
         positions == nullptr || active_tokens > positions->ne[0]) {
         throw std::logic_error("DFlash feature positions are invalid");
     }
-    CUDA_CHECK(cudaMemcpyAsync(positions->data, source.data,
+    HIP_CHECK(hipMemcpyAsync(positions->data, source.data,
                                static_cast<std::size_t>(active_tokens) * sizeof(std::int32_t),
-                               cudaMemcpyDeviceToDevice, stream));
+                               hipMemcpyDeviceToDevice, stream));
 }
 
 void DFlashFeatureSink::consume_prefill_chunk(std::int32_t tokens, bool turn_checkpoint) {
@@ -324,7 +329,7 @@ const MtpW& TextContext::mtp_weights() const {
 
 void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
                                    const Tensor* input_embeddings, Tensor& x, Tensor& ah) {
-    cudaStream_t s     = ctx_.stream;
+    hipStream_t s     = ctx_.stream;
     const int T        = ids.ne[0] * ids.ne[1];
     Tensor flat_ids    = ids.view({T});
     Tensor flat_hidden = hidden.view({kCfg.hidden, T});
@@ -361,7 +366,7 @@ void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
 void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& positions,
                                    const Tensor& rope_positions, ops::GqaExecutionEnvelope envelope,
                                    Tensor& mtp_hidden) {
-    cudaStream_t s = ctx_.stream;
+    hipStream_t s = ctx_.stream;
     const int T    = x.ne[1];
 
     const auto projection = workspace_recipe::mtp_attention_projection<TextConfig>(work_, T);
@@ -464,7 +469,7 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         require_tensor_shape(*draft_token, DType::I32, {1}, "MTP final prefill draft token");
     }
 
-    cudaStream_t s     = ctx_.stream;
+    hipStream_t s     = ctx_.stream;
     auto scratch_scope = work_.scope();
     Tensor x_last;
     Tensor ah_last;
@@ -496,10 +501,10 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
                                 static_cast<std::size_t>(T - 1) * column_bytes;
             const auto* ah_src = static_cast<const unsigned char*>(ah.data) +
                                  static_cast<std::size_t>(T - 1) * column_bytes;
-            CUDA_CHECK(
-                cudaMemcpyAsync(x_last.data, x_src, column_bytes, cudaMemcpyDeviceToDevice, s));
-            CUDA_CHECK(
-                cudaMemcpyAsync(ah_last.data, ah_src, column_bytes, cudaMemcpyDeviceToDevice, s));
+            HIP_CHECK(
+                hipMemcpyAsync(x_last.data, x_src, column_bytes, hipMemcpyDeviceToDevice, s));
+            HIP_CHECK(
+                hipMemcpyAsync(ah_last.data, ah_src, column_bytes, hipMemcpyDeviceToDevice, s));
         }
     }
 
@@ -522,8 +527,8 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
                 const auto* src = static_cast<const std::int32_t*>(rope_positions.data) +
                                   static_cast<std::size_t>(axis) * T + (T - 1);
                 auto* dst = static_cast<std::int32_t*>(last_rope_position.data) + axis;
-                CUDA_CHECK(
-                    cudaMemcpyAsync(dst, src, sizeof(std::int32_t), cudaMemcpyDeviceToDevice, s));
+                HIP_CHECK(
+                    hipMemcpyAsync(dst, src, sizeof(std::int32_t), hipMemcpyDeviceToDevice, s));
             }
         }
         ops::rope(last_rope_position, kCfg.rotary_dim, kCfg.rope_theta, qn, s);
@@ -650,7 +655,7 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
     require_tensor_shape(hidden, DType::BF16, {kCfg.hidden, batch}, "ordinary decode hidden");
     require_tensor_shape(logits, DType::BF16, {kCfg.vocab, batch}, "ordinary decode logits");
 
-    cudaStream_t stream = ctx_.stream;
+    hipStream_t stream = ctx_.stream;
     work_.reset();
     {
         ScopedPositions cache_binding(active_cache_positions_, cache_positions);
@@ -700,7 +705,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
                          "target verify batch logits");
     require_tensor_shape(target_tokens, DType::I32, {width, batch}, "target verify batch tokens");
 
-    cudaStream_t stream = ctx_.stream;
+    hipStream_t stream = ctx_.stream;
     work_.reset();
     {
         ScopedPositions cache_binding(active_cache_positions_, cache_positions);
@@ -790,7 +795,7 @@ void TextContext::mtp_propose_batch(const Tensor& hidden, Tensor& logits, Tensor
 }
 
 void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
-    cudaStream_t s = ctx_.stream;
+    hipStream_t s = ctx_.stream;
     const int T    = x.ne[1];
     if (active_gqa_envelope_ == nullptr) {
         throw std::logic_error("Text GQA execution envelope is not set");
@@ -851,7 +856,7 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
 }
 
 void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
-    cudaStream_t s = ctx_.stream;
+    hipStream_t s = ctx_.stream;
     const int T    = x.ne[1];
 
     const auto control = workspace_recipe::gdn_control<TextConfig>(work_, T);
@@ -956,7 +961,7 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
 }
 
 void TextContext::mlp_tail(const Tensor* post_norm, const MlpW& m, Tensor& x, Phase ph) {
-    cudaStream_t s = ctx_.stream;
+    hipStream_t s = ctx_.stream;
     const int T    = x.ne[1];
     Tensor h       = workspace_recipe::post_mixer_hidden<TextConfig>(work_, T);
     ops::rmsnorm(x, *post_norm, kCfg.rms_eps, true, h, s);
@@ -1027,7 +1032,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
     if (ids.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::overflow_error("TextContext::prefill token count exceeds int32");
     }
-    cudaStream_t s           = ctx_.stream;
+    hipStream_t s           = ctx_.stream;
     const int T              = static_cast<int>(ids.size());
     const int chunk          = static_cast<int>(prefill_chunk_);
     const std::uint32_t base = text_kv_base_;
@@ -1209,9 +1214,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 }
                 if (mtp_window.final_column_uses_generated_token) {
                     int next_token = 0;
-                    CUDA_CHECK(cudaStreamSynchronize(s));
-                    CUDA_CHECK(cudaMemcpy(&next_token, io_.token.data, sizeof(next_token),
-                                          cudaMemcpyDeviceToHost));
+                    HIP_CHECK(hipStreamSynchronize(s));
+                    HIP_CHECK(hipMemcpy(&next_token, io_.token.data, sizeof(next_token),
+                                          hipMemcpyDeviceToHost));
                     mtp_ids_host[static_cast<std::size_t>(len - 1)] = next_token;
                 }
 
@@ -1252,9 +1257,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                         const ops::GqaExecutionEnvelope ar_envelope{ar_visible, ar_visible};
                         mtp_forward_ar_step(prev_token, io_.mtp->ar_hidden, ar_position,
                                             ar_envelope, next_hidden, logits, next_token);
-                        CUDA_CHECK(cudaMemcpyAsync(io_.mtp->ar_hidden.data, next_hidden.data,
+                        HIP_CHECK(hipMemcpyAsync(io_.mtp->ar_hidden.data, next_hidden.data,
                                                    io_.mtp->ar_hidden.bytes(),
-                                                   cudaMemcpyDeviceToDevice, s));
+                                                   hipMemcpyDeviceToDevice, s));
                         ops::increment_i32_scalar(ar_position, s);
                     }
                 } else {
@@ -1269,8 +1274,8 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 require_tensor_shape(*turn_checkpoint_hidden_output_, DType::BF16, {kCfg.hidden, 1},
                                      "turn checkpoint hidden output");
                 const Tensor turn_hidden = xf.slice(1, len - 1, 1);
-                CUDA_CHECK(cudaMemcpyAsync(turn_checkpoint_hidden_output_->data, turn_hidden.data,
-                                           turn_hidden.bytes(), cudaMemcpyDeviceToDevice, s));
+                HIP_CHECK(hipMemcpyAsync(turn_checkpoint_hidden_output_->data, turn_hidden.data,
+                                           turn_hidden.bytes(), hipMemcpyDeviceToDevice, s));
             }
         }
 

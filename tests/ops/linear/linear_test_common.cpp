@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear/linear_test_common.h"
 
 #include "core/arena.h"
 #include "ops/op_tester.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -166,10 +167,10 @@ OutputRead read_output(const void* device, std::int32_t n, std::int32_t t,
     std::size_t nonfinite_count = 0;
     for (std::size_t begin = 0; begin < total_words; begin += chunk.size()) {
         const std::size_t count = std::min(chunk.size(), total_words - begin);
-        cuda_check(
-            cudaMemcpy(chunk.data(),
+        hip_check(
+            hipMemcpy(chunk.data(),
                        static_cast<const std::uint8_t*>(device) + begin * sizeof(std::uint16_t),
-                       count * sizeof(std::uint16_t), cudaMemcpyDeviceToHost),
+                       count * sizeof(std::uint16_t), hipMemcpyDeviceToHost),
             "copy linear output");
         for (std::size_t index = 0; index < count; ++index) {
             const std::uint16_t bits = chunk[index];
@@ -279,7 +280,7 @@ void cpu_linear_gemm_fp64(const float* weight, const float* activation, double* 
     for (std::thread& worker : workers) { worker.join(); }
 }
 
-bool cuda_available() { return !test::cuda_unavailable(); }
+bool hip_available() { return !test::hip_unavailable(); }
 
 int run_shape(std::string_view label, ActivationCompute activation_compute,
               WeightGenerator generator, const ShapeCase& shape) {
@@ -334,7 +335,7 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
             } else {
                 ops::linear(input, weight, destination, invocation.policy, workspace, nullptr);
             }
-            cuda_check(cudaDeviceSynchronize(), "synchronize linear");
+            hip_check(hipDeviceSynchronize(), "synchronize linear");
         } catch (const std::exception& error) {
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
             ++failures;

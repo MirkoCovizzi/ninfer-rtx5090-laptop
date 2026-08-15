@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -20,6 +20,6 @@ namespace ninfer::ops {
  * oracle. The registered domains are Q6/D=5120 and W8/D=2048 or D=5120. `out` must not overlap
  * `ids` or any table plane. There is no workspace or persistent state side effect.
  */
-void embedding(const Tensor& ids, const Weight& table, Tensor& out, cudaStream_t stream);
+void embedding(const Tensor& ids, const Weight& table, Tensor& out, hipStream_t stream);
 
 } // namespace ninfer::ops

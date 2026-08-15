@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gated_delta_net.h"
 
 #include "ops/op_tester.h"
@@ -121,7 +122,7 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
     ops::gated_delta_net_replay_record(q, k, v, g_tensor, beta_tensor, kScale, record_states, valid,
                                        initial, key_record_tensor, value_record_tensor,
                                        gate_record_tensor, record_output, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures             = 0;
     const std::string suffix = " Hv=" + std::to_string(value_heads) +
@@ -203,7 +204,7 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

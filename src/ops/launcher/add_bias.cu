@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/launcher/add_bias.h"
 
 #include "ops/common/math.h"
@@ -10,7 +11,7 @@
 
 namespace ninfer::ops::detail {
 
-void add_bias_launch(const Tensor& bias, Tensor& x, cudaStream_t stream) {
+void add_bias_launch(const Tensor& bias, Tensor& x, hipStream_t stream) {
     constexpr int block        = 256;
     constexpr int rowsPerBlock = 4;
     constexpr std::int64_t maxVectorRows =
@@ -36,7 +37,7 @@ void add_bias_launch(const Tensor& bias, Tensor& x, cudaStream_t stream) {
                     static_cast<const Bf16x8Pack*>(bias.data), static_cast<Bf16x8Pack*>(x.data),
                     packs, static_cast<std::int32_t>(rows));
         }
-        CUDA_CHECK(cudaGetLastError());
+        HIP_CHECK(hipGetLastError());
         return;
     }
     const bool paired = (x.ne[0] % 2) == 0 && (addresses & 0x3u) == 0;
@@ -47,16 +48,16 @@ void add_bias_launch(const Tensor& bias, Tensor& x, cudaStream_t stream) {
         const unsigned grid_y = static_cast<unsigned>(
             std::min<std::int64_t>(rows, std::numeric_limits<unsigned short>::max()));
         add_bias_bf16x2_kernel<block><<<dim3(grid_x, grid_y, 1u), block, 0, stream>>>(
-            static_cast<const __nv_bfloat162*>(bias.data), static_cast<__nv_bfloat162*>(x.data),
+            static_cast<const __hip_bfloat162*>(bias.data), static_cast<__hip_bfloat162*>(x.data),
             pairs, static_cast<std::int32_t>(rows));
-        CUDA_CHECK(cudaGetLastError());
+        HIP_CHECK(hipGetLastError());
         return;
     }
     const int grid = static_cast<int>(std::min<std::int64_t>(
         div_up(n, static_cast<std::int64_t>(block)), std::numeric_limits<int>::max()));
-    add_bias_kernel<<<grid, block, 0, stream>>>(static_cast<const __nv_bfloat16*>(bias.data),
-                                                static_cast<__nv_bfloat16*>(x.data), x.ne[0], n);
-    CUDA_CHECK(cudaGetLastError());
+    add_bias_kernel<<<grid, block, 0, stream>>>(static_cast<const __hip_bfloat16*>(bias.data),
+                                                static_cast<__hip_bfloat16*>(x.data), x.ne[0], n);
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

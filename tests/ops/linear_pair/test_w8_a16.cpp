@@ -34,7 +34,7 @@ int w8_a16_conformance() {
 } // namespace
 
 int main() {
-    if (!ninfer::test::linear_pair::cuda_available()) {
+    if (!ninfer::test::linear_pair::hip_available()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

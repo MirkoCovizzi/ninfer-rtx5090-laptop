@@ -6,7 +6,7 @@
 #include "core/tensor.h"
 #include "ninfer/ops/linear.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -65,13 +65,13 @@ linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
  *   effect.
  */
 void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, LinearPolicy policy,
-                   WorkspaceArena& ws, cudaStream_t stream);
+                   WorkspaceArena& ws, hipStream_t stream);
 
 /**
  * A16-only convenience form. Q4/W8 retain their complete positive-T domain. NVFP4 is admitted
  * only through T=16; larger NVFP4 extents require the policy-bearing AllowA4 form.
  */
 void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, WorkspaceArena& ws,
-                   cudaStream_t stream);
+                   hipStream_t stream);
 
 } // namespace ninfer::ops

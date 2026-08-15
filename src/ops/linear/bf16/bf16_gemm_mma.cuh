@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Dense BF16 x BF16 Tensor Core GEMM shared by pure Linear and semantic Ops.
@@ -6,11 +7,16 @@
 //
 // A is row-major with contiguous K. Public NInfer activations store one contiguous
 // K vector per token, which is the column-major B representation consumed by the
-// row.col MMA atom. M and K come from a compiled geometry; N remains runtime.
+// MMA atom. M and K come from a compiled geometry; N remains runtime.
+//
+// The tensor core on gfx1151 is the wave32 WMMA instruction (see mma.cuh). Each
+// warp computes a WarpRows x WarpCols tile from MmaRows x MmaCols 16x16x16 atoms;
+// the k dimension of one atom is 16, matching the schedule's 16-element K steps.
 
 #include "ops/common/mma.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <algorithm>
 #include <cstdint>
@@ -57,13 +63,16 @@ struct Bf16MmaSchedule {
     static constexpr int kWarps          = kWarpsM * kWarpsN;
     static constexpr int kThreads        = kWarps * 32;
     static constexpr int kMmaRows        = kWarpRows / 16;
-    static constexpr int kMmaCols        = kWarpCols / 8;
+    static constexpr int kMmaCols        = kWarpCols / 16;
     static constexpr int kMmaK           = kBlockK / 16;
     static constexpr int kSharedElements = kPipelineStages * (kBlockRows + kBlockCols) * kBlockK;
-    static constexpr int kSharedBytes = kSharedElements * static_cast<int>(sizeof(__nv_bfloat16));
+    static constexpr int kSharedBytes = kSharedElements * static_cast<int>(sizeof(__hip_bfloat16));
 
     static_assert(kBlockRows > 0 && kBlockCols > 0 && kBlockK > 0);
     static_assert(kBlockRows % kWarpRows == 0 && kBlockCols % kWarpCols == 0);
+    // gfx1151 WMMA atoms are 16x16 (not 16x8). kWarpRows must tile 16-row atoms;
+    // kWarpCols spins div_up(kWarpCols,16) atoms and the last overlaps the neighbour warp's
+    // columns (filtered at store), so only an 8-element alignment is required for the B tile.
     static_assert(kWarpRows % 16 == 0 && kWarpCols % 8 == 0);
     static_assert(kBlockK % 64 == 0);
     static_assert(kPipelineStages >= 2 && kPipelineStages <= 8);
@@ -74,12 +83,12 @@ struct Bf16MmaSchedule {
 };
 
 struct Bf16MmaOutputTile {
-    __nv_bfloat16* data;
+    __hip_bfloat16* data;
     std::int32_t leading_dim;
     std::int32_t parent_row_begin;
 
-    __device__ __forceinline__ __nv_bfloat16* at(std::int32_t parent_row,
-                                                 std::int32_t token) const {
+    __device__ __forceinline__ __hip_bfloat16* at(std::int32_t parent_row,
+                                                  std::int32_t token) const {
         return data + static_cast<std::int64_t>(token) * leading_dim + parent_row -
                parent_row_begin;
     }
@@ -91,7 +100,7 @@ struct Bf16MmaOutputTile {
 };
 
 struct Bf16MmaContiguousOutput {
-    __nv_bfloat16* data;
+    __hip_bfloat16* data;
     std::int32_t leading_dim;
 
     __device__ __forceinline__ Bf16MmaOutputTile tile(std::int32_t) const {
@@ -130,9 +139,52 @@ bf16_mma_tile_coordinates(std::int32_t linear, std::int32_t tiles_m, std::int32_
     }
 }
 
+// Loads one lane's 16 bf16 fragment elements from shared memory. The Xor64 swizzle
+// keeps each 8-element K group contiguous, so two 16-byte loads cover k 0..7 and
+// k 8..15. The fragment register order matches the WMMA k = element index layout.
+__device__ __forceinline__ void ds_load_b128(unsigned* out, unsigned addr, int offset_dwords) {
+    uint4 v;
+    // Leading s_waitcnt lgkmcnt(0) drains this wave's LDS pipe after the staging
+    // barrier (gfx1151 does not always make other waves' ds_stores visible to a
+    // subsequent ds_read under multi-wave occupancy). The "memory" clobber is
+    // required: without it the read is not a memory operation at IR level and LLVM
+    // hoists it across __syncthreads(), racing the staging stores.
+    asm volatile("s_waitcnt lgkmcnt(0);\n ds_read_b128 %0, %1 offset:%2;\n s_waitcnt lgkmcnt(0);\n"
+                 : "=v"(v)
+                 : "v"(addr), "n"(offset_dwords)
+                 : "memory");
+    out[0] = v.x;
+    out[1] = v.y;
+    out[2] = v.z;
+    out[3] = v.w;
+}
+
+template <class Schedule>
+__device__ __forceinline__ void bf16_wmma_load_a(unsigned (&frag)[8], const __hip_bfloat16* base,
+                                                 int row, int k0, int stride_k) {
+    const unsigned chunk1 =
+        smem_addr(&base[row * stride_k + bf16_mma_shared_col<Schedule>(row, k0)]);
+    const unsigned chunk2 =
+        smem_addr(&base[row * stride_k + bf16_mma_shared_col<Schedule>(row, k0 + 8)]);
+    ds_load_b128(frag, chunk1, 0);
+    ds_load_b128(frag + 4, chunk2, 0);
+}
+
+// Same layout for the B tile: each lane covers one token column of 16 K values.
+template <class Schedule>
+__device__ __forceinline__ void bf16_wmma_load_b(unsigned (&frag)[8], const __hip_bfloat16* base,
+                                                 int col, int k0, int stride_k) {
+    const unsigned chunk1 =
+        smem_addr(&base[col * stride_k + bf16_mma_shared_col<Schedule>(col, k0)]);
+    const unsigned chunk2 =
+        smem_addr(&base[col * stride_k + bf16_mma_shared_col<Schedule>(col, k0 + 8)]);
+    ds_load_b128(frag, chunk1, 0);
+    ds_load_b128(frag + 4, chunk2, 0);
+}
+
 template <class Geometry, class Schedule, bool FullTokens, class Output>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16_gemm_mma_kernel(
-    const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ weight, Output output,
+    const __hip_bfloat16* __restrict__ x, const __hip_bfloat16* __restrict__ weight, Output output,
     std::int32_t tokens) {
     constexpr int M       = Geometry::kOutputRows;
     constexpr int K       = Geometry::kInputRows;
@@ -142,7 +194,11 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
     constexpr int WM      = Schedule::kWarpRows;
     constexpr int WN      = Schedule::kWarpCols;
     constexpr int MT      = Schedule::kMmaRows;
-    constexpr int NT      = Schedule::kMmaCols;
+    // gfx1151 WMMA atoms are 16x16 (not 16x8). Each warp covers WMT x WNT 16x16 atoms;
+    // when kWarpCols is not a multiple of 16 the final atom overlaps the neighbour warp's
+    // columns (duplicate compute, correct results) and the store below emits only this warp's
+    // own columns.
+    constexpr int WNT     = (Schedule::kWarpCols + 15) / 16;
     constexpr int KSUB    = Schedule::kMmaK;
     constexpr int S       = Schedule::kPipelineStages;
     constexpr int WARPS_N = Schedule::kWarpsN;
@@ -152,7 +208,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
     static_assert(K / BK >= S);
 
     extern __shared__ __align__(16) unsigned char shared_raw[];
-    auto* As = reinterpret_cast<__nv_bfloat16*>(shared_raw);
+    auto* As = reinterpret_cast<__hip_bfloat16*>(shared_raw);
     auto* Bs = As + S * BM * BK;
 
     const int tid  = static_cast<int>(threadIdx.x);
@@ -160,8 +216,6 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
     const int lane = tid & 31;
     const int wm   = warp / WARPS_N;
     const int wn   = warp - wm * WARPS_N;
-    const int gid  = lane >> 2;
-    const int lid  = lane & 3;
 
     constexpr int tiles_m = M / BM;
     const int tiles_n     = tokens / BN + static_cast<int>(tokens % BN != 0);
@@ -173,14 +227,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
     const int n0           = tile_n * BN;
     const auto output_tile = output.tile(m0);
 
-    float accum[MT][NT][4] = {};
-
-    const int a_matrix     = lane >> 3;
-    const int a_inner_row  = lane & 7;
-    const int a_row_offset = a_inner_row + ((a_matrix & 1) << 3);
-    const int a_col_offset = (a_matrix >> 1) << 3;
-    const int b_inner_row  = lane & 7;
-    const int b_k_offset   = ((lane >> 3) & 1) << 3;
+    float accum[MT][WNT][8] = {};
 
     auto stage_inputs = [&](int stage, int k_tile) {
         const int k0  = k_tile * BK;
@@ -235,30 +282,26 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
         }
         __syncthreads();
 
-        auto load_fragments = [&](int k_step, unsigned(&a_frag)[MT][4], unsigned(&b_frag)[NT][2]) {
+        auto load_fragments = [&](int k_step, unsigned(&a_frag)[MT][8], unsigned(&b_frag)[WNT][8]) {
 #pragma unroll
             for (int mi = 0; mi < MT; ++mi) {
-                const int row = wm * WM + mi * 16 + a_row_offset;
-                const int col = k_step * 16 + a_col_offset;
-                ldmatrix_x4(
-                    a_frag[mi][0], a_frag[mi][1], a_frag[mi][2], a_frag[mi][3],
-                    smem_addr(
-                        &As[stage * BM * BK + row * BK + bf16_mma_shared_col<Schedule>(row, col)]));
+                const int row = wm * WM + mi * 16 + (lane >> 1);
+                if (wmma_a_lane_active(lane)) {
+                    bf16_wmma_load_a<Schedule>(a_frag[mi], As + stage * BM * BK, row,
+                                               k_step * 16, BK);
+                }
             }
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int row = wn * WN + ni * 8 + b_inner_row;
-                const int col = k_step * 16 + b_k_offset;
-                ldmatrix_x2(
-                    b_frag[ni][0], b_frag[ni][1],
-                    smem_addr(
-                        &Bs[stage * BN * BK + row * BK + bf16_mma_shared_col<Schedule>(row, col)]));
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int col = wn * WN + ni * 16 + (lane & 15);
+                bf16_wmma_load_b<Schedule>(b_frag[ni], Bs + stage * BN * BK, col, k_step * 16,
+                                           BK);
             }
         };
 
         if constexpr (Schedule::kFragmentPipeline == Bf16MmaFragmentPipeline::PingPong) {
-            unsigned a_frag[2][MT][4];
-            unsigned b_frag[2][NT][2];
+            unsigned a_frag[2][MT][8];
+            unsigned b_frag[2][WNT][8];
             load_fragments(0, a_frag[0], b_frag[0]);
 #pragma unroll
             for (int k_step = 0; k_step < KSUB; ++k_step) {
@@ -269,27 +312,28 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
 #pragma unroll
                 for (int mi = 0; mi < MT; ++mi) {
 #pragma unroll
-                    for (int ni = 0; ni < NT; ++ni) {
-                        mma_bf16(accum[mi][ni][0], accum[mi][ni][1], accum[mi][ni][2],
-                                 accum[mi][ni][3], a_frag[slot][mi][0], a_frag[slot][mi][1],
-                                 a_frag[slot][mi][2], a_frag[slot][mi][3], b_frag[slot][ni][0],
-                                 b_frag[slot][ni][1]);
+                    for (int ni = 0; ni < WNT; ++ni) {
+                        WmmaC8& c = *reinterpret_cast<WmmaC8*>(accum[mi][ni]);
+                        WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag[slot][mi]);
+                        WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag[slot][ni]);
+                        c = wmma_bf16(a, b, c);
                     }
                 }
             }
         } else {
-            unsigned a_frag[MT][4];
-            unsigned b_frag[NT][2];
+            unsigned a_frag[MT][8];
+            unsigned b_frag[WNT][8];
 #pragma unroll
             for (int k_step = 0; k_step < KSUB; ++k_step) {
                 load_fragments(k_step, a_frag, b_frag);
 #pragma unroll
                 for (int mi = 0; mi < MT; ++mi) {
 #pragma unroll
-                    for (int ni = 0; ni < NT; ++ni) {
-                        mma_bf16(accum[mi][ni][0], accum[mi][ni][1], accum[mi][ni][2],
-                                 accum[mi][ni][3], a_frag[mi][0], a_frag[mi][1], a_frag[mi][2],
-                                 a_frag[mi][3], b_frag[ni][0], b_frag[ni][1]);
+                    for (int ni = 0; ni < WNT; ++ni) {
+                        WmmaC8& c = *reinterpret_cast<WmmaC8*>(accum[mi][ni]);
+                        WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag[mi]);
+                        WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag[ni]);
+                        c = wmma_bf16(a, b, c);
                     }
                 }
             }
@@ -305,26 +349,25 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void bf16
 
 #pragma unroll
     for (int mi = 0; mi < MT; ++mi) {
-        const int row0 = m0 + wm * WM + mi * 16 + gid;
-        const int row1 = row0 + 8;
+        const int row_base = m0 + wm * WM + mi * 16;
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni) {
-            const int token0   = n0 + wn * WN + ni * 8 + 2 * lid;
-            const int token1   = token0 + 1;
-            const float* value = accum[mi][ni];
+        for (int ni = 0; ni < WNT; ++ni) {
+            const int n_base    = n0 + wn * WN + ni * 16 + (lane & 15);
+            const float* value  = accum[mi][ni];
+            const int row_lo    = row_base + (lane >= 16 ? 8 : 0);
+            // Skip the overlap columns when kWarpCols is not a multiple of 16.
+            if ((ni * 16 + (lane & 15)) >= WN) { continue; }
             if constexpr (FullTokens) {
-                output_tile.store(row0, token0, value[0]);
-                output_tile.store(row0, token1, value[1]);
-                output_tile.store(row1, token0, value[2]);
-                output_tile.store(row1, token1, value[3]);
-            } else {
-                if (token0 < tokens) {
-                    output_tile.store(row0, token0, value[0]);
-                    output_tile.store(row1, token0, value[2]);
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    output_tile.store(row_lo + r, n_base, value[r]);
                 }
-                if (token1 < tokens) {
-                    output_tile.store(row0, token1, value[1]);
-                    output_tile.store(row1, token1, value[3]);
+            } else {
+                if (n_base < tokens) {
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        output_tile.store(row_lo + r, n_base, value[r]);
+                    }
                 }
             }
         }

@@ -1,6 +1,8 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -30,7 +32,7 @@ __device__ __forceinline__ LayerNormMoments layer_norm_merge(LayerNormMoments a,
 }
 
 __device__ __forceinline__ LayerNormMoments layer_norm_warp_reduce(LayerNormMoments value) {
-    constexpr unsigned mask = 0xffffffffu;
+    constexpr unsigned long long mask = 0xffffffffull;
     for (int offset = 16; offset > 0; offset >>= 1) {
         const LayerNormMoments other{
             __shfl_down_sync(mask, value.mean, offset),
@@ -51,8 +53,8 @@ __device__ __forceinline__ void layer_norm_update(LayerNormMoments& moments, flo
 
 template <int Block>
 __launch_bounds__(Block) __global__
-    void layer_norm_d1152_bf16x2_kernel(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                        const __nv_bfloat162* bias, __nv_bfloat162* out,
+    void layer_norm_d1152_bf16x2_kernel(const __hip_bfloat162* x, const __hip_bfloat162* weight,
+                                        const __hip_bfloat162* bias, __hip_bfloat162* out,
                                         std::int64_t rows, float eps) {
     constexpr int d        = 1152;
     constexpr int pairs    = d / 2;
@@ -100,8 +102,8 @@ __launch_bounds__(Block) __global__
 
 template <int Block>
 __launch_bounds__(Block) __global__
-    void layer_norm_d1152_warp_kernel(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                      const __nv_bfloat162* bias, __nv_bfloat162* out,
+    void layer_norm_d1152_warp_kernel(const __hip_bfloat162* x, const __hip_bfloat162* weight,
+                                      const __hip_bfloat162* bias, __hip_bfloat162* out,
                                       std::int64_t rows, float eps) {
     constexpr int d        = 1152;
     constexpr int pairs    = d / 2;
@@ -119,7 +121,7 @@ __launch_bounds__(Block) __global__
         layer_norm_update(local, values.y);
     }
     local                   = layer_norm_warp_reduce(local);
-    constexpr unsigned mask = 0xffffffffu;
+    constexpr unsigned long long mask = 0xffffffffull;
     const float mean        = __shfl_sync(mask, local.mean, 0);
     const float m2          = __shfl_sync(mask, local.m2, 0);
     const float inv         = rsqrtf(m2 / static_cast<float>(d) + eps);
@@ -134,8 +136,8 @@ __launch_bounds__(Block) __global__
 }
 
 template <int Block>
-__global__ void layer_norm_kernel(const __nv_bfloat16* x, const __nv_bfloat16* weight,
-                                  const __nv_bfloat16* bias, __nv_bfloat16* out, std::int32_t d,
+__global__ void layer_norm_kernel(const __hip_bfloat16* x, const __hip_bfloat16* weight,
+                                  const __hip_bfloat16* bias, __hip_bfloat16* out, std::int32_t d,
                                   std::int64_t rows, float eps) {
     const std::int64_t row = static_cast<std::int64_t>(blockIdx.x);
     if (row >= rows) { return; }

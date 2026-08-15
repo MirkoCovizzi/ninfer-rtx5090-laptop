@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/launcher/vision_attention.h"
 
 #include "ops/kernel/vision_attention.cuh"
@@ -10,32 +11,32 @@ namespace ninfer::ops::detail {
 namespace {
 
 std::int64_t stride_elements(const Tensor& tensor, int dim) {
-    return tensor.nb[dim] / static_cast<std::int64_t>(sizeof(__nv_bfloat16));
+    return tensor.nb[dim] / static_cast<std::int64_t>(sizeof(__hip_bfloat16));
 }
 
 template <int Br, int Bc>
 void launch_flash(const Tensor& q, const Tensor& k, const Tensor& v,
                   const VisionAttentionTile* tiles, std::int32_t uniform_segment_length,
-                  std::int32_t query_tiles, Tensor& out, cudaStream_t stream) {
+                  std::int32_t query_tiles, Tensor& out, hipStream_t stream) {
     constexpr int kThreads = Br * 2;
     constexpr int kSmemBytes =
-        (Br + 2 * Bc) * kVisionAttentionPaddedD * static_cast<int>(sizeof(__nv_bfloat16));
+        (Br + 2 * Bc) * kVisionAttentionPaddedD * static_cast<int>(sizeof(__hip_bfloat16));
     const dim3 grid(static_cast<unsigned>(query_tiles),
                     static_cast<unsigned>(kVisionAttentionHeads), 1u);
     vision_attention_flash_kernel<Br, Bc><<<grid, kThreads, kSmemBytes, stream>>>(
-        static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
-        static_cast<const __nv_bfloat16*>(v.data), tiles, q.ne[2], uniform_segment_length,
-        static_cast<__nv_bfloat16*>(out.data), stride_elements(q, 0), stride_elements(q, 1),
+        static_cast<const __hip_bfloat16*>(q.data), static_cast<const __hip_bfloat16*>(k.data),
+        static_cast<const __hip_bfloat16*>(v.data), tiles, q.ne[2], uniform_segment_length,
+        static_cast<__hip_bfloat16*>(out.data), stride_elements(q, 0), stride_elements(q, 1),
         stride_elements(q, 2), stride_elements(k, 0), stride_elements(k, 1), stride_elements(k, 2),
         stride_elements(v, 0), stride_elements(v, 1), stride_elements(v, 2));
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
 
 void vision_attention_launch(const Tensor& q, const Tensor& k, const Tensor& v,
                              const Tensor& cu_seqlens, Tensor* tiles, Tensor& out,
-                             cudaStream_t stream) {
+                             hipStream_t stream) {
     const bool packed_segments = tiles != nullptr;
     const int max_tiles =
         packed_segments ? tiles->ne[1] : (q.ne[2] + kVisionAttentionBr - 1) / kVisionAttentionBr;
@@ -43,7 +44,7 @@ void vision_attention_launch(const Tensor& q, const Tensor& k, const Tensor& v,
         vision_attention_prepare_tiles_kernel<<<1, 256, 0, stream>>>(
             static_cast<const std::int32_t*>(cu_seqlens.data), cu_seqlens.ne[0] - 1,
             static_cast<VisionAttentionTile*>(tiles->data), max_tiles, q.ne[2]);
-        CUDA_CHECK(cudaGetLastError());
+        HIP_CHECK(hipGetLastError());
     }
 
     launch_flash<kVisionAttentionBr, kVisionAttentionBc>(
@@ -74,7 +75,7 @@ std::int32_t vision_attention_uniform_tile(std::int32_t segment_length) {
 
 void vision_attention_uniform_launch_with_tile(const Tensor& q, const Tensor& k, const Tensor& v,
                                                std::int32_t segment_length, std::int32_t tile_size,
-                                               Tensor& out, cudaStream_t stream) {
+                                               Tensor& out, hipStream_t stream) {
     const std::int32_t segments    = q.ne[2] / segment_length;
     const std::int32_t query_tiles = segments * ((segment_length + tile_size - 1) / tile_size);
     switch (tile_size) {
@@ -94,7 +95,7 @@ void vision_attention_uniform_launch_with_tile(const Tensor& q, const Tensor& k,
 
 void vision_attention_uniform_launch(const Tensor& q, const Tensor& k, const Tensor& v,
                                      std::int32_t segment_length, Tensor& out,
-                                     cudaStream_t stream) {
+                                     hipStream_t stream) {
     vision_attention_uniform_launch_with_tile(
         q, k, v, segment_length, vision_attention_uniform_tile(segment_length), out, stream);
 }

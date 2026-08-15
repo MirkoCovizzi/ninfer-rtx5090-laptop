@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gdn_input_proj.h"
 
 #include "ops/input_projection_test_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cmath>
@@ -319,7 +320,7 @@ int run_batched_case(std::string_view label, std::int32_t hidden, std::int32_t v
     WorkspaceArena workspace(std::max<std::size_t>(1, workspace_bytes));
 
     launch(x, conv, conv_state, valid, initial, snapshot_base, q, k, v, z_output, workspace);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures                                 = 0;
     const std::vector<double> query_values       = query.values();
@@ -461,7 +462,7 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_we
     ops::gdn_input_proj_conv_snapshot(x, query_key.view(), value_z_weight.view(), conv, conv_state,
                                       Tensor{}, initial, snapshot_base, q, k, v, z_output,
                                       workspace, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::size_t initial_base = static_cast<std::size_t>(initial_slot) * 3 * kChannels;
     const std::span<const std::uint16_t> initial_state(state_before.data() + initial_base,
@@ -596,7 +597,7 @@ int run_w8_case(DevicePackedWeight& parent, std::int32_t tokens, std::int32_t in
 
     ops::gdn_input_proj_conv_snapshot(x, parent.view(), conv, conv_state, Tensor{}, initial,
                                       snapshot_base, q, k, v, z_output, workspace, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::size_t initial_base = static_cast<std::size_t>(initial_slot) * 3 * kChannels;
     const std::span<const std::uint16_t> initial_state(state_before.data() + initial_base,
@@ -724,7 +725,7 @@ int run_nvfp4_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearP
 
     ops::gdn_input_proj_conv_snapshot(x, parent.view(), conv, conv_state, Tensor{}, initial,
                                       snapshot_base, q, k, v, z_output, policy, workspace, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::size_t initial_base = static_cast<std::size_t>(initial_slot) * 3 * kChannels;
     const std::span<const std::uint16_t> initial_state(state_before.data() + initial_base,
@@ -823,7 +824,7 @@ int run_nvfp4() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

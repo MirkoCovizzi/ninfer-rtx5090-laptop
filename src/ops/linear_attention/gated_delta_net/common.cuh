@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Gated DeltaNet head mapping and shared-memory layouts. Generic CUDA primitives
@@ -7,17 +8,17 @@
 #include "ops/common/math.h"
 #include "ops/linear_attention/gated_delta_net/common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
-#ifdef __CUDACC__
+#ifdef __HIPCC__
 #    include "ops/common/math.cuh"
 #    include "ops/common/memory.cuh"
 #    include "ops/common/warp.cuh"
-#    include <cuda_bf16.h>
+#    include <hip/hip_bf16.h>
 #    define NINFER_KERNELS_HOST_DEVICE __host__ __device__
 #else
 #    define NINFER_KERNELS_HOST_DEVICE
@@ -43,7 +44,7 @@ inline uint3 init_fastdiv_values(std::uint64_t d64) {
     return make_uint3(mp, L, d);
 }
 
-#ifdef __CUDACC__
+#ifdef __HIPCC__
 
 static __device__ __forceinline__ std::uint32_t fastdiv(std::uint32_t n, uint3 fastdiv_values) {
     const std::uint32_t hi = __umulhi(n, fastdiv_values.x);
@@ -75,7 +76,7 @@ struct SmemTile {
 
 template <int ROWS, int STRIDE, int THREADS, class View>
 static __device__ __forceinline__ void
-issue_load_bf16_to_float_vec4(View view, const __nv_bfloat16* __restrict__ gmem_base_row0,
+issue_load_bf16_to_float_vec4(View view, const __hip_bfloat16* __restrict__ gmem_base_row0,
                               std::int64_t gmem_row_stride_elems, int tid) {
     static_assert(STRIDE % 4 == 0, "issue_load_bf16_to_float_vec4: STRIDE must be a multiple of 4");
     constexpr int VEC_PER_ROW = STRIDE / 4;
@@ -84,7 +85,7 @@ issue_load_bf16_to_float_vec4(View view, const __nv_bfloat16* __restrict__ gmem_
     for (int v = tid; v < N_VEC; v += THREADS) {
         const int row  = v / VEC_PER_ROW;
         const int col4 = v - row * VEC_PER_ROW;
-        const __nv_bfloat16* gmem_ptr =
+        const __hip_bfloat16* gmem_ptr =
             gmem_base_row0 + static_cast<std::int64_t>(row) * gmem_row_stride_elems + col4 * 4;
         const Bf16x4Pack packed     = load_vec<Bf16x4Pack>(gmem_ptr);
         const float2 lo             = bf16x2_to_float2(packed.pair[0]);
@@ -95,7 +96,7 @@ issue_load_bf16_to_float_vec4(View view, const __nv_bfloat16* __restrict__ gmem_
 
 inline constexpr float kLog2E = 1.4426950408889634f;
 
-#endif // __CUDACC__
+#endif // __HIPCC__
 
 struct head_map {
     int H_qk;

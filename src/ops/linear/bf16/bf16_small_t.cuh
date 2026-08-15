@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Contiguous BF16 x BF16 exact-small-T SIMT core.
@@ -9,8 +10,9 @@
 
 #include "ops/linear/bf16/bf16_gemv.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -58,7 +60,7 @@ struct Bf16SmallTSharedStorage {
 
 template <class Geometry, int ActiveTokens, class Schedule>
 __device__ __forceinline__ void bf16_small_t_accumulate_direct_phase(
-    const __nv_bfloat16* __restrict__ x, int phase, int warp_in_row, int lane,
+    const __hip_bfloat16* __restrict__ x, int phase, int warp_in_row, int lane,
     const Bf16GemvPack<Schedule::kValuesPerLane> (&packed_weights)[Schedule::kRowsPerWarp],
     float (&accumulators)[Schedule::kRowsPerWarp][ActiveTokens][Schedule::kAccumulatorChains]) {
     using Pack = Bf16GemvPack<Schedule::kValuesPerLane>;
@@ -91,7 +93,7 @@ __device__ __forceinline__ void bf16_small_t_accumulate_direct_phase(
 
 template <class Geometry, int ActiveTokens, class Schedule>
 __device__ __forceinline__ void bf16_small_t_compute_rows(
-    const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ weight, int row0,
+    const __hip_bfloat16* __restrict__ x, const __hip_bfloat16* __restrict__ weight, int row0,
     int warp_in_row, int lane,
     float (&accumulators)[Schedule::kRowsPerWarp][ActiveTokens][Schedule::kAccumulatorChains]) {
     constexpr int kValuesPerPhase = Schedule::kWarpsPerRow * kWarpSize * Schedule::kValuesPerLane;
@@ -178,7 +180,7 @@ __device__ __forceinline__ void bf16_small_t_compute_rows(
 template <class Geometry, int ActiveTokens, class Schedule, class OutputPolicy>
 __global__
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_small_t_inner_kernel(
-    const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ weight,
+    const __hip_bfloat16* __restrict__ x, const __hip_bfloat16* __restrict__ weight,
     OutputPolicy output) {
     static_assert(ActiveTokens >= 2 && ActiveTokens <= 32);
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
@@ -233,7 +235,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_small
 }
 
 struct Bf16SmallTContiguousOutput {
-    __nv_bfloat16* data;
+    __hip_bfloat16* data;
     std::int32_t rows;
 
     __device__ __forceinline__ void store(std::int32_t row, std::int32_t token, float value) const {

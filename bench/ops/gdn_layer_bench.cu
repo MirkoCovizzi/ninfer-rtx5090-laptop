@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Complete Qwen3.6-35B-A3B GDN mixer benchmark for the production small-T snapshot path.
 //
 // The measured layer is exactly the gdn_mix composition from hidden RMSNorm through the W8
@@ -32,7 +33,7 @@
 #include "ops/kernel/rmsnorm.cuh"
 #include "ops/linear_add/w8/w8_linear_add_plan.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -112,14 +113,14 @@ Weight make_bf16_weight(const ninfer::DeviceBuffer& storage, std::int32_t rows, 
 ninfer::DeviceBuffer make_constant_bf16(std::size_t elements, float value) {
     std::vector<std::uint16_t> host(elements, bench::f32_to_bf16(value));
     ninfer::DeviceBuffer device(elements * sizeof(std::uint16_t));
-    CUDA_CHECK(cudaMemcpy(device.p, host.data(), device.bytes, cudaMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(device.p, host.data(), device.bytes, hipMemcpyHostToDevice));
     return device;
 }
 
 ninfer::DeviceBuffer make_constant_f32(std::size_t elements, float value) {
     std::vector<float> host(elements, value);
     ninfer::DeviceBuffer device(elements * sizeof(float));
-    CUDA_CHECK(cudaMemcpy(device.p, host.data(), device.bytes, cudaMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(device.p, host.data(), device.bytes, hipMemcpyHostToDevice));
     return device;
 }
 
@@ -242,7 +243,7 @@ struct Resources {
 
     static ninfer::DeviceBuffer make_constant_i32(std::int32_t value) {
         ninfer::DeviceBuffer device(sizeof(value));
-        CUDA_CHECK(cudaMemcpy(device.p, &value, sizeof(value), cudaMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(device.p, &value, sizeof(value), hipMemcpyHostToDevice));
         return device;
     }
 
@@ -277,7 +278,7 @@ struct Resources {
     WorkspaceArena workspace;
 };
 
-Result run_case(Resources& resources, ninfer::DeviceBuffer& flush, cudaStream_t stream,
+Result run_case(Resources& resources, ninfer::DeviceBuffer& flush, hipStream_t stream,
                 const Options& options, std::int32_t tokens) {
     Tensor residual(resources.residual.p, DType::BF16, {kHidden, tokens});
     Tensor hidden(resources.hidden.p, DType::BF16, {kHidden, tokens});
@@ -305,7 +306,7 @@ Result run_case(Resources& resources, ninfer::DeviceBuffer& flush, cudaStream_t 
     Tensor gdn_norm(resources.gdn_norm.p, DType::BF16, {kHeadDim});
     Tensor gated_out(resources.gated_out.p, DType::BF16, {kHeadDim, kValueHeads, tokens});
 
-    const auto layer = [&](cudaStream_t s) {
+    const auto layer = [&](hipStream_t s) {
         const bool fused_norm_control = options.norm_control == "fused";
         if (fused_norm_control) {
             ops::gdn_norm_gating_proj(residual, input_norm, kEps, resources.control_weight, a_log,
@@ -349,10 +350,10 @@ Result run_case(Resources& resources, ninfer::DeviceBuffer& flush, cudaStream_t 
             const auto grid =
                 static_cast<unsigned int>((rows + rows_per_block - 1) / rows_per_block);
             ops::rmsnorm_warp_bf16x2_kernel<ops::RmsEpilogue::Gated, block><<<grid, block, 0, s>>>(
-                static_cast<const __nv_bfloat162*>(recurrent_out.data),
-                static_cast<const __nv_bfloat162*>(gdn_norm.data),
-                static_cast<const __nv_bfloat162*>(z.data),
-                static_cast<__nv_bfloat162*>(gated_out.data), kHeadDim, rows, kEps);
+                static_cast<const __hip_bfloat162*>(recurrent_out.data),
+                static_cast<const __hip_bfloat162*>(gdn_norm.data),
+                static_cast<const __hip_bfloat162*>(z.data),
+                static_cast<__hip_bfloat162*>(gated_out.data), kHeadDim, rows, kEps);
         } else {
             ops::gated_rmsnorm(recurrent_out, gdn_norm, z.view({kHeadDim, kValueHeads, tokens}),
                                kEps, gated_out, s);
@@ -364,7 +365,7 @@ Result run_case(Resources& resources, ninfer::DeviceBuffer& flush, cudaStream_t 
 
     // Resolve lazy function attributes and validate the complete production route before capture.
     layer(stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     bench::TimedGraph graph;
     graph.capture(stream, layer);
@@ -508,7 +509,7 @@ void print_results(const Options& options, const std::vector<Result>& results) {
 
 int main(int argc, char** argv) {
     int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }
@@ -516,8 +517,8 @@ int main(int argc, char** argv) {
         const Options options = parse_options(argc, argv);
         const std::int32_t max_tokens =
             *std::max_element(options.t_sweep.begin(), options.t_sweep.end());
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         Resources resources(max_tokens);
         ninfer::DeviceBuffer flush(options.flush_bytes);
         std::vector<Result> results;
@@ -532,8 +533,8 @@ int main(int argc, char** argv) {
         if (!options.csv_out.empty()) {
             std::printf("\nCSV written to %s\n", options.csv_out.c_str());
         }
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_gdn_layer_bench: %s\n", error.what());

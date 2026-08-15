@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "core/layout.h"
 #include <ninfer/targets/qwen3_6/decoder_state.h>
 #include <ninfer/targets/qwen3_6/hybrid_topology.h>

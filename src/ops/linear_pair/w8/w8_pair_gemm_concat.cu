@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_pair/w8/w8_pair_kernels.h"
 #include "ops/linear_pair/w8/w8_pair_plan.h"
 
@@ -15,11 +16,11 @@ constexpr int kRows   = 1024;
 constexpr int kHidden = 2048;
 
 struct PairOutputTile {
-    __nv_bfloat16* data;
+    __hip_bfloat16* data;
     std::int32_t parent_row_begin;
     std::int32_t parent_row_end;
 
-    __device__ __forceinline__ __nv_bfloat16* at(std::int32_t parent_row, std::int32_t col) const {
+    __device__ __forceinline__ __hip_bfloat16* at(std::int32_t parent_row, std::int32_t col) const {
         return data + static_cast<std::int64_t>(col) * kRows + parent_row - parent_row_begin;
     }
 
@@ -30,8 +31,8 @@ struct PairOutputTile {
 };
 
 struct PairOutput {
-    __nv_bfloat16* first;
-    __nv_bfloat16* second;
+    __hip_bfloat16* first;
+    __hip_bfloat16* second;
 
     __device__ __forceinline__ std::int32_t row_begin(std::int32_t block,
                                                       std::int32_t tile_rows) const {
@@ -48,14 +49,14 @@ struct PairOutput {
 
 template <class Schedule, bool Full>
 void launch_variant(const Tensor& x, const Weight& first_weight, Tensor& first_out,
-                    Tensor& second_out, cudaStream_t stream) {
-    const PairOutput output{static_cast<__nv_bfloat16*>(first_out.data),
-                            static_cast<__nv_bfloat16*>(second_out.data)};
+                    Tensor& second_out, hipStream_t stream) {
+    const PairOutput output{static_cast<__hip_bfloat16*>(first_out.data),
+                            static_cast<__hip_bfloat16*>(second_out.data)};
     const dim3 grid(static_cast<unsigned>(2 * div_up(kRows, Schedule::BM)),
                     static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
     w8_rowsplit_gemm_mma_kernel<Schedule, Full, W8Epilogue::Store, PairOutput>
         <<<grid, Schedule::THREADS, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(first_weight.qdata),
             static_cast<const std::uint8_t*>(first_weight.scales), output, 2 * kRows, kHidden,
             x.ne[1], kHidden);
@@ -63,13 +64,13 @@ void launch_variant(const Tensor& x, const Weight& first_weight, Tensor& first_o
 
 template <class Schedule>
 void dispatch_variant(bool full, const Tensor& x, const Weight& first_weight, Tensor& first_out,
-                      Tensor& second_out, cudaStream_t stream) {
+                      Tensor& second_out, hipStream_t stream) {
     if (full) {
         launch_variant<Schedule, true>(x, first_weight, first_out, second_out, stream);
     } else {
         launch_variant<Schedule, false>(x, first_weight, first_out, second_out, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void require_adjacent(const Weight& first_weight, const Weight& second_weight) {
@@ -85,7 +86,7 @@ void require_adjacent(const Weight& first_weight, const Weight& second_weight) {
 
 void w8_pair_concat_mma_launch(W8PairScheduleId schedule, bool full, const Tensor& x,
                                const Weight& first_weight, const Weight& second_weight,
-                               Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+                               Tensor& first_out, Tensor& second_out, hipStream_t stream) {
     require_adjacent(first_weight, second_weight);
     switch (schedule) {
     case W8PairScheduleId::ConcatMmaR32C64:

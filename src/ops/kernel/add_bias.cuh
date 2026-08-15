@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Implements: include/ninfer/ops/add_bias.h
@@ -8,7 +9,8 @@
 #include "ops/common/bf16_vector.cuh"
 #include "ops/common/memory.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -16,7 +18,7 @@ namespace ninfer::ops {
 
 inline constexpr int kAddBiasPairsPerThread = 4;
 
-__device__ __forceinline__ __nv_bfloat162 add_bias_pair(__nv_bfloat162 value, __nv_bfloat162 bias) {
+__device__ __forceinline__ __hip_bfloat162 add_bias_pair(__hip_bfloat162 value, __hip_bfloat162 bias) {
     return __floats2bfloat162_rn(__low2float(value) + __low2float(bias),
                                  __high2float(value) + __high2float(bias));
 }
@@ -45,7 +47,7 @@ __launch_bounds__(Block) __global__
 
 template <int Block>
 __launch_bounds__(Block) __global__
-    void add_bias_bf16x2_kernel(const __nv_bfloat162* bias, __nv_bfloat162* x, std::int32_t pairs,
+    void add_bias_bf16x2_kernel(const __hip_bfloat162* bias, __hip_bfloat162* x, std::int32_t pairs,
                                 std::int32_t rows) {
     const std::int32_t first =
         (static_cast<std::int32_t>(blockIdx.x) * Block + static_cast<std::int32_t>(threadIdx.x)) *
@@ -61,7 +63,7 @@ __launch_bounds__(Block) __global__
     }
 }
 
-__global__ void add_bias_kernel(const __nv_bfloat16* bias, __nv_bfloat16* x, std::int32_t d,
+__global__ void add_bias_kernel(const __hip_bfloat16* bias, __hip_bfloat16* x, std::int32_t d,
                                 std::int64_t n) {
     const std::int64_t start  = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;

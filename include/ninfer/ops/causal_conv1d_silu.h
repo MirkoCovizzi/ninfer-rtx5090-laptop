@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -23,12 +23,12 @@ namespace ninfer::ops {
 
 // Reads conv_state as the initial window and replaces it with the final three values after x.
 void causal_conv1d_silu(const Tensor& x, const Tensor& weight, Tensor& conv_state, Tensor& out,
-                        cudaStream_t stream);
+                        hipStream_t stream);
 
 // Distinct-state form. conv_state_in and conv_state_out may be disjoint or exactly the same
 // storage; conv_state_out receives the trailing width-3 window of concat(conv_state_in,x).
 void causal_conv1d_silu(const Tensor& x, const Tensor& weight, const Tensor& conv_state_in,
-                        Tensor& conv_state_out, Tensor& out, cudaStream_t stream);
+                        Tensor& conv_state_out, Tensor& out, hipStream_t stream);
 
 /**
  * Snapshot form for B independent sequences. `x` and `out` are contiguous BF16 [C,W,B],
@@ -47,6 +47,6 @@ void causal_conv1d_silu(const Tensor& x, const Tensor& weight, const Tensor& con
 void causal_conv1d_silu_snapshot(const Tensor& x, const Tensor& weight, Tensor& conv_states,
                                  const Tensor& valid_columns, const Tensor& initial_state_slots,
                                  const Tensor& snapshot_base_slots, Tensor& out,
-                                 cudaStream_t stream);
+                                 hipStream_t stream);
 
 } // namespace ninfer::ops

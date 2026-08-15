@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/q5/q5_linear_add_kernels.h"
 
 #include "core/device.h"
@@ -5,7 +6,8 @@
 #include "ops/common/token_slices.h"
 #include "ops/linear/q5/q5_rowsplit_gemm_mma.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -26,12 +28,12 @@ using MmaR64C128Schedule =
                               Cache::cg, Q5ScaleLoad::Pair32>;
 
 template <class Schedule, bool Full>
-void launch_kernel(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
-    const auto* xp              = static_cast<const __nv_bfloat16*>(x.data);
+void launch_kernel(const Tensor& x, const Weight& w, Tensor& residual_out, hipStream_t stream) {
+    const auto* xp              = static_cast<const __hip_bfloat16*>(x.data);
     const auto* codes           = static_cast<const std::uint8_t*>(w.qdata);
     const auto* high            = static_cast<const std::uint8_t*>(w.qhigh);
     const auto* scales          = static_cast<const std::uint8_t*>(w.scales);
-    auto* out                   = static_cast<__nv_bfloat16*>(residual_out.data);
+    auto* out                   = static_cast<__hip_bfloat16*>(residual_out.data);
     const std::int32_t rows     = residual_out.ne[0];
     const std::int32_t k        = x.ne[0];
     const std::int32_t cols     = x.ne[1];
@@ -42,11 +44,11 @@ void launch_kernel(const Tensor& x, const Weight& w, Tensor& residual_out, cudaS
     q5_rowsplit_gemm_mma_kernel<Schedule, Full, Q5MmaEpilogue::CtaCollectiveResidual>
         <<<grid, Schedule::kThreads, 0, stream>>>(xp, codes, high, scales, out, out, rows, k, cols,
                                                   padded_k);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Schedule>
-void launch_route(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
+void launch_route(const Tensor& x, const Weight& w, Tensor& residual_out, hipStream_t stream) {
     const bool full = (w.n % 64) == 0 && (x.ne[1] % Schedule::kBlockCols) == 0 &&
                       w.k == w.padded_shape[1] && (w.k % 64) == 0;
     for_each_token_slice(x.ne[1], Schedule::kBlockCols,
@@ -64,22 +66,22 @@ void launch_route(const Tensor& x, const Weight& w, Tensor& residual_out, cudaSt
 } // namespace
 
 void q5_linear_add_mma_r64_c16_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                                      cudaStream_t stream) {
+                                      hipStream_t stream) {
     launch_route<MmaR64C16Schedule>(x, w, residual_out, stream);
 }
 
 void q5_linear_add_mma_r64_c24_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                                      cudaStream_t stream) {
+                                      hipStream_t stream) {
     launch_route<MmaR64C24Schedule>(x, w, residual_out, stream);
 }
 
 void q5_linear_add_mma_r64_c64_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                                      cudaStream_t stream) {
+                                      hipStream_t stream) {
     launch_route<MmaR64C64Schedule>(x, w, residual_out, stream);
 }
 
 void q5_linear_add_mma_r64_c128_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                                       cudaStream_t stream) {
+                                       hipStream_t stream) {
     launch_route<MmaR64C128Schedule>(x, w, residual_out, stream);
 }
 

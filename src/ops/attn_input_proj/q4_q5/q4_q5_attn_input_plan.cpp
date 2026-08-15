@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.h"
 
 #include "ops/attn_input_proj/q4_q5/q4_q5_attn_input_kernels.h"
@@ -76,7 +77,7 @@ Q4Q5AttnInputPlan q4_q5_attn_input_resolve_plan(const Q4Q5AttnInputProblem& prob
 void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& x,
                                    const Weight& query_key_weight, const Weight& gate_value_weight,
                                    Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     const Q4Q5AttnInputProblem problem{x.ne[0], q.ne[0], k.ne[0], query_key_weight.padded_shape[1],
                                        x.ne[1]};
     const Q4Q5AttnInputPlan resolved = q4_q5_attn_input_resolve_plan(problem);
@@ -103,7 +104,7 @@ void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& 
 
 void q4_q5_attn_input_dispatch(const Tensor& x, const Weight& query_key_weight,
                                const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k,
-                               Tensor& v, cudaStream_t stream) {
+                               Tensor& v, hipStream_t stream) {
     const Q4Q5AttnInputProblem problem{x.ne[0], q.ne[0], k.ne[0], query_key_weight.padded_shape[1],
                                        x.ne[1]};
     const Q4Q5AttnInputPlan plan = q4_q5_attn_input_resolve_plan(problem);

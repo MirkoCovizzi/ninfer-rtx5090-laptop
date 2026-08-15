@@ -6,7 +6,7 @@
 #include "core/layout.h"
 #include "ops/common/math.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>

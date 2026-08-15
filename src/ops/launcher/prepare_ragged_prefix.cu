@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/launcher/prepare_ragged_prefix.h"
 
 #include "core/device.h"
@@ -7,7 +8,7 @@ namespace ninfer::ops::detail {
 
 void prepare_ragged_prefix_launch(const Tensor& source, const Tensor& lanes, const Tensor& starts,
                                   const Tensor& ends, Tensor& destination, Tensor& positions,
-                                  Tensor& counts, cudaStream_t stream) {
+                                  Tensor& counts, hipStream_t stream) {
     constexpr int block = 128;
     const dim3 grid(source.ne[1], destination.ne[2], 1);
     prepare_ragged_prefix_kernel<<<grid, block, 0, stream>>>(
@@ -17,7 +18,7 @@ void prepare_ragged_prefix_launch(const Tensor& source, const Tensor& lanes, con
         static_cast<std::int32_t*>(counts.data), source.ne[0] / 8, source.ne[1],
         source.nb[1] / static_cast<std::int64_t>(sizeof(uint4)),
         source.nb[2] / static_cast<std::int64_t>(sizeof(uint4)));
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

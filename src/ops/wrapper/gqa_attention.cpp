@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - GQA A1/A2/A3 validation and finite route dispatch.
 #include "ninfer/ops/gqa_attention.h"
 
@@ -291,7 +292,7 @@ void launch_chunked_small_t(const Tensor& q, const Tensor& k, const Tensor& v,
                             const Tensor& positions, const Tensor& valid_columns,
                             const Tensor& table_rows, float scale, PagedKVBatchLayerView cache,
                             GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& out,
-                            cudaStream_t stream) {
+                            hipStream_t stream) {
     for (std::int32_t begin = 0; begin < q.ne[2]; begin += kSmallTChunkTokens) {
         const std::int32_t count = std::min(kSmallTChunkTokens, q.ne[2] - begin);
         auto chunk_scope         = workspace.scope();
@@ -307,7 +308,7 @@ void launch_chunked_small_t(const Tensor& q, const Tensor& k, const Tensor& v,
 
 void launch_cached_chunked_small_t(const Tensor& q, const Tensor& positions, float scale,
                                    const PagedKVLayerView& cache, GqaExecutionEnvelope envelope,
-                                   WorkspaceArena& workspace, Tensor& out, cudaStream_t stream) {
+                                   WorkspaceArena& workspace, Tensor& out, hipStream_t stream) {
     for_each_small_t_chunk(
         q, positions, workspace, cache.dtype, envelope, out,
         [&](std::int32_t, std::int32_t, const Tensor& q_chunk, const Tensor& position_chunk,
@@ -397,7 +398,7 @@ std::size_t gqa_attention_workspace_capacity_bytes(std::int32_t q_heads, DType c
 void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& positions,
                    const Tensor& valid_columns, const Tensor& kv_table_rows, float scale,
                    PagedKVBatchLayerView cache, GqaExecutionEnvelope envelope,
-                   WorkspaceArena& workspace, Tensor& out, cudaStream_t stream) {
+                   WorkspaceArena& workspace, Tensor& out, hipStream_t stream) {
     constexpr const char* op = "gqa_attention";
     validate_batched_attention_tensors(q, positions, valid_columns, kv_table_rows, out, cache,
                                        envelope, scale, op);
@@ -435,7 +436,7 @@ void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tens
 }
 
 void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
-                   PagedKVLayerView cache, cudaStream_t stream) {
+                   PagedKVLayerView cache, hipStream_t stream) {
     constexpr const char* op = "gqa_kv_append";
     if (k.dtype != DType::BF16 || v.dtype != DType::BF16) {
         throw std::invalid_argument("gqa_kv_append: k/v must be BF16");
@@ -462,7 +463,7 @@ void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
 
 void gqa_attention_cached(const Tensor& q, const Tensor& positions, float scale,
                           const PagedKVLayerView& cache, GqaExecutionEnvelope envelope,
-                          WorkspaceArena& workspace, Tensor& out, cudaStream_t stream) {
+                          WorkspaceArena& workspace, Tensor& out, hipStream_t stream) {
     constexpr const char* op = "gqa_attention_cached";
     validate_attention_tensors(q, positions, out, cache, envelope, scale, op);
 

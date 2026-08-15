@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Public-Op benchmark for every registered GDN input-projection contract.
 // Production dispatch is owned exclusively by gdn_input_proj().
 
@@ -7,8 +8,8 @@
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -165,7 +166,7 @@ const char* policy_name(ops::LinearPolicy policy) {
 
 template <class Launch>
 bench::ColdTiming measure_public(Launch&& launch, CacheState cache, DeviceBuffer& flush,
-                                 cudaStream_t stream, int warmup, int repeat) {
+                                 hipStream_t stream, int warmup, int repeat) {
     return cache == CacheState::Cold
                ? bench::measure_cold_launch(std::forward<Launch>(launch), flush, stream, warmup,
                                             repeat)
@@ -174,20 +175,20 @@ bench::ColdTiming measure_public(Launch&& launch, CacheState cache, DeviceBuffer
 
 template <class Launch>
 void profile_public(Launch&& launch, const char* format, const char* policy, CacheState cache,
-                    DeviceBuffer& flush, cudaStream_t stream, int warmup) {
+                    DeviceBuffer& flush, hipStream_t stream, int warmup) {
     for (int index = 0; index < warmup; ++index) { launch(stream); }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
     if (cache == CacheState::Cold) {
         bench::flush_l2(flush, stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
     }
     std::printf("PROFILE entry=gdn_input_proj format=%s policy=%s dispatch=public cache=%s\n",
                 format, policy, cache_name(cache));
     std::fflush(stdout);
-    CUDA_CHECK(cudaProfilerStart());
+    HIP_CHECK(hipProfilerStart());
     launch(stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaProfilerStop());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipProfilerStop());
 }
 
 std::uint64_t tensor_bytes(std::int32_t rows, std::int32_t tokens) {
@@ -220,7 +221,7 @@ template <class WorkspaceCapacity, class Launch>
 void measure_points(const Options& options, const char* format, const char* policy,
                     std::int32_t hidden, std::int32_t output_rows, std::uint64_t weight_bytes,
                     WorkspaceCapacity&& workspace_capacity, Launch&& make_launch,
-                    DeviceBuffer& flush, cudaStream_t stream, std::vector<Result>& results) {
+                    DeviceBuffer& flush, hipStream_t stream, std::vector<Result>& results) {
     const CacheState profile_cache =
         options.cache == CacheMode::Cold ? CacheState::Cold : CacheState::Warm;
     for (const std::int32_t tokens : options.tokens) {
@@ -245,7 +246,7 @@ void measure_points(const Options& options, const char* format, const char* poli
     }
 }
 
-void run_q4q5(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
+void run_q4q5(const Options& options, DeviceBuffer& flush, hipStream_t stream,
               std::vector<Result>& results) {
     constexpr std::int32_t kHidden     = 5120;
     constexpr std::int32_t kQkRows     = 4096;
@@ -261,7 +262,7 @@ void run_q4q5(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
     DeviceBuffer qkv(static_cast<std::size_t>(kQkRows + kValueRows) * max_tokens * 2);
     DeviceBuffer z(static_cast<std::size_t>(kZRows) * max_tokens * 2);
     const auto make_launch = [&](std::int32_t tokens) {
-        return [&, tokens](cudaStream_t launch_stream) {
+        return [&, tokens](hipStream_t launch_stream) {
             Tensor x(input.p, DType::BF16, {kHidden, tokens});
             Tensor tqkv(qkv.p, DType::BF16, {kQkRows + kValueRows, tokens});
             Tensor tz(z.p, DType::BF16, {kZRows, tokens});
@@ -274,7 +275,7 @@ void run_q4q5(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
         [](std::int32_t) { return std::size_t{0}; }, make_launch, flush, stream, results);
 }
 
-void run_w8(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
+void run_w8(const Options& options, DeviceBuffer& flush, hipStream_t stream,
             std::vector<Result>& results) {
     constexpr std::int32_t kHidden     = 2048;
     constexpr std::int32_t kQkvRows    = 8192;
@@ -287,7 +288,7 @@ void run_w8(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
     DeviceBuffer qkv(static_cast<std::size_t>(kQkvRows) * max_tokens * 2);
     DeviceBuffer z(static_cast<std::size_t>(kZRows) * max_tokens * 2);
     const auto make_launch = [&](std::int32_t tokens) {
-        return [&, tokens](cudaStream_t launch_stream) {
+        return [&, tokens](hipStream_t launch_stream) {
             Tensor x(input.p, DType::BF16, {kHidden, tokens});
             Tensor tqkv(qkv.p, DType::BF16, {kQkvRows, tokens});
             Tensor tz(z.p, DType::BF16, {kZRows, tokens});
@@ -302,7 +303,7 @@ void run_w8(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
                    workspace_capacity, make_launch, flush, stream, results);
 }
 
-void run_nvfp4(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
+void run_nvfp4(const Options& options, DeviceBuffer& flush, hipStream_t stream,
                std::vector<Result>& results) {
     constexpr std::int32_t kHidden     = 5120;
     constexpr std::int32_t kQkvRows    = 10240;
@@ -317,7 +318,7 @@ void run_nvfp4(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
     DeviceBuffer qkv(static_cast<std::size_t>(kQkvRows) * max_tokens * 2);
     DeviceBuffer z(static_cast<std::size_t>(kZRows) * max_tokens * 2);
     const auto make_launch = [&](std::int32_t tokens) {
-        return [&, tokens](cudaStream_t launch_stream) {
+        return [&, tokens](hipStream_t launch_stream) {
             Tensor x(input.p, DType::BF16, {kHidden, tokens});
             Tensor tqkv(qkv.p, DType::BF16, {kQkvRows, tokens});
             Tensor tz(z.p, DType::BF16, {kZRows, tokens});
@@ -360,13 +361,13 @@ bool selected(Format configured, Format candidate) {
 int main(int argc, char** argv) {
     try {
         int devices = 0;
-        if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+        if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
             std::printf("SKIP: no usable CUDA device\n");
             return 0;
         }
         const Options options = parse_options(argc, argv);
-        cudaStream_t stream   = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream   = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(kFlushBytes);
         std::vector<Result> results;
 
@@ -375,7 +376,7 @@ int main(int argc, char** argv) {
         if (selected(options.format, Format::Nvfp4)) { run_nvfp4(options, flush, stream, results); }
 
         write_csv(options, results);
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_gdn_input_proj_bench: %s\n", error.what());

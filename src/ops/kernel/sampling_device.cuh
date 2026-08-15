@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Shared implementation primitives for include/ninfer/ops/sampling.h and
@@ -7,21 +8,21 @@
 
 #include "ops/common/math.h"
 #include "ops/common/sampling_workspace.h"
+#include "ops/common/block_merge_sort_shim.cuh"
 #include "ninfer/ops/sampling.h"
 
-#include <cub/block/block_merge_sort.cuh>
-
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 #include <climits>
 #include <cstdint>
-#include <math_constants.h>
+#include <hip/hip_math_constants.h>
 
 namespace ninfer::ops {
 
 using SamplingPartialSort =
-    cub::BlockMergeSort<unsigned long long, kSamplerBlock, kSamplerItemsPerThread>;
+    BlockMergeSortShim<unsigned long long, kSamplerBlock, kSamplerItemsPerThread>;
 using SamplingGroupSort =
-    cub::BlockMergeSort<unsigned long long, kSamplerGroupBlock, kSamplerGroupItemsPerThread>;
+    BlockMergeSortShim<unsigned long long, kSamplerGroupBlock, kSamplerGroupItemsPerThread>;
 
 struct SamplingKeyGreater {
     __device__ __forceinline__ bool operator()(unsigned long long a, unsigned long long b) const {
@@ -31,7 +32,7 @@ struct SamplingKeyGreater {
 
 __device__ inline unsigned long long sampling_block_max_key(unsigned long long key,
                                                             unsigned long long* warp_keys) {
-    constexpr unsigned int kMask = 0xffffffffu;
+    constexpr unsigned long long kMask = 0xffffffffull;
     for (int offset = 16; offset > 0; offset >>= 1) {
         const unsigned long long other = __shfl_down_sync(kMask, key, offset);
         if (other > key) { key = other; }
@@ -226,7 +227,7 @@ __device__ inline void sampling_normalize_support(const SamplingConfig& cfg, flo
 // builder used by unit tests and any <=256-token column. It sorts one shared
 // tile and then applies the same top-p/min-p renormalization as the large path.
 __device__ inline void
-sampling_build_truncated_small(const __nv_bfloat16* logits, std::int64_t base, std::int32_t vocab,
+sampling_build_truncated_small(const __hip_bfloat16* logits, std::int64_t base, std::int32_t vocab,
                                const SamplingConfig& cfg, float* tile_val, int* tile_idx,
                                float* cand_val, int* cand_idx, float* prob, int* n_support,
                                const std::int32_t* overlay = nullptr, int overlay_len = 0) {
@@ -239,7 +240,7 @@ sampling_build_truncated_small(const __nv_bfloat16* logits, std::int64_t base, s
             tile_val[tid] = x;
             tile_idx[tid] = tid;
         } else {
-            tile_val[tid] = -CUDART_INF_F;
+            tile_val[tid] = -HIP_INF_F;
             tile_idx[tid] = INT_MAX;
         }
     }
@@ -257,7 +258,7 @@ sampling_build_truncated_small(const __nv_bfloat16* logits, std::int64_t base, s
 // route cannot represent the launch. It still reads each vocab entry once and
 // keeps a bounded per-thread top-20, so it avoids a top_k*vocab global reread.
 __device__ inline void sampling_build_truncated_block_fast(
-    const __nv_bfloat16* logits, std::int64_t base, std::int32_t vocab, const SamplingConfig& cfg,
+    const __hip_bfloat16* logits, std::int64_t base, std::int32_t vocab, const SamplingConfig& cfg,
     float* merge_val, int* merge_idx, float* cand_val, int* cand_idx, float* prob, int* n_support,
     const std::int32_t* overlay = nullptr, int overlay_len = 0) {
     const int tid = threadIdx.x;
@@ -267,7 +268,7 @@ __device__ inline void sampling_build_truncated_block_fast(
     int local_idx[kSamplerFastCandidates];
 #pragma unroll
     for (int j = 0; j < kSamplerFastCandidates; ++j) {
-        local_val[j] = -CUDART_INF_F;
+        local_val[j] = -HIP_INF_F;
         local_idx[j] = INT_MAX;
     }
 
@@ -287,7 +288,7 @@ __device__ inline void sampling_build_truncated_block_fast(
 
     if (tid == 0) {
         for (int j = 0; j < cap; ++j) {
-            cand_val[j] = -CUDART_INF_F;
+            cand_val[j] = -HIP_INF_F;
             cand_idx[j] = INT_MAX;
         }
         const int merge_n = blockDim.x * kSamplerFastCandidates;

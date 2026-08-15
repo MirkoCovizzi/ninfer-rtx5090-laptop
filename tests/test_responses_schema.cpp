@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Contract tests for the implemented OpenAI Responses Core surface: typed
 // input Items, explicit capability rejection, terminal objects, and semantic
 // SSE event sequencing.

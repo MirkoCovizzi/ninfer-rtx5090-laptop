@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // W8G32 RowSplit x BF16 warp-per-row SIMT GEMM.
@@ -35,8 +36,9 @@
 #include "ops/linear/w8/w8_rowsplit_output.cuh"
 #include "ops/linear/w8/w8_rowsplit_storage.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 
@@ -113,7 +115,7 @@ w8_simt_issue_slab(uint4* __restrict__ s_nib, uint4* __restrict__ s_hi,
 // K-value. Requires k % 8 == 0 and 16-byte aligned x.
 template <class Schedule, int ColsPerTile>
 __device__ __forceinline__ void
-w8_simt_consume_slab(const __nv_bfloat16* __restrict__ x0, std::int64_t xslab, std::int32_t k,
+w8_simt_consume_slab(const __hip_bfloat16* __restrict__ x0, std::int64_t xslab, std::int32_t k,
                      int ncols, const uint4* __restrict__ s_nib, const uint4* __restrict__ s_hi,
                      const std::uint32_t* __restrict__ s_sc, int lane, float (&acc)[ColsPerTile]) {
 #pragma unroll
@@ -146,7 +148,7 @@ w8_simt_consume_slab(const __nv_bfloat16* __restrict__ x0, std::int64_t xslab, s
 // aligned, else 0 (everything runs through the scalar tail).
 template <class Schedule, int ColsPerTile, int RowsPerCta, int PipelineStages, bool Full,
           W8Epilogue Epilogue = W8Epilogue::Store, class Output = W8ContiguousOutput>
-__global__ void w8_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x,
+__global__ void w8_rowsplit_gemm_simt_kernel(const __hip_bfloat16* __restrict__ x,
                                              const std::uint8_t* __restrict__ codes,
                                              const std::uint8_t* __restrict__ scales, Output output,
                                              std::int32_t rows, std::int32_t k, std::int32_t cols,
@@ -174,7 +176,7 @@ __global__ void w8_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x
     const std::uint8_t* code_row  = codes + static_cast<std::int64_t>(row) * kg_padded * 32;
     const std::uint8_t* high_row  = nullptr;
     const std::uint8_t* scale_row = scales + static_cast<std::int64_t>(row) * kg_padded * 2;
-    const __nv_bfloat16* x0       = x + static_cast<std::int64_t>(col0) * k;
+    const __hip_bfloat16* x0       = x + static_cast<std::int64_t>(col0) * k;
 
     float acc[ColsPerTile];
 #pragma unroll
@@ -236,7 +238,7 @@ __global__ void w8_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x
         float a = acc[tt];
         a       = warp_reduce_sum(a);
         if (lane == 0) {
-            __nv_bfloat16* destination = output_tile.at(row, col0 + tt);
+            __hip_bfloat16* destination = output_tile.at(row, col0 + tt);
             if constexpr (Epilogue == W8Epilogue::Residual) {
                 a = __bfloat162float(*destination) + a;
             }

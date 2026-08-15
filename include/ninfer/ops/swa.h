@@ -1,10 +1,11 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/arena.h"
 #include "core/cyclic_kv_cache.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -48,7 +49,7 @@ struct SwaContextExecutionEnvelope {
 void swa(const Tensor& q, const Tensor& query_k, const Tensor& query_v, const Tensor& positions,
          const Tensor& valid_columns, const Tensor& lanes, float scale,
          const CyclicKVCacheLayerView& context, SwaContextExecutionEnvelope envelope,
-         WorkspaceArena& workspace, Tensor& out, cudaStream_t stream);
+         WorkspaceArena& workspace, Tensor& out, hipStream_t stream);
 
 /**
  * Returns the transient arena capacity required for every T in the inclusive optimized interval.

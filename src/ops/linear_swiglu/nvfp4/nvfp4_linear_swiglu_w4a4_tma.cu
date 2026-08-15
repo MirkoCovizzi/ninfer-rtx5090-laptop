@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma_launch.h"
 
 #include "core/device.h"
@@ -50,8 +51,8 @@ Nvfp4W4a4TmaDescriptors make_descriptors(const std::uint8_t* activation_codes,
 void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
                                          const std::uint8_t* activation_scales,
                                          const std::uint8_t* weight_codes,
-                                         const std::uint8_t* weight_scales, __nv_bfloat16* output,
-                                         std::int32_t tokens, float alpha, cudaStream_t stream) {
+                                         const std::uint8_t* weight_scales, __hip_bfloat16* output,
+                                         std::int32_t tokens, float alpha, hipStream_t stream) {
     if (tokens < M256N128S3::kBlockM || (tokens % M256N128S3::kBlockM) != 0) {
         throw std::invalid_argument(
             "nvfp4 LinearSwiGLU TMA requires a positive M256 full-tile token count");
@@ -60,8 +61,8 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
     using Geometry                     = Nvfp4MlpGateUpGeometry;
     constexpr std::size_t kSharedBytes = sizeof(Nvfp4LinearSwiGluTmaSharedStorage<M256N128S3>);
     static const bool kConfigured      = [] {
-        CUDA_CHECK(cudaFuncSetAttribute(nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>,
-                                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+        HIP_CHECK(hipFuncSetAttribute(reinterpret_cast<const void*>(nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>),
+                                             hipFuncAttributeMaxDynamicSharedMemorySize,
                                              static_cast<int>(kSharedBytes)));
         return true;
     }();
@@ -73,7 +74,7 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
     const dim3 grid((Geometry::kOutputRows / 2) / kPairN, tokens / M256N128S3::kBlockM);
     nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>
         <<<grid, M256N128S3::kThreads, kSharedBytes, stream>>>(descriptors, alpha, output);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

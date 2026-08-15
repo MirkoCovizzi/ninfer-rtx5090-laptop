@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 //
 // op_tester.h — small reusable building blocks for Op tests: checked CUDA
@@ -18,7 +19,7 @@
 #include "core/tensor.h" // ninfer::DType, ninfer::Tensor (for op call sites)
 #include "ops/op_check.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cmath>
@@ -40,27 +41,27 @@
 namespace ninfer::test {
 
 // --- environment ------------------------------------------------------------
-inline void cuda_check(cudaError_t status, const char* operation) {
-    if (status == cudaSuccess) return;
-    throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
+inline void hip_check(hipError_t status, const char* operation) {
+    if (status == hipSuccess) return;
+    throw std::runtime_error(std::string(operation) + ": " + hipGetErrorString(status));
 }
 
-inline void cuda_check_last_launch(const char* operation) {
-    cuda_check(cudaGetLastError(), operation);
+inline void hip_check_last_launch(const char* operation) {
+    hip_check(hipGetLastError(), operation);
 }
 
-inline void cuda_synchronize() { cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize"); }
+inline void hip_synchronize() { hip_check(hipDeviceSynchronize(), "hipDeviceSynchronize"); }
 
-inline void cuda_synchronize(cudaStream_t stream) {
-    cuda_check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
+inline void hip_synchronize(hipStream_t stream) {
+    hip_check(hipStreamSynchronize(stream), "hipStreamSynchronize");
 }
 
-inline bool cuda_unavailable() {
+inline bool hip_unavailable() {
     int n               = 0;
-    const cudaError_t e = cudaGetDeviceCount(&n);
-    if (e == cudaSuccess) { return n == 0; }
-    if (e == cudaErrorNoDevice || e == cudaErrorInsufficientDriver) { return true; }
-    throw std::runtime_error(std::string("cudaGetDeviceCount: ") + cudaGetErrorString(e));
+    const hipError_t e = hipGetDeviceCount(&n);
+    if (e == hipSuccess) { return n == 0; }
+    if (e == hipErrorNoDevice || e == hipErrorInsufficientDriver) { return true; }
+    throw std::runtime_error(std::string("hipGetDeviceCount: ") + hipGetErrorString(e));
 }
 
 // --- bf16 <-> f32 (round-to-nearest-even) -----------------------------------
@@ -119,8 +120,8 @@ inline std::vector<T> from_device(const void* device, std::size_t n) {
     static_assert(std::is_trivially_copyable_v<T>);
     std::vector<T> out(n);
     if (n != 0) {
-        cuda_check(cudaMemcpy(out.data(), device, n * sizeof(T), cudaMemcpyDeviceToHost),
-                   "cudaMemcpy device-to-host");
+        hip_check(hipMemcpy(out.data(), device, n * sizeof(T), hipMemcpyDeviceToHost),
+                   "hipMemcpy device-to-host");
     }
     return out;
 }
@@ -263,8 +264,8 @@ public:
 
     void fill(int byte_value = 0) {
         if (payload_bytes_ != 0) {
-            cuda_check(cudaMemset(data(), byte_value, payload_bytes_),
-                       "cudaMemset guarded payload");
+            hip_check(hipMemset(data(), byte_value, payload_bytes_),
+                       "hipMemset guarded payload");
         }
     }
 
@@ -272,16 +273,16 @@ public:
         require_payload_range(byte_offset, count);
         if (count == 0) return;
         auto* destination = static_cast<std::uint8_t*>(data()) + byte_offset;
-        cuda_check(cudaMemcpy(destination, source, count, cudaMemcpyHostToDevice),
-                   "cudaMemcpy host-to-guarded-device");
+        hip_check(hipMemcpy(destination, source, count, hipMemcpyHostToDevice),
+                   "hipMemcpy host-to-guarded-device");
     }
 
     void copy_to_host(void* destination, std::size_t count, std::size_t byte_offset = 0) const {
         require_payload_range(byte_offset, count);
         if (count == 0) return;
         const auto* source = static_cast<const std::uint8_t*>(data()) + byte_offset;
-        cuda_check(cudaMemcpy(destination, source, count, cudaMemcpyDeviceToHost),
-                   "cudaMemcpy guarded-device-to-host");
+        hip_check(hipMemcpy(destination, source, count, hipMemcpyDeviceToHost),
+                   "hipMemcpy guarded-device-to-host");
     }
 
     int verify_guards(std::string_view label) const {

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "core/linear_attention_state.h"
 
 #include "core/device.h"
@@ -193,33 +194,33 @@ Tensor LinearAttentionStatePool::recurrent_slot(std::uint32_t layer, std::int32_
         .view({spec.key_head_dim, spec.value_head_dim, spec.value_heads});
 }
 
-void LinearAttentionStatePool::copy_slot(std::int32_t src, std::int32_t dst, cudaStream_t stream) {
+void LinearAttentionStatePool::copy_slot(std::int32_t src, std::int32_t dst, hipStream_t stream) {
     validate_layer_slot(*this, 0, src, "LinearAttentionStatePool copy_slot source");
     validate_layer_slot(*this, 0, dst, "LinearAttentionStatePool copy_slot destination");
     if (src == dst) { return; }
     for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
         const Tensor source      = conv_slot(layer, src);
         const Tensor destination = conv_slot(layer, dst);
-        CUDA_CHECK(cudaMemcpyAsync(destination.data, source.data, source.bytes(),
-                                   cudaMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(destination.data, source.data, source.bytes(),
+                                   hipMemcpyDeviceToDevice, stream));
     }
     for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
         const Tensor source      = recurrent_slot(layer, src);
         const Tensor destination = recurrent_slot(layer, dst);
-        CUDA_CHECK(cudaMemcpyAsync(destination.data, source.data, source.bytes(),
-                                   cudaMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(destination.data, source.data, source.bytes(),
+                                   hipMemcpyDeviceToDevice, stream));
     }
 }
 
-void LinearAttentionStatePool::zero_slot(std::int32_t slot, cudaStream_t stream) {
+void LinearAttentionStatePool::zero_slot(std::int32_t slot, hipStream_t stream) {
     validate_layer_slot(*this, 0, slot, "LinearAttentionStatePool zero_slot");
     for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
         const Tensor state = conv_slot(layer, slot);
-        CUDA_CHECK(cudaMemsetAsync(state.data, 0, state.bytes(), stream));
+        HIP_CHECK(hipMemsetAsync(state.data, 0, state.bytes(), stream));
     }
     for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
         const Tensor state = recurrent_slot(layer, slot);
-        CUDA_CHECK(cudaMemsetAsync(state.data, 0, state.bytes(), stream));
+        HIP_CHECK(hipMemsetAsync(state.data, 0, state.bytes(), stream));
     }
 }
 

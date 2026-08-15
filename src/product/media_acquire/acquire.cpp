@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "product/media_acquire/acquire.h"
 
 #include <curl/curl.h>

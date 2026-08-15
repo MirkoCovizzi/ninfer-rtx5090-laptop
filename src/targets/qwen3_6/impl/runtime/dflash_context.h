@@ -4,7 +4,7 @@
 #include "core/cyclic_kv_cache.h"
 #include "targets/qwen3_6/impl/runtime/layouts.h"
 
-#include <cuda_runtime_api.h>
+#include <hip/hip_runtime_api.h>
 
 #include <cstdint>
 
@@ -22,8 +22,8 @@ struct DFlashPersistentState {
 
     [[nodiscard]] CyclicKVCacheLayerView local_layer(std::uint32_t layer) const;
     [[nodiscard]] PagedKVBatchLayerView full_batch_layer(std::uint32_t layer) const;
-    void save_turn_checkpoint(std::int32_t lane, cudaStream_t stream);
-    void restore_turn_checkpoint(std::int32_t lane, cudaStream_t stream);
+    void save_turn_checkpoint(std::int32_t lane, hipStream_t stream);
+    void restore_turn_checkpoint(std::int32_t lane, hipStream_t stream);
 };
 
 } // namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS

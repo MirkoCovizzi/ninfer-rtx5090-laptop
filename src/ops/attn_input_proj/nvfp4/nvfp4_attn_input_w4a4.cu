@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/attn_input_proj/nvfp4/nvfp4_attn_input_plan.h"
 
 #include "core/device.h"
@@ -5,7 +6,8 @@
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -26,12 +28,12 @@ static_assert((kKeyRows % 128) == 0);
 static_assert((kGateRows % 128) == 0);
 
 struct Nvfp4W4a4AttentionOutput {
-    __nv_bfloat16* query;
-    __nv_bfloat16* key;
-    __nv_bfloat16* gate;
-    __nv_bfloat16* value;
+    __hip_bfloat16* query;
+    __hip_bfloat16* key;
+    __hip_bfloat16* gate;
+    __hip_bfloat16* value;
 
-    __device__ __forceinline__ __nv_bfloat16* destination(std::int32_t parent_row,
+    __device__ __forceinline__ __hip_bfloat16* destination(std::int32_t parent_row,
                                                           std::int32_t token) const {
         if (parent_row < kKeyBegin) {
             return query + static_cast<std::int64_t>(token) * kQueryRows + parent_row;
@@ -60,38 +62,38 @@ constexpr std::int32_t kTmaBlockM = 256;
 
 template <class Schedule>
 void launch_gemm(const Weight& weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
-                 Nvfp4W4a4Workspace workspace, std::int32_t tokens, cudaStream_t stream) {
+                 Nvfp4W4a4Workspace workspace, std::int32_t tokens, hipStream_t stream) {
     const dim3 grid(Geometry::kOutputRows / Schedule::kBlockN,
                     (tokens + Schedule::kBlockM - 1) / Schedule::kBlockM);
     const Nvfp4W4a4MaterializedActivation activation{workspace.codes, workspace.scales};
     const Nvfp4W4a4AttentionOutput output{
-        static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data),
-        static_cast<__nv_bfloat16*>(gate.data),
-        static_cast<__nv_bfloat16*>(v.data),
+        static_cast<__hip_bfloat16*>(q.data),
+        static_cast<__hip_bfloat16*>(k.data),
+        static_cast<__hip_bfloat16*>(gate.data),
+        static_cast<__hip_bfloat16*>(v.data),
     };
     const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
     nvfp4_w4a4_mma_kernel<Geometry, Schedule><<<grid, Schedule::kThreads, 0, stream>>>(
         activation, static_cast<const std::uint8_t*>(weight.qdata),
         static_cast<const std::uint8_t*>(weight.scales), tokens, alpha, Nvfp4IdentityEpilogue{},
         output);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
 
 void nvfp4_attn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                                   Tensor& k, Tensor& v, Nvfp4W4a4Workspace workspace,
-                                  cudaStream_t stream) {
+                                  hipStream_t stream) {
     launch_nvfp4_w4a4_quantize(x, weight, workspace, stream);
     const std::int32_t tokens = x.ne[1];
     if (tokens >= 1024 && (tokens % kTmaBlockM) == 0) {
         const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
         launch_nvfp4_w4a4_tma_attention(
             workspace.codes, workspace.scales, static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(q.data),
-            static_cast<__nv_bfloat16*>(gate.data), static_cast<__nv_bfloat16*>(k.data),
-            static_cast<__nv_bfloat16*>(v.data), tokens, alpha, stream);
+            static_cast<const std::uint8_t*>(weight.scales), static_cast<__hip_bfloat16*>(q.data),
+            static_cast<__hip_bfloat16*>(gate.data), static_cast<__hip_bfloat16*>(k.data),
+            static_cast<__hip_bfloat16*>(v.data), tokens, alpha, stream);
     } else if (tokens <= 64) {
         launch_gemm<M32N64>(weight, q, gate, k, v, workspace, tokens, stream);
     } else if (tokens <= 96) {

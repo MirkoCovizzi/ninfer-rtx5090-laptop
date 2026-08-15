@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "media/decode/decode.h"
 
 extern "C" {

@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h> // cudaStream_t
+#include <hip/hip_runtime.h> // hipStream_t
 
 namespace ninfer::ops {
 
@@ -18,6 +19,6 @@ namespace ninfer::ops {
  * the Op's numerical criterion, not the oracle. Private kernel arithmetic is
  * implementation-defined. The Op writes all of out and uses no workspace or persistent state.
  */
-void silu_mul(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stream);
+void silu_mul(const Tensor& gate, const Tensor& up, Tensor& out, hipStream_t stream);
 
 } // namespace ninfer::ops

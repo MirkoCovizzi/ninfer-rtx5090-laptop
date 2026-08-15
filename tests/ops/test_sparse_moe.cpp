@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/sparse_moe.h"
 
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -513,8 +514,8 @@ public:
         DeviceBuffer device_input                      = to_device(input_bits);
         DeviceBuffer residual_seed                     = to_device(residual_bits);
         GuardedBf16Output destination_storage(residual.size());
-        cuda_check(cudaMemcpy(destination_storage.data(), residual_seed.p, residual_seed.bytes,
-                              cudaMemcpyDeviceToDevice),
+        hip_check(hipMemcpy(destination_storage.data(), residual_seed.p, residual_seed.bytes,
+                              hipMemcpyDeviceToDevice),
                    "seed SparseMoe destination");
 
         const ops::SparseMoeWeights weights{
@@ -531,31 +532,31 @@ public:
         WorkspaceArena workspace(workspace_bytes);
 
         if (graph_replay) {
-            cudaStream_t stream  = nullptr;
-            cudaGraph_t graph    = nullptr;
-            cudaGraphExec_t exec = nullptr;
-            cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
+            hipStream_t stream  = nullptr;
+            hipGraph_t graph    = nullptr;
+            hipGraphExec_t exec = nullptr;
+            hip_check(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking),
                        "create SparseMoe graph stream");
-            cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+            hip_check(hipStreamBeginCapture(stream, hipStreamCaptureModeGlobal),
                        "begin SparseMoe graph capture");
-            cuda_check(cudaMemcpyAsync(destination.data, residual_seed.p, destination.bytes(),
-                                       cudaMemcpyDeviceToDevice, stream),
+            hip_check(hipMemcpyAsync(destination.data, residual_seed.p, destination.bytes(),
+                                       hipMemcpyDeviceToDevice, stream),
                        "capture SparseMoe residual seed");
             ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::AddResidual, destination, workspace,
                             stream);
-            cuda_check(cudaStreamEndCapture(stream, &graph), "end SparseMoe graph capture");
-            cuda_check(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0),
+            hip_check(hipStreamEndCapture(stream, &graph), "end SparseMoe graph capture");
+            hip_check(hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0),
                        "instantiate SparseMoe graph");
-            cuda_check(cudaGraphLaunch(exec, stream), "launch SparseMoe graph");
-            cuda_check(cudaGraphLaunch(exec, stream), "replay SparseMoe graph");
-            cuda_check(cudaStreamSynchronize(stream), "synchronize SparseMoe graph");
-            cuda_check(cudaGraphExecDestroy(exec), "destroy SparseMoe graph executable");
-            cuda_check(cudaGraphDestroy(graph), "destroy SparseMoe graph");
-            cuda_check(cudaStreamDestroy(stream), "destroy SparseMoe graph stream");
+            hip_check(hipGraphLaunch(exec, stream), "launch SparseMoe graph");
+            hip_check(hipGraphLaunch(exec, stream), "replay SparseMoe graph");
+            hip_check(hipStreamSynchronize(stream), "synchronize SparseMoe graph");
+            hip_check(hipGraphExecDestroy(exec), "destroy SparseMoe graph executable");
+            hip_check(hipGraphDestroy(graph), "destroy SparseMoe graph");
+            hip_check(hipStreamDestroy(stream), "destroy SparseMoe graph stream");
         } else {
             ops::sparse_moe(x, weights, ops::SparseMoeEpilogue::AddResidual, destination, workspace,
                             nullptr);
-            cuda_synchronize();
+            hip_synchronize();
         }
 
         int failures = compare_output(label, destination_storage.values(), reference);
@@ -634,7 +635,7 @@ int run_profile(const CodecProfile& profile) {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

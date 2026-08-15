@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gated_delta_net.h"
 
 #include "ninfer/ops/l2norm.h"
@@ -217,7 +218,7 @@ std::size_t gated_delta_net_workspace_capacity_bytes(std::int32_t qk_heads,
 
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                      const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
-                     Tensor& ssm_state, Tensor& out, cudaStream_t stream) {
+                     Tensor& ssm_state, Tensor& out, hipStream_t stream) {
     if (q.ne[2] != 1) {
         gated_delta_net(q, k, v, g, beta, scale, normalize_qk, ws, ssm_state, ssm_state, out,
                         stream);
@@ -234,7 +235,7 @@ void gated_delta_net_snapshot(const Tensor& q, const Tensor& k, const Tensor& v,
                               const Tensor& beta, float scale, bool normalize_qk,
                               Tensor& ssm_states, const Tensor& valid_columns,
                               const Tensor& initial_state_slots, const Tensor& snapshot_base_slots,
-                              Tensor& out, cudaStream_t stream) {
+                              Tensor& out, hipStream_t stream) {
     validate_recurrent_snapshot(q, k, v, g, beta, scale, ssm_states, valid_columns,
                                 initial_state_slots, snapshot_base_slots, out);
 
@@ -246,7 +247,7 @@ void gated_delta_net_snapshot(const Tensor& q, const Tensor& k, const Tensor& v,
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                      const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
                      const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
-                     cudaStream_t stream) {
+                     hipStream_t stream) {
     validate_chunked(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out);
 
     auto scratch_scope   = ws.scope();

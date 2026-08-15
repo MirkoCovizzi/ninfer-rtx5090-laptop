@@ -1,6 +1,6 @@
 #pragma once
 
-#include <nvtx3/nvToolsExt.h>
+#include <roctracer/roctx.h>
 
 #include <array>
 #include <cstddef>
@@ -78,23 +78,12 @@ enum class Name : std::size_t {
     return 0xff9c9c9cu;
 }
 
-[[nodiscard]] inline nvtxDomainHandle_t domain() noexcept {
-    static nvtxDomainHandle_t handle = [] {
-        nvtxDomainHandle_t out = nvtxDomainCreateA("ninfer");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::Runtime), "runtime");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::Prefill), "prefill");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::Decode), "decode");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::Mtp), "mtp");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::DFlash), "dflash");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::Attention), "attention");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::Gdn), "gdn");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::PostMixer), "post-mixer");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::Moe), "moe");
-        nvtxDomainNameCategoryA(out, static_cast<std::uint32_t>(Category::Control), "control");
-        return out;
-    }();
-    return handle;
-}
+// roctx has no domain or registered-string concepts; these handles exist only to
+// keep the calling interface stable. Every range is pushed on the global trace.
+using nvtxDomainHandle_t = int;
+using nvtxStringHandle_t = const char*;
+
+[[nodiscard]] inline nvtxDomainHandle_t domain() noexcept { return 0; }
 
 [[nodiscard]] inline nvtxStringHandle_t registered_message(Name name) noexcept {
     static constexpr std::array<const char*, static_cast<std::size_t>(Name::Count)> names{
@@ -126,31 +115,13 @@ enum class Name : std::size_t {
         "sparse_moe.small_t",
         "sparse_moe.decode",
     };
-    static const auto handles = [] {
-        std::array<nvtxStringHandle_t, names.size()> out{};
-        for (std::size_t i = 0; i < names.size(); ++i) {
-            out[i] = nvtxDomainRegisterStringA(domain(), names[i]);
-        }
-        return out;
-    }();
-    return handles[static_cast<std::size_t>(name)];
+    return names[static_cast<std::size_t>(name)];
 }
 
 class ScopedRange {
 public:
-    explicit ScopedRange(Name name, Category category, std::uint64_t payload = 0) noexcept
-        : domain_(domain()) {
-        nvtxEventAttributes_t attributes{};
-        attributes.version            = NVTX_VERSION;
-        attributes.size               = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
-        attributes.category           = static_cast<std::uint32_t>(category);
-        attributes.colorType          = NVTX_COLOR_ARGB;
-        attributes.color              = color(category);
-        attributes.payloadType        = NVTX_PAYLOAD_TYPE_UNSIGNED_INT64;
-        attributes.payload.ullValue   = payload;
-        attributes.messageType        = NVTX_MESSAGE_TYPE_REGISTERED;
-        attributes.message.registered = registered_message(name);
-        nvtxDomainRangePushEx(domain_, &attributes);
+    explicit ScopedRange(Name name, Category, std::uint64_t = 0) noexcept {
+        roctxRangePushA(registered_message(name));
     }
 
     ScopedRange(const ScopedRange&)            = delete;
@@ -158,10 +129,7 @@ public:
     ScopedRange(ScopedRange&&)                 = delete;
     ScopedRange& operator=(ScopedRange&&)      = delete;
 
-    ~ScopedRange() noexcept { nvtxDomainRangePop(domain_); }
-
-private:
-    nvtxDomainHandle_t domain_;
+    ~ScopedRange() noexcept { roctxRangePop(); }
 };
 
 } // namespace ninfer::nvtx

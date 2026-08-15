@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/linear.h"
 
 #include "ops/direct_bf16_weight.h"
@@ -100,7 +101,7 @@ int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens) {
     Tensor output(guarded_output.data(), DType::BF16, {rows, tokens});
     DeviceArena workspace(256);
     ops::linear(x, weight.view(), output, ops::LinearPolicy::A16Only, workspace, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string suffix = " T=" + std::to_string(tokens);
     int failures             = guarded_output.verify_guards("BF16_A16 Linear output" + suffix);
@@ -169,7 +170,7 @@ int run_bf16_linear() {
 } // namespace
 
 int main() {
-    if (ninfer::test::cuda_unavailable()) {
+    if (ninfer::test::hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.h"
 
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
@@ -102,7 +103,7 @@ Q4Q5GdnInputConvPlan q4_q5_gdn_input_conv_resolve_plan(const Q4Q5GdnInputProblem
 
 void q4_q5_gdn_input_execute_plan(const Q4Q5GdnInputPlan& plan, const Tensor& x,
                                   const Weight& qk_weight, const Weight& value_z_weight,
-                                  Tensor& qkv, Tensor& z, cudaStream_t stream) {
+                                  Tensor& qkv, Tensor& z, hipStream_t stream) {
     const Q4Q5GdnInputProblem problem{x.ne[0],   qk_weight.n, value_z_weight.n,
                                       qkv.ne[0], z.ne[0],     qk_weight.padded_shape[1],
                                       x.ne[1]};
@@ -127,7 +128,7 @@ void q4_q5_gdn_input_execute_plan(const Q4Q5GdnInputPlan& plan, const Tensor& x,
 
 void q4_q5_gdn_input_dispatch(const Tensor& x, const Weight& qk_weight,
                               const Weight& value_z_weight, Tensor& qkv, Tensor& z,
-                              cudaStream_t stream) {
+                              hipStream_t stream) {
     const Q4Q5GdnInputProblem problem{x.ne[0],   qk_weight.n, value_z_weight.n,
                                       qkv.ne[0], z.ne[0],     qk_weight.padded_shape[1],
                                       x.ne[1]};

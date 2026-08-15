@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/gdn_replay.h"
 
@@ -290,7 +291,7 @@ void gated_delta_net_replay_record(const Tensor& q, const Tensor& k, const Tenso
                                    const Tensor& ssm_states, const Tensor& valid_columns,
                                    const Tensor& initial_state_slots, Tensor& key_record,
                                    Tensor& value_record, Tensor& gate_record, Tensor& out,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     validate_replay_record(q, k, v, g, beta, scale, ssm_states, valid_columns, initial_state_slots,
                            key_record, value_record, gate_record, out);
     detail::gated_delta_net::launch_recurrent_record(q, k, v, g, beta, scale, ssm_states,
@@ -299,7 +300,7 @@ void gated_delta_net_replay_record(const Tensor& q, const Tensor& k, const Tenso
 }
 
 void gdn_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
-                     std::span<const GdnReplayFoldRow> rows, cudaStream_t stream) {
+                     std::span<const GdnReplayFoldRow> rows, hipStream_t stream) {
     validate_fold_records(records);
     validate_fold_states(records, states);
     require_records_disjoint_from_states(records, states);

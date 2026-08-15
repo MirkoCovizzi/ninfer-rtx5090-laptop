@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/attn_input_proj/bf16/bf16_attn_input_plan.h"
 
 #include "core/device.h"
@@ -14,13 +15,13 @@ namespace ninfer::ops::detail {
 namespace {
 
 using Launch = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, Tensor&, Tensor&,
-                        cudaStream_t);
+                        hipStream_t);
 
 struct Bf16AttentionInputSmallTOutput {
-    __nv_bfloat16* query;
-    __nv_bfloat16* key;
-    __nv_bfloat16* gate;
-    __nv_bfloat16* value;
+    __hip_bfloat16* query;
+    __hip_bfloat16* key;
+    __hip_bfloat16* gate;
+    __hip_bfloat16* value;
 
     __device__ __forceinline__ void store(std::int32_t parent_row, std::int32_t token,
                                           float result) const {
@@ -30,7 +31,7 @@ struct Bf16AttentionInputSmallTOutput {
         constexpr std::int32_t kKeyBegin   = kQueryRows;
         constexpr std::int32_t kGateBegin  = kKeyBegin + kKeyRows;
         constexpr std::int32_t kValueBegin = kGateBegin + kGateRows;
-        const __nv_bfloat16 value_bf16     = __float2bfloat16_rn(result);
+        const __hip_bfloat16 value_bf16     = __float2bfloat16_rn(result);
 
         if (parent_row < kKeyBegin) {
             query[static_cast<std::int64_t>(token) * kQueryRows + parent_row] = value_bf16;
@@ -69,7 +70,7 @@ struct Bf16AttentionSmallTProductionSchedule {
 
 template <int ActiveTokens>
 void launch_exact(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tensor& k,
-                  Tensor& v, cudaStream_t stream) {
+                  Tensor& v, hipStream_t stream) {
     using Geometry = Bf16GemvGeometry<14336, 5120>;
     using Schedule = typename Bf16AttentionSmallTProductionSchedule<ActiveTokens>::Type;
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
@@ -77,17 +78,17 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate
     static_assert((1024 % Schedule::kRowsPerCta) == 0);
 
     const Bf16AttentionInputSmallTOutput output{
-        static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data),
-        static_cast<__nv_bfloat16*>(gate.data),
-        static_cast<__nv_bfloat16*>(v.data),
+        static_cast<__hip_bfloat16*>(q.data),
+        static_cast<__hip_bfloat16*>(k.data),
+        static_cast<__hip_bfloat16*>(gate.data),
+        static_cast<__hip_bfloat16*>(v.data),
     };
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
     bf16_small_t_inner_kernel<Geometry, ActiveTokens, Schedule>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.qdata), output);
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.qdata), output);
+    HIP_CHECK(hipGetLastError());
 }
 
 template <std::size_t... Offsets>
@@ -102,7 +103,7 @@ constexpr auto kLaunchers = make_launchers(
 } // namespace
 
 void bf16_attn_input_small_t_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                    Tensor& k, Tensor& v, cudaStream_t stream) {
+                                    Tensor& k, Tensor& v, hipStream_t stream) {
     if (x.ne[1] < kBf16AttnInputSmallTMinTokens || x.ne[1] > kBf16AttnInputSmallTMaxTokens) {
         throw std::invalid_argument("bf16 attn_input_proj small-T requires T in [2,32]");
     }

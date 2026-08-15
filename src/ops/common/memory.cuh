@@ -1,7 +1,7 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
-#include <cuda_pipeline.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -28,23 +28,39 @@ __device__ __forceinline__ void store_vec(T* ptr, V value) {
     *reinterpret_cast<V*>(ptr) = value;
 }
 
+// gfx11 maps shared memory at generic base 0x1'0000'0000'0000; the LDS offset
+// used by ds instructions is the low 16 bits of the generic address.
 __device__ __forceinline__ unsigned smem_addr(const void* ptr) {
-    return static_cast<unsigned>(__cvta_generic_to_shared(ptr));
+    return static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(ptr) & 0xFFFFu);
 }
 
+template <int Bytes>
+struct vec_type;
+template <>
+struct vec_type<4> {
+    using type = unsigned;
+};
+template <>
+struct vec_type<8> {
+    using type = unsigned long long;
+};
+template <>
+struct vec_type<16> {
+    using type = struct alignas(16) {
+        unsigned long long lo;
+        unsigned long long hi;
+    };
+};
+
+// RDNA 3.5 has no cp.async: these helpers issue a synchronous global load into
+// shared memory. The commit/wait stages are no-ops; kernels that relied on the
+// async pipeline still get correct data, with the loads issued in order.
 template <int Bytes, Cache Policy = Cache::ca>
 __device__ __forceinline__ void cp_async(void* smem_dst, const void* gmem_src) {
     static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16, "cp_async supports 4, 8, or 16 bytes");
-    if constexpr (Policy == Cache::cg) {
-        static_assert(Bytes == 16, "cp.async.cg requires a 16-byte copy");
-        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n"
-                     :
-                     : "r"(smem_addr(smem_dst)), "l"(gmem_src));
-    } else {
-        asm volatile("cp.async.ca.shared.global [%0], [%1], %2;\n"
-                     :
-                     : "r"(smem_addr(smem_dst)), "l"(gmem_src), "n"(Bytes));
-    }
+    (void)Policy;
+    using V = typename vec_type<Bytes>::type;
+    store_vec(smem_dst, load_vec<V>(gmem_src));
 }
 
 template <int Bytes, Cache Policy = Cache::ca>
@@ -52,38 +68,32 @@ __device__ __forceinline__ void cp_async_zfill(void* smem_dst, const void* gmem_
                                                int src_bytes) {
     static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16,
                   "cp_async_zfill supports 4, 8, or 16 bytes");
-    if constexpr (Policy == Cache::cg) {
-        static_assert(Bytes == 16, "cp.async.cg requires a 16-byte copy");
-        asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
-                     :
-                     : "r"(smem_addr(smem_dst)), "l"(gmem_src), "r"(src_bytes));
-    } else {
-        asm volatile("cp.async.ca.shared.global [%0], [%1], %2, %3;\n"
-                     :
-                     : "r"(smem_addr(smem_dst)), "l"(gmem_src), "n"(Bytes), "r"(src_bytes));
+    (void)Policy;
+    unsigned char* dst       = static_cast<unsigned char*>(smem_dst);
+    const unsigned char* src = static_cast<const unsigned char*>(gmem_src);
+#pragma unroll
+    for (int i = 0; i < Bytes; ++i) {
+        dst[i] = i < src_bytes ? src[i] : 0;
     }
 }
 
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n"); }
+__device__ __forceinline__ void cp_commit() {}
 
 template <int Groups>
 __device__ __forceinline__ void cp_wait() {
-    static_assert(Groups >= 0 && Groups <= 7, "cp_wait group count must fit the PTX immediate");
-    asm volatile("cp.async.wait_group %0;\n" : : "n"(Groups));
+    (void)Groups;
 }
 
 template <int Bytes>
 __device__ __forceinline__ void pipe_copy(void* smem_dst, const void* gmem_src) {
-    static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16, "pipe_copy supports 4, 8, or 16 bytes");
-    __pipeline_memcpy_async(smem_dst, gmem_src, Bytes);
+    cp_async<Bytes>(smem_dst, gmem_src);
 }
 
-__device__ __forceinline__ void pipe_commit() { __pipeline_commit(); }
+__device__ __forceinline__ void pipe_commit() {}
 
 template <int Groups>
 __device__ __forceinline__ void pipe_wait() {
-    static_assert(Groups >= 0 && Groups <= 7, "pipe_wait group count must fit the PTX immediate");
-    __pipeline_wait_prior(Groups);
+    (void)Groups;
 }
 
 } // namespace ninfer::ops

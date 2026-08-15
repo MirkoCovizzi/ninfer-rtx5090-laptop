@@ -51,7 +51,7 @@ int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::ui
     Tensor bias_tensor(device_bias.data(), DType::BF16, {rows});
     Tensor input_tensor(device_input.data(), DType::BF16, {rows, columns});
     ops::add_bias(bias_tensor, input_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_input.data(), count), expected,
                                     add_bias_bf16_criterion());
@@ -66,7 +66,7 @@ int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::ui
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

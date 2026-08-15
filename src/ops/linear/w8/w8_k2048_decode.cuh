@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/math.cuh"
@@ -5,8 +6,9 @@
 #include "ops/common/warp.cuh"
 #include "ops/linear/w8/w8_rowsplit_output.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 
@@ -23,7 +25,7 @@ struct W8DecodeStoreEpilogue {
 template <std::int32_t Rows, std::int32_t RowsPerCta, class Output,
           class Epilogue = W8DecodeStoreEpilogue>
 __global__ __launch_bounds__(RowsPerCta * 32,
-                             2) void w8_k2048_decode_kernel(const __nv_bfloat16* __restrict__ x,
+                             2) void w8_k2048_decode_kernel(const __hip_bfloat16* __restrict__ x,
                                                             const std::uint8_t* __restrict__ codes,
                                                             const std::uint8_t* __restrict__ scales,
                                                             Output output, Epilogue epilogue = {}) {
@@ -36,7 +38,7 @@ __global__ __launch_bounds__(RowsPerCta * 32,
     constexpr int kValuesPerPhase    = 32 * kValuesPerLane;
     constexpr int kGroupsPerPhase    = kValuesPerPhase / kGroup;
     constexpr int kPhases            = kK / kValuesPerPhase;
-    constexpr unsigned kFullWarpMask = 0xffffffffu;
+    constexpr unsigned long long kFullWarpMask = 0xffffffffull;
 
     const int lane                = static_cast<int>(threadIdx.x) & 31;
     const int warp                = static_cast<int>(threadIdx.x) >> 5;

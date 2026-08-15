@@ -6,7 +6,7 @@
 #include "core/tensor.h"
 #include "ninfer/ops/linear.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -40,7 +40,7 @@ namespace ninfer::ops {
  *   No transient bytes are required.
  */
 void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
-                    Tensor& qkv, Tensor& z, cudaStream_t stream);
+                    Tensor& qkv, Tensor& z, hipStream_t stream);
 
 /**
  * Single-parent GDN projection. Registered parent forms are:
@@ -66,13 +66,13 @@ gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int32_t parent_
                                         std::int32_t min_tokens, std::int32_t max_tokens);
 
 void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Tensor& qkv, Tensor& z,
-                    LinearPolicy policy, WorkspaceArena& workspace, cudaStream_t stream);
+                    LinearPolicy policy, WorkspaceArena& workspace, hipStream_t stream);
 
 /**
  * Applies the A16-only single-parent GDN projection without transient workspace.
  */
 void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Tensor& qkv, Tensor& z,
-                    cudaStream_t stream);
+                    hipStream_t stream);
 
 /**
  * Returns the transient capacity required by the registered two-parent Q4/Q5 or single-parent W8
@@ -135,7 +135,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
                                   const Tensor& initial_state_slots,
                                   const Tensor& snapshot_base_slots, Tensor& query, Tensor& key,
                                   Tensor& value, Tensor& z, WorkspaceArena& ws,
-                                  cudaStream_t stream);
+                                  hipStream_t stream);
 
 /**
  * Single-parent form of gdn_input_proj_conv_snapshot. Registered parents are W8G32_F16S RowSplit
@@ -148,7 +148,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
                                   const Tensor& valid_columns, const Tensor& initial_state_slots,
                                   const Tensor& snapshot_base_slots, Tensor& query, Tensor& key,
                                   Tensor& value, Tensor& z, LinearPolicy policy, WorkspaceArena& ws,
-                                  cudaStream_t stream);
+                                  hipStream_t stream);
 
 /**
  * Applies the A16-only single-parent form. For NVFP4, dense B=1 is valid through W=16; the batched
@@ -159,7 +159,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
                                   const Tensor& valid_columns, const Tensor& initial_state_slots,
                                   const Tensor& snapshot_base_slots, Tensor& query, Tensor& key,
                                   Tensor& value, Tensor& z, WorkspaceArena& ws,
-                                  cudaStream_t stream);
+                                  hipStream_t stream);
 
 /**
  * Returns the transient capacity for the registered Q4/Q5 or W8 record-producing profile.
@@ -201,7 +201,7 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
                                 const Tensor& conv_states, const Tensor& valid_columns,
                                 const Tensor& initial_state_slots, Tensor& conv_record,
                                 Tensor& query, Tensor& key, Tensor& value, Tensor& z,
-                                WorkspaceArena& workspace, cudaStream_t stream);
+                                WorkspaceArena& workspace, hipStream_t stream);
 
 /**
  * Single-parent record-producing form. Registered parents are W8G32_F16S [12288,2048] and NVFP4
@@ -212,13 +212,13 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& query_key_value_z
                                 const Tensor& valid_columns, const Tensor& initial_state_slots,
                                 Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value,
                                 Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
-                                cudaStream_t stream);
+                                hipStream_t stream);
 
 /** Applies the A16-only single-parent record-producing form. */
 void gdn_input_proj_conv_record(const Tensor& x, const Weight& query_key_value_z_weight,
                                 const Tensor& conv_weight, const Tensor& conv_states,
                                 const Tensor& valid_columns, const Tensor& initial_state_slots,
                                 Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value,
-                                Tensor& z, WorkspaceArena& workspace, cudaStream_t stream);
+                                Tensor& z, WorkspaceArena& workspace, hipStream_t stream);
 
 } // namespace ninfer::ops

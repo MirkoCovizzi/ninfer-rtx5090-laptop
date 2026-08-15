@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ops/op_tester.h"
 
@@ -50,7 +51,7 @@ int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::ui
     Tensor gate_tensor(device_gate.data(), DType::BF16, {rows, columns});
     Tensor x_tensor(device_x.data(), DType::BF16, {rows, columns});
     ops::sigmoid_mul(gate_tensor, x_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_x.data(), count), expected,
                                     sigmoid_mul_bf16_criterion());
@@ -78,7 +79,7 @@ int run_edge_case() {
     Tensor gate_tensor(device_gate.data(), DType::BF16, {static_cast<int>(gate.size())});
     Tensor x_tensor(device_x.data(), DType::BF16, {static_cast<int>(x.size())});
     ops::sigmoid_mul(gate_tensor, x_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_pointwise("sigmoid_mul edge values",
                                     from_device_bf16(device_x.data(), expected.size()), expected,
@@ -94,7 +95,7 @@ int run_edge_case() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

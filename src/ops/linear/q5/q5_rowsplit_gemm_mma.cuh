@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Q5G64 RowSplit x BF16 Tensor Core GEMM.
@@ -18,8 +19,9 @@
 #include "ops/common/bf16_vector.cuh"
 #include "ops/linear/q5/q5_rowsplit_storage.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 
@@ -77,8 +79,8 @@ struct Q5RowSplitMmaGemmSchedule {
         kScaleLoadMode == Q5ScaleLoad::Pair32 ? 4 : Q5RowSplitStorage::kScaleBytesPerGroup;
 
     static constexpr int kSharedBytes =
-        kBlockRows * kBlockK * static_cast<int>(sizeof(__nv_bfloat16)) +
-        kPipelineStages * kBlockCols * kBlockK * static_cast<int>(sizeof(__nv_bfloat16)) +
+        kBlockRows * kBlockK * static_cast<int>(sizeof(__hip_bfloat16)) +
+        kPipelineStages * kBlockCols * kBlockK * static_cast<int>(sizeof(__hip_bfloat16)) +
         kPipelineStages * kBlockRows * kGroupsPerK * Q5RowSplitStorage::kCodeBytesPerGroup +
         kPipelineStages * kBlockRows * kGroupsPerK * Q5RowSplitStorage::kHighBytesPerGroup +
         kPipelineStages * kBlockRows * kGroupsPerK * kScaleBytes;
@@ -109,12 +111,12 @@ __device__ __forceinline__ int q5_mma_swizzle_k64(int row, int col) {
 template <class Schedule_, bool Full, Q5MmaEpilogue Epilogue = Q5MmaEpilogue::Store>
 __global__ __launch_bounds__(Schedule_::kThreads, Schedule_::kLaunchBoundsMinBlocks)
 void q5_rowsplit_gemm_mma_kernel(
-    const __nv_bfloat16* __restrict__ x,
+    const __hip_bfloat16* __restrict__ x,
     const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ high,
     const std::uint8_t* __restrict__ scales,
-    const __nv_bfloat16* __restrict__ residual,
-    __nv_bfloat16* __restrict__ out,
+    const __hip_bfloat16* __restrict__ residual,
+    __hip_bfloat16* __restrict__ out,
     std::int32_t rows,
     std::int32_t k,
     std::int32_t cols,
@@ -136,10 +138,16 @@ void q5_rowsplit_gemm_mma_kernel(
     constexpr int KSUB   = Schedule::kMmaKSteps;
     constexpr int S      = Schedule::kPipelineStages;
     constexpr int GPB    = Schedule::kGroupsPerK;
+    // gfx1151 WMMA atoms are 16x16 (not 16x8). Each warp covers WMT x WNT 16x16
+    // atoms; when kWarpCols is not a multiple of 16 the final atom overlaps the
+    // neighbouring warp's columns (duplicate compute, correct results) and the
+    // store below emits only the warp's own columns.
+    constexpr int WMT = MT;
+    constexpr int WNT = (Schedule::kWarpCols + 15) / 16;
     constexpr int SB     = Schedule::kScaleBytes;
 
-    __shared__ __align__(16) __nv_bfloat16 As[BM * BK];
-    __shared__ __align__(16) __nv_bfloat16 Bs[S][BN * BK];
+    __shared__ __align__(16) __hip_bfloat16 As[BM * BK];
+    __shared__ __align__(16) __hip_bfloat16 Bs[S][BN * BK];
     __shared__ __align__(16) std::uint8_t Cr[S][BM * GPB * Q5RowSplitStorage::kCodeBytesPerGroup];
     __shared__ __align__(16) std::uint8_t Hr[S][BM * GPB * Q5RowSplitStorage::kHighBytesPerGroup];
     __shared__ __align__(16) std::uint8_t Sr[S][BM * GPB * SB];
@@ -150,32 +158,21 @@ void q5_rowsplit_gemm_mma_kernel(
     const int lane           = tid & 31;
     const int warp_row       = warp / Schedule::kWarpGridCols;
     const int warp_col       = warp % Schedule::kWarpGridCols;
-    const int mma_row        = lane >> 2;
-    const int mma_col        = lane & 3;
 
     const int row0 = static_cast<int>(blockIdx.x) * BM;
     const int col0 = static_cast<int>(blockIdx.y) * BN;
 
-    float accum[MT][NT][4];
+    float accum[WMT][WNT][8];
 #pragma unroll
-    for (int mi = 0; mi < MT; ++mi) {
+    for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni) {
-            accum[mi][ni][0] = 0.0f;
-            accum[mi][ni][1] = 0.0f;
-            accum[mi][ni][2] = 0.0f;
-            accum[mi][ni][3] = 0.0f;
+        for (int ni = 0; ni < WNT; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { accum[mi][ni][r] = 0.0f; }
         }
     }
 
     const int k_tiles = padded_k / BK;
-
-    const int a_matrix     = lane >> 3;
-    const int a_inner_row  = lane & 7;
-    const int a_row_offset = a_inner_row + ((a_matrix & 1) << 3);
-    const int a_col_offset = (a_matrix >> 1) << 3;
-    const int b_inner_row  = lane & 7;
-    const int b_k_offset   = ((lane >> 3) & 1) << 3;
 
     auto stage_activation = [&](int stage, int k_tile) {
         const int k0 = k_tile * BK;
@@ -329,7 +326,7 @@ void q5_rowsplit_gemm_mma_kernel(
                                                         ? ((scale_group + group) & 1) *
                                                               Q5RowSplitStorage::kScaleBytesPerGroup
                                                         : 0)];
-                const __nv_bfloat162 weights = Q5MmaDecodeAtom::decode_pair(
+                const __hip_bfloat162 weights = Q5MmaDecodeAtom::decode_pair(
                     Cr[stage], Hr[stage], scale_ptr, staged_group, lane);
                 const int shared_col =
                     q5_mma_swizzle_k64(local_row, group * Q5RowSplitStorage::kGroupK + 2 * lane);
@@ -352,26 +349,24 @@ void q5_rowsplit_gemm_mma_kernel(
         decode_weight(stage, k_tile);
         __syncthreads();
 
-        auto load_fragments = [&](int k_step, unsigned(&a_frag)[MT][4], unsigned(&b_frag)[NT][2]) {
+        auto load_fragments = [&](int k_step, unsigned(&a_frag)[WMT][8], unsigned(&b_frag)[WNT][8]) {
 #pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
-                const int row = warp_row * WM + mi * 16 + a_row_offset;
-                const int col = k_step + a_col_offset;
-                ldmatrix_x4(a_frag[mi][0], a_frag[mi][1], a_frag[mi][2], a_frag[mi][3],
-                            smem_addr(&As[row * BK + q5_mma_swizzle_k64(row, col)]));
+            for (int mi = 0; mi < WMT; ++mi) {
+                const int row = warp_row * WM + mi * 16 + (lane >> 1);
+                if (wmma_a_lane_active(lane)) {
+                    wmma_load_a_bf16(a_frag[mi], As, row, k_step, BK, q5_mma_swizzle_k64);
+                }
             }
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int row = warp_col * WN + ni * 8 + b_inner_row;
-                const int col = k_step + b_k_offset;
-                ldmatrix_x2(b_frag[ni][0], b_frag[ni][1],
-                            smem_addr(&Bs[stage][row * BK + q5_mma_swizzle_k64(row, col)]));
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int col = warp_col * WN + ni * 16 + (lane & 15);
+                wmma_load_b_bf16(b_frag[ni], Bs[stage], col, k_step, BK, q5_mma_swizzle_k64);
             }
         };
 
         if constexpr (Schedule::kFragmentPipeline == Q5FragmentPipeline::PingPong) {
-            unsigned a_frag[2][MT][4];
-            unsigned b_frag[2][NT][2];
+            unsigned a_frag[2][WMT][8];
+            unsigned b_frag[2][WNT][8];
             load_fragments(0, a_frag[0], b_frag[0]);
 #pragma unroll
             for (int ki = 0; ki < KSUB; ++ki) {
@@ -379,29 +374,30 @@ void q5_rowsplit_gemm_mma_kernel(
                 const int next    = (ki + 1) & 1;
                 if (ki + 1 < KSUB) { load_fragments((ki + 1) * 16, a_frag[next], b_frag[next]); }
 #pragma unroll
-                for (int mi = 0; mi < MT; ++mi) {
+                for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-                    for (int ni = 0; ni < NT; ++ni) {
-                        mma_bf16(accum[mi][ni][0], accum[mi][ni][1], accum[mi][ni][2],
-                                 accum[mi][ni][3], a_frag[current][mi][0], a_frag[current][mi][1],
-                                 a_frag[current][mi][2], a_frag[current][mi][3],
-                                 b_frag[current][ni][0], b_frag[current][ni][1]);
+                    for (int ni = 0; ni < WNT; ++ni) {
+                        WmmaC8& c = *reinterpret_cast<WmmaC8*>(accum[mi][ni]);
+                        WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag[current][mi]);
+                        WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag[current][ni]);
+                        c = wmma_bf16(a, b, c);
                     }
                 }
             }
         } else {
-            unsigned a_frag[MT][4];
-            unsigned b_frag[NT][2];
+            unsigned a_frag[WMT][8];
+            unsigned b_frag[WNT][8];
 #pragma unroll
             for (int ki = 0; ki < KSUB; ++ki) {
                 load_fragments(ki * 16, a_frag, b_frag);
 #pragma unroll
-                for (int mi = 0; mi < MT; ++mi) {
+                for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-                    for (int ni = 0; ni < NT; ++ni) {
-                        mma_bf16(accum[mi][ni][0], accum[mi][ni][1], accum[mi][ni][2],
-                                 accum[mi][ni][3], a_frag[mi][0], a_frag[mi][1], a_frag[mi][2],
-                                 a_frag[mi][3], b_frag[ni][0], b_frag[ni][1]);
+                    for (int ni = 0; ni < WNT; ++ni) {
+                        WmmaC8& c = *reinterpret_cast<WmmaC8*>(accum[mi][ni]);
+                        WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag[mi]);
+                        WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag[ni]);
+                        c = wmma_bf16(a, b, c);
                     }
                 }
             }
@@ -415,20 +411,22 @@ void q5_rowsplit_gemm_mma_kernel(
 
     if constexpr (Epilogue == Q5MmaEpilogue::CtaCollectiveResidual) {
         static_assert(BM == BK, "Q5 collective residual reuses Bs and requires BM == BK");
-        __nv_bfloat16* projected_shared = Bs[0];
+        __hip_bfloat16* projected_shared = Bs[0];
 #pragma unroll
-        for (int mi = 0; mi < MT; ++mi) {
-            const int local_row0 = warp_row * WM + mi * 16 + mma_row;
-            const int local_row1 = local_row0 + 8;
+        for (int mi = 0; mi < WMT; ++mi) {
+            const int local_row_lo = warp_row * WM + mi * 16 + 8 * (lane >= 16);
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int local_col0 = warp_col * WN + ni * 8 + 2 * mma_col;
-                const int local_col1 = local_col0 + 1;
-                const float* values  = accum[mi][ni];
-                projected_shared[local_col0 * BM + local_row0] = __float2bfloat16_rn(values[0]);
-                projected_shared[local_col1 * BM + local_row0] = __float2bfloat16_rn(values[1]);
-                projected_shared[local_col0 * BM + local_row1] = __float2bfloat16_rn(values[2]);
-                projected_shared[local_col1 * BM + local_row1] = __float2bfloat16_rn(values[3]);
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int block_col  = warp_col * WN + ni * 16 + (lane & 15);
+                const int warp_local = ni * 16 + (lane & 15);
+                // Skip the overlap columns when kWarpCols is not a multiple of 16.
+                if (warp_local >= WN) { continue; }
+                const float* values = accum[mi][ni];
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    projected_shared[block_col * BM + local_row_lo + r] =
+                        __float2bfloat16_rn(values[r]);
+                }
             }
         }
         __syncthreads();
@@ -490,48 +488,36 @@ void q5_rowsplit_gemm_mma_kernel(
         }
     } else {
 #pragma unroll
-        for (int mi = 0; mi < MT; ++mi) {
-            const int output_row0 = row0 + warp_row * WM + mi * 16 + mma_row;
-            const int output_row1 = output_row0 + 8;
+        for (int mi = 0; mi < WMT; ++mi) {
+            const int row_base = row0 + warp_row * WM + mi * 16;
+            const int row_lo   = row_base + (lane >= 16 ? 8 : 0);
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int output_col0 = col0 + warp_col * WN + ni * 8 + 2 * mma_col;
-                const int output_col1 = output_col0 + 1;
-                const float* values   = accum[mi][ni];
-                auto store_value      = [&](std::int64_t index, float value) {
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int col_base   = col0 + warp_col * WN + ni * 16;
+                const int local_col  = ni * 16 + (lane & 15);
+                const int output_col = col_base + (lane & 15);
+                // Skip the overlap columns when kWarpCols is not a multiple of 16.
+                if (local_col >= WN) { continue; }
+                auto store_value    = [&](std::int64_t index, float value) {
                     if constexpr (Epilogue == Q5MmaEpilogue::AddResidual) {
                         value = __bfloat162float(residual[index]) + value;
                     }
                     out[index] = __float2bfloat16_rn(value);
                 };
+                const float* values = accum[mi][ni];
                 if constexpr (kFull) {
-                    store_value(static_cast<std::int64_t>(output_col0) * rows + output_row0,
-                                values[0]);
-                    store_value(static_cast<std::int64_t>(output_col1) * rows + output_row0,
-                                values[1]);
-                    store_value(static_cast<std::int64_t>(output_col0) * rows + output_row1,
-                                values[2]);
-                    store_value(static_cast<std::int64_t>(output_col1) * rows + output_row1,
-                                values[3]);
-                } else {
-                    if (output_row0 < rows) {
-                        if (output_col0 < cols) {
-                            store_value(static_cast<std::int64_t>(output_col0) * rows + output_row0,
-                                        values[0]);
-                        }
-                        if (output_col1 < cols) {
-                            store_value(static_cast<std::int64_t>(output_col1) * rows + output_row0,
-                                        values[1]);
-                        }
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        store_value(static_cast<std::int64_t>(output_col) * rows + row_lo + r,
+                                    values[r]);
                     }
-                    if (output_row1 < rows) {
-                        if (output_col0 < cols) {
-                            store_value(static_cast<std::int64_t>(output_col0) * rows + output_row1,
-                                        values[2]);
-                        }
-                        if (output_col1 < cols) {
-                            store_value(static_cast<std::int64_t>(output_col1) * rows + output_row1,
-                                        values[3]);
+                } else {
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        const int output_row = row_lo + r;
+                        if (output_row < rows && output_col < cols) {
+                            store_value(static_cast<std::int64_t>(output_col) * rows + output_row,
+                                        values[r]);
                         }
                     }
                 }

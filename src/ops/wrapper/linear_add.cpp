@@ -120,12 +120,12 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
 }
 
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, WorkspaceArena& ws,
-                cudaStream_t stream) {
+                hipStream_t stream) {
     linear_add(x, w, residual_out, LinearPolicy::A16Only, ws, stream);
 }
 
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPolicy policy,
-                WorkspaceArena& ws, cudaStream_t stream) {
+                WorkspaceArena& ws, hipStream_t stream) {
     validate_policy(policy);
     const std::int32_t t = x.ne[1];
     if (t <= 0) { throw std::invalid_argument("linear_add: T must be positive"); }

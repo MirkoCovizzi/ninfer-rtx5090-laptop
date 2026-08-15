@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gelu.h"
 
 #include "ops/launcher/gelu.h"
@@ -8,7 +9,7 @@
 
 namespace ninfer::ops {
 
-void gelu(Tensor& x, GeluMode mode, cudaStream_t stream) {
+void gelu(Tensor& x, GeluMode mode, hipStream_t stream) {
     if (x.dtype != DType::BF16) { throw std::invalid_argument("gelu: x must be BF16"); }
     std::int64_t n = 1;
     for (int i = 0; i < 4; ++i) {

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // ninfer::ops - signed int8, per-token group-wise KV cache codec (shared device
@@ -11,8 +12,9 @@
 #include "ops/common/memory.cuh"
 #include "ops/kernel/paged_kv_address.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 

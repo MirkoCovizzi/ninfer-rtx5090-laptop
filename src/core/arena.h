@@ -15,7 +15,7 @@ struct DeviceSpan {
 };
 
 // Owning device allocation for long-lived buffers. DeviceArena remains the
-// suballocation primitive for workspaces; this type owns exactly one cudaMalloc.
+// suballocation primitive for workspaces; this type owns exactly one hipMalloc.
 class DeviceBuffer {
 public:
     DeviceBuffer() noexcept = default;

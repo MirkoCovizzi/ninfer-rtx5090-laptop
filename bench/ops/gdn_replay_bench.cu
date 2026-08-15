@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // ReplaySSM recurrent-Record and all-layer Fold benchmark.
 //
 // Each timed GPU body is exactly one public Op call. Row-control construction, buffer
@@ -12,7 +13,7 @@
 #include "core/linear_attention_state.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <chrono>
@@ -268,22 +269,22 @@ double median(std::vector<double> values) {
 }
 
 template <class Launch>
-double measure_host_submission(Launch&& launch, cudaStream_t stream, int warmup, int repeat) {
+double measure_host_submission(Launch&& launch, hipStream_t stream, int warmup, int repeat) {
     for (int index = 0; index < warmup; ++index) {
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         launch(stream);
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
     for (int index = 0; index < repeat; ++index) {
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         const auto begin = std::chrono::steady_clock::now();
         launch(stream);
         const auto end = std::chrono::steady_clock::now();
         samples.push_back(std::chrono::duration<double, std::micro>(end - begin).count());
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
     return median(std::move(samples));
 }
 
@@ -394,7 +395,7 @@ public:
         gate_record_.fill(0);
     }
 
-    void launch_snapshot(cudaStream_t stream) {
+    void launch_snapshot(hipStream_t stream) {
         Tensor q(q_.p, DType::BF16, {kStateDim, kQkHeads, width_, batch_});
         Tensor k(k_.p, DType::BF16, {kStateDim, kQkHeads, width_, batch_});
         Tensor v(v_.p, DType::BF16, {kStateDim, profile_.value_heads, width_, batch_});
@@ -410,7 +411,7 @@ public:
                                       bases, out, stream);
     }
 
-    void launch_record(cudaStream_t stream) {
+    void launch_record(hipStream_t stream) {
         Tensor q(q_.p, DType::BF16, {kStateDim, kQkHeads, width_, batch_});
         Tensor k(k_.p, DType::BF16, {kStateDim, kQkHeads, width_, batch_});
         Tensor v(v_.p, DType::BF16, {kStateDim, profile_.value_heads, width_, batch_});
@@ -513,8 +514,8 @@ private:
 Measurement measure_fold(const FoldResources& resources,
                          const std::vector<ops::GdnReplayFoldRow>& rows, DeviceBuffer& flush,
                          int warmup, int repeat) {
-    cudaStream_t stream = nullptr;
-    const auto launch   = [&](cudaStream_t launch_stream) {
+    hipStream_t stream = nullptr;
+    const auto launch   = [&](hipStream_t launch_stream) {
         ops::gdn_replay_fold(resources.records(), resources.states(), rows, launch_stream);
     };
     Measurement result;
@@ -526,7 +527,7 @@ Measurement measure_fold(const FoldResources& resources,
 
 template <class Launch>
 Measurement measure_component(Launch&& launch, DeviceBuffer& flush, int warmup, int repeat) {
-    cudaStream_t stream = nullptr;
+    hipStream_t stream = nullptr;
     Measurement result;
     result.warm           = bench::measure_launch(launch, stream, warmup, repeat);
     result.cold           = bench::measure_cold_launch(launch, flush, stream, warmup, repeat);
@@ -547,10 +548,10 @@ void run_recurrent_point(const Profile& profile, std::int32_t width, std::int32_
                          ValidSelection valid, DeviceBuffer& flush, const Options& options) {
     RecurrentResources resources(profile, width, batch, valid);
     const Measurement snapshot =
-        measure_component([&](cudaStream_t stream) { resources.launch_snapshot(stream); }, flush,
+        measure_component([&](hipStream_t stream) { resources.launch_snapshot(stream); }, flush,
                           options.warmup, options.repeat);
     const Measurement record =
-        measure_component([&](cudaStream_t stream) { resources.launch_record(stream); }, flush,
+        measure_component([&](hipStream_t stream) { resources.launch_record(stream); }, flush,
                           options.warmup, options.repeat);
     print_recurrent_result(profile, width, batch, valid, "snapshot", snapshot);
     print_recurrent_result(profile, width, batch, valid, "record", record);
@@ -618,7 +619,7 @@ int run(const Options& options) {
 int main(int argc, char** argv) {
     try {
         int devices = 0;
-        CUDA_CHECK(cudaGetDeviceCount(&devices));
+        HIP_CHECK(hipGetDeviceCount(&devices));
         if (devices == 0) {
             std::fprintf(stderr, "no CUDA device available\n");
             return 77;

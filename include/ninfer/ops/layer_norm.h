@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -21,6 +22,6 @@ namespace ninfer::ops {
  * There is no workspace or persistent state side effect.
  */
 void layer_norm(const Tensor& x, const Tensor& weight, const Tensor& bias, float eps, Tensor& out,
-                cudaStream_t stream);
+                hipStream_t stream);
 
 } // namespace ninfer::ops

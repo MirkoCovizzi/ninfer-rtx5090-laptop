@@ -66,7 +66,7 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
 }
 
 void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, LinearPolicy policy,
-                   WorkspaceArena& ws, cudaStream_t stream) {
+                   WorkspaceArena& ws, hipStream_t stream) {
     validate_policy(policy);
     if (x.dtype != DType::BF16 || out.dtype != DType::BF16) {
         throw std::invalid_argument("linear_swiglu: x/out must be BF16");
@@ -129,7 +129,7 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
 }
 
 void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, WorkspaceArena& ws,
-                   cudaStream_t stream) {
+                   hipStream_t stream) {
     linear_swiglu(x, gate_up_weight, out, LinearPolicy::A16Only, ws, stream);
 }
 

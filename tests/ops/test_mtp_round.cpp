@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/mtp_round.h"
 #include "ops/op_tester.h"
 
@@ -94,7 +95,7 @@ int run_case(int k, const std::vector<std::int32_t>& accepted) {
     ops::mtp_prepare_next_round(t_verify, t_anchors, t_accepted, t_frontiers, t_budgets, t_licensed,
                                 t_rope_deltas, t_alignment, t_extents, t_positions,
                                 t_rope_positions, t_valid, max_context, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label =
         "mtp next round K=" + std::to_string(k) + " B=" + std::to_string(batch);
@@ -127,7 +128,7 @@ int run_case(int k, const std::vector<std::int32_t>& accepted) {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "mtp_round: SKIP (CUDA unavailable)\n";
         return 77;
     }

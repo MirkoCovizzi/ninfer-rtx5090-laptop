@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Performance bench for the BF16 depthwise causal width-4 convolution + SiLU Op.
 //
 // Examples:
@@ -51,19 +52,19 @@ DeviceBuffer make_varied_bf16(std::size_t n, std::uint32_t seed) {
         h[i]          = f32_to_bf16(2.0f * u - 1.0f);
     }
     DeviceBuffer d(n * 2u);
-    cudaMemcpy(d.p, h.data(), n * 2u, cudaMemcpyHostToDevice);
+    hipMemcpy(d.p, h.data(), n * 2u, hipMemcpyHostToDevice);
     return d;
 }
 
 void copy_bytes_launch(const DeviceBuffer& src, DeviceBuffer& dst, std::size_t copy_bytes,
-                       cudaStream_t stream) {
+                       hipStream_t stream) {
     constexpr int kBlock            = 256;
     constexpr std::size_t kVecBytes = sizeof(uint4);
     const std::size_t n4            = (copy_bytes + kVecBytes - 1u) / kVecBytes;
     const int grid                  = static_cast<int>((n4 + kBlock - 1) / kBlock);
     copy_u128_kernel<<<grid, kBlock, 0, stream>>>(static_cast<const uint4*>(src.p),
                                                   static_cast<uint4*>(dst.p), n4);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void run_copy_baseline(double bytes, const char* tag) {
@@ -73,7 +74,7 @@ void run_copy_baseline(double bytes, const char* tag) {
     DeviceBuffer dst        = make_zeros(padded_bytes);
 
     const Result r =
-        bench_loop([&](cudaStream_t s) { copy_bytes_launch(src, dst, copy_bytes, s); }, bytes);
+        bench_loop([&](hipStream_t s) { copy_bytes_launch(src, dst, copy_bytes, s); }, bytes);
     print_result(tag, r);
 }
 
@@ -104,7 +105,7 @@ void run_prefill(const Options& options, bool distinct) {
     // counters remain the performance authority.
     const double bytes = 4.0 * static_cast<double>(n) + 20.0 * options.channels;
     const Result r     = bench_loop(
-        [&](cudaStream_t s) {
+        [&](hipStream_t s) {
             if (distinct) {
                 ops::causal_conv1d_silu(tx, tw, tin, tout_state, tout, s);
             } else {
@@ -132,7 +133,7 @@ void run_decode(const Options& options) {
 
     const double bytes = 24.0 * options.channels;
     const Result r =
-        bench_loop([&](cudaStream_t s) { ops::causal_conv1d_silu(tx, tw, ts, tout, s); }, bytes);
+        bench_loop([&](hipStream_t s) { ops::causal_conv1d_silu(tx, tw, ts, tout, s); }, bytes);
     const std::string tag = shape_tag("decode", options.channels, 1);
     print_result(tag.c_str(), r);
     run_copy_baseline(bytes, "copy same-byte decode baseline");
@@ -166,14 +167,14 @@ void run_snapshot(const Options& options) {
             initial_host[static_cast<std::size_t>(row)] = options.batch * options.tokens + row;
         }
     }
-    CUDA_CHECK(cudaMemcpy(initial_slot.p, initial_host.data(), initial_slot.bytes,
-                          cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(snapshot_base_slot.p, base_host.data(), snapshot_base_slot.bytes,
-                          cudaMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(initial_slot.p, initial_host.data(), initial_slot.bytes,
+                          hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(snapshot_base_slot.p, base_host.data(), snapshot_base_slot.bytes,
+                          hipMemcpyHostToDevice));
     if (!options.valid_columns.empty()) {
         valid_columns = make_zeros(options.valid_columns.size() * sizeof(std::int32_t));
-        CUDA_CHECK(cudaMemcpy(valid_columns.p, options.valid_columns.data(), valid_columns.bytes,
-                              cudaMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(valid_columns.p, options.valid_columns.data(), valid_columns.bytes,
+                              hipMemcpyHostToDevice));
     }
 
     Tensor tx(x.p, DType::BF16, {options.channels, options.tokens, options.batch});
@@ -192,7 +193,7 @@ void run_snapshot(const Options& options) {
     const double bytes = 8.0 * options.channels + 6.0 * options.channels * options.batch +
                          10.0 * static_cast<double>(n);
     const Result r = bench_loop(
-        [&](cudaStream_t s) {
+        [&](hipStream_t s) {
             ops::causal_conv1d_silu_snapshot(tx, tw, ts, tvalid, tslot, tsnapshot_base, tout, s);
         },
         bytes);
@@ -284,7 +285,7 @@ bool parse_options(int argc, char** argv, Options& options) {
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

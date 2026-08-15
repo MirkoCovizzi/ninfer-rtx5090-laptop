@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -21,6 +21,6 @@ namespace ninfer::ops {
  * side effect.
  */
 void linear_pair(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
-                 Tensor& first_out, Tensor& second_out, cudaStream_t stream);
+                 Tensor& first_out, Tensor& second_out, hipStream_t stream);
 
 } // namespace ninfer::ops

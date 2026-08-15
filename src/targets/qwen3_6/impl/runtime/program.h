@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 #include "targets/qwen3_6/impl/runtime/instance.h"
 // Qwen3.6 family runtime implementation; instantiated only by exact variants.
@@ -238,7 +239,7 @@ public:
     const std::int32_t kv_quant_group;
     const ProposalHead proposal_head;
     const bool vision_enabled;
-    const bool use_cuda_graph;
+    const bool use_hip_graph;
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
     std::size_t graph_observed_bytes = 0;

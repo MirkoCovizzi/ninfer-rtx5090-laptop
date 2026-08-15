@@ -20,7 +20,7 @@ int fill_case(std::int32_t count, std::int32_t start) {
     output.fill(0xcd);
     Tensor output_tensor(output.data(), DType::I32, {count});
     ops::fill_i32_positions(output_tensor, start, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label =
         "fill_i32_positions T=" + std::to_string(count) + " start=" + std::to_string(start);
@@ -51,7 +51,7 @@ int offset_case(std::int32_t count, std::int32_t delta_value, bool in_place) {
     Tensor output_tensor(device_output.data(), DType::I32, {count});
     Tensor& destination = in_place ? source_tensor : output_tensor;
     ops::offset_i32_positions(source_tensor, delta_tensor, destination, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = "offset_i32_positions T=" + std::to_string(count) +
                               (in_place ? " in-place" : " out-of-place");
@@ -76,7 +76,7 @@ int offset_case(std::int32_t count, std::int32_t delta_value, bool in_place) {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

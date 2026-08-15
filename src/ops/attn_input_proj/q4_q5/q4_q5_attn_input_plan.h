@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -35,9 +35,9 @@ Q4Q5AttnInputPlan q4_q5_attn_input_resolve_plan(const Q4Q5AttnInputProblem& prob
 void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& x,
                                    const Weight& query_key_weight, const Weight& gate_value_weight,
                                    Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
-                                   cudaStream_t stream);
+                                   hipStream_t stream);
 void q4_q5_attn_input_dispatch(const Tensor& x, const Weight& query_key_weight,
                                const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k,
-                               Tensor& v, cudaStream_t stream);
+                               Tensor& v, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

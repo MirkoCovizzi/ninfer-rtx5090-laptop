@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - embedding launcher: variant grid/block/stream setup.
 #include "ops/launcher/embed_gather.h"
 
 #include "ops/common/math.h"
 #include "ops/kernel/embed_gather.cuh"
-#include "core/device.h" // CUDA_CHECK
+#include "core/device.h" // HIP_CHECK
 
 #include <algorithm>
 #include <cstdint>
@@ -43,7 +44,7 @@ const char* w8_embed_route_name(W8EmbedRoute route) {
 }
 
 void embed_gather_w8_2048_launch(const Tensor& ids, const Weight& table, Tensor& out,
-                                 W8EmbedRoute route, cudaStream_t stream) {
+                                 W8EmbedRoute route, hipStream_t stream) {
     const std::int32_t T = ids.ne[0];
     const auto* codes    = static_cast<const std::uint8_t*>(table.qdata);
     const auto* scales   = static_cast<const std::uint8_t*>(table.scales);
@@ -52,28 +53,28 @@ void embed_gather_w8_2048_launch(const Tensor& ids, const Weight& table, Tensor&
         const int grid = T * kEmbedGatherW8Groups;
         embed_gather_w8_grouped_2048_kernel<<<grid, kW8GroupedBlock, 0, stream>>>(
             static_cast<const std::int32_t*>(ids.data), codes, scales,
-            static_cast<__nv_bfloat16*>(out.data));
+            static_cast<__hip_bfloat16*>(out.data));
     } else {
         embed_gather_w8_row_2048_kernel<<<T, kW8RowBlock, 0, stream>>>(
             static_cast<const std::int32_t*>(ids.data), codes, scales,
-            static_cast<__nv_bfloat16*>(out.data));
+            static_cast<__hip_bfloat16*>(out.data));
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void embed_gather_dense_launch(const Tensor& ids, const Tensor& table, Tensor& out,
-                               cudaStream_t stream) {
+                               hipStream_t stream) {
     const std::int32_t d = out.ne[0];
     const std::int32_t T = ids.ne[0];
     const std::int64_t n = static_cast<std::int64_t>(d) * T;
     embed_gather_dense_kernel<<<grid_for(n), kBlock, 0, stream>>>(
-        static_cast<const std::int32_t*>(ids.data), static_cast<const __nv_bfloat16*>(table.data),
-        static_cast<__nv_bfloat16*>(out.data), d, T);
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<const std::int32_t*>(ids.data), static_cast<const __hip_bfloat16*>(table.data),
+        static_cast<__hip_bfloat16*>(out.data), d, T);
+    HIP_CHECK(hipGetLastError());
 }
 
 void embed_gather_q6_launch(const Tensor& ids, const Weight& table, Tensor& out,
-                            cudaStream_t stream) {
+                            hipStream_t stream) {
     const std::int32_t d = out.ne[0];
     const std::int32_t T = ids.ne[0];
     const std::int64_t n = static_cast<std::int64_t>(d) * T;
@@ -83,19 +84,19 @@ void embed_gather_q6_launch(const Tensor& ids, const Weight& table, Tensor& out,
     if (d == table.padded_shape[1] && d % kEmbedGatherQ6Group == 0) {
         embed_gather_q6_grouped_kernel<<<grid_for_q6_grouped(d, T), kQ6GroupedBlock, 0, stream>>>(
             static_cast<const std::int32_t*>(ids.data), codes, high, scales,
-            static_cast<__nv_bfloat16*>(out.data), d, T);
-        CUDA_CHECK(cudaGetLastError());
+            static_cast<__hip_bfloat16*>(out.data), d, T);
+        HIP_CHECK(hipGetLastError());
         return;
     }
 
     embed_gather_q6_kernel<<<grid_for(n), kBlock, 0, stream>>>(
         static_cast<const std::int32_t*>(ids.data), codes, high, scales,
-        static_cast<__nv_bfloat16*>(out.data), d, T, table.padded_shape[1]);
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<__hip_bfloat16*>(out.data), d, T, table.padded_shape[1]);
+    HIP_CHECK(hipGetLastError());
 }
 
 void embed_gather_w8_launch(const Tensor& ids, const Weight& table, Tensor& out,
-                            cudaStream_t stream) {
+                            hipStream_t stream) {
     const std::int32_t d = out.ne[0];
     const std::int32_t T = ids.ne[0];
     const auto* codes    = static_cast<const std::uint8_t*>(table.qdata);
@@ -108,8 +109,8 @@ void embed_gather_w8_launch(const Tensor& ids, const Weight& table, Tensor& out,
     const std::int64_t n = static_cast<std::int64_t>(d) * T;
     embed_gather_w8_kernel<<<grid_for(n), kBlock, 0, stream>>>(
         static_cast<const std::int32_t*>(ids.data), codes, scales,
-        static_cast<__nv_bfloat16*>(out.data), d, T, table.padded_shape[1]);
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<__hip_bfloat16*>(out.data), d, T, table.padded_shape[1]);
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Private host utility for completing one logical Op call through as many CUDA launches as its

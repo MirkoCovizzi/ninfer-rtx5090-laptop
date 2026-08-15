@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/gdn_input_proj/w8/w8_gdn_input_kernels.h"
 
 #include "core/device.h"
@@ -7,8 +8,9 @@
 #include "ops/linear/w8/w8_small_t_mma.cuh"
 #include "ops/linear/w8/w8_rowsplit_output.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <array>
 #include <cstdint>
@@ -31,7 +33,7 @@ using Output                           = W8SplitOutput2<8192, 4096>;
 template <class Publish>
 struct W8GdnSplitKConvEpilogue {
     GdnConvEpilogue<Publish> conv;
-    __nv_bfloat16* z;
+    __hip_bfloat16* z;
 
     template <int ActiveCols>
     __device__ __forceinline__ void store(std::int32_t row,
@@ -53,7 +55,7 @@ __device__ __forceinline__ int swizzle_64(int row, int col) {
 }
 
 union Bf16PairBits {
-    __nv_bfloat162 pair;
+    __hip_bfloat162 pair;
     unsigned bits;
 };
 
@@ -71,28 +73,29 @@ __device__ __forceinline__ unsigned bf16_pair_from_s8(unsigned values) {
 template <int TileCols, int KSplits, int NGroups, int MinBlocks>
 __global__
 __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_gdn_input_medium_t_splitk_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales, Output output, int active_cols) {
     constexpr int kKernelWarps = KSplits * NGroups;
     constexpr int kGroupK      = KSplits * kTileK;
     constexpr int kGroups      = kHidden / kGroupK;
     constexpr int kWarpCols    = TileCols / NGroups;
-    constexpr int kNt          = kWarpCols / 8;
-    constexpr unsigned kMask   = 0xffffffffu;
+    // gfx1151 WMMA atoms are 16x16 (not 16x8). Each warp covers kWmmaNt 16-column atoms;
+    // when kWarpCols is not a multiple of 16 the final atom overlaps the neighbouring warp's
+    // columns (duplicate compute, correct results) and the store emits only this warp's own
+    // columns.
+    constexpr int kWmmaNt = (kWarpCols + 15) / 16;
     static_assert(KSplits == 2 || KSplits == 4);
     static_assert(TileCols % NGroups == 0 && kWarpCols % 8 == 0);
     static_assert(kHidden % kGroupK == 0 && kKernelWarps <= 32);
 
     __shared__ __align__(16) std::uint8_t code_shared[kMmaRows][kGroupK];
-    __shared__ __align__(16) __nv_bfloat16 b_shared[kKernelWarps][kWarpCols * kTileK];
+    __shared__ __align__(16) __hip_bfloat16 b_shared[kKernelWarps][kWarpCols * kTileK];
 
     const int tid        = static_cast<int>(threadIdx.x);
     const int warp       = tid >> 5;
     const int lane       = tid & 31;
     const int n_group    = warp / KSplits;
     const int k_split    = warp - n_group * KSplits;
-    const int gid        = lane >> 2;
-    const int lid        = lane & 3;
     const int n_base     = n_group * kWarpCols;
     const int remaining  = active_cols - n_base;
     const int local_cols = remaining <= 0 ? 0 : (remaining < kWarpCols ? remaining : kWarpCols);
@@ -122,16 +125,12 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_gdn_input_medium_t_s
         cp_commit();
     };
 
-    const int b_rin     = lane & 7;
-    const int b_koff    = ((lane >> 3) & 1) << 3;
     const int warp_koff = k_split * kTileK;
-    float acc[kNt][4];
+    float acc[kWmmaNt][8];
 #pragma unroll
-    for (int ni = 0; ni < kNt; ++ni) {
-        acc[ni][0] = 0.0f;
-        acc[ni][1] = 0.0f;
-        acc[ni][2] = 0.0f;
-        acc[ni][3] = 0.0f;
+    for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+        for (int r = 0; r < 8; ++r) { acc[ni][r] = 0.0f; }
     }
 
     stage_codes(0);
@@ -144,60 +143,65 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_gdn_input_medium_t_s
         const int group_k0 = group_index * kGroupK;
         const int k0       = group_k0 + warp_koff;
 
-        unsigned lane_scale_pair = 0;
-        if (lid < 2) {
-            const int scale_row = cta_row0 + gid + lid * 8;
-            lane_scale_pair     = *reinterpret_cast<const unsigned*>(
+        // WMMA C layout: lane l holds rows r + 8*(l>=16) at column l&15; each of those rows
+        // carries its OWN 32-K scale.
+        const int rb = (lane & 16) ? 8 : 0;
+        unsigned row_scale_pair[8];
+#pragma unroll
+        for (int rr = 0; rr < 8; ++rr) {
+            const int scale_row = cta_row0 + rb + rr;
+            row_scale_pair[rr]  = *reinterpret_cast<const unsigned*>(
                 scales + (static_cast<std::int64_t>(scale_row) * (kHidden / 32) + k0 / 32) * 2);
         }
-        const unsigned top_scale_pair = __shfl_sync(kMask, lane_scale_pair, lane & ~3);
-        const unsigned bot_scale_pair = __shfl_sync(kMask, lane_scale_pair, (lane & ~3) + 1);
 
 #pragma unroll
         for (int group = 0; group < 2; ++group) {
-            float group_acc[kNt][4];
+            float group_acc[kWmmaNt][8];
 #pragma unroll
-            for (int ni = 0; ni < kNt; ++ni) {
-                group_acc[ni][0] = 0.0f;
-                group_acc[ni][1] = 0.0f;
-                group_acc[ni][2] = 0.0f;
-                group_acc[ni][3] = 0.0f;
+            for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) { group_acc[ni][r] = 0.0f; }
             }
 #pragma unroll
             for (int ki = 0; ki < 2; ++ki) {
-                const int ks              = group * 2 + ki;
-                const int code_col        = ks * 16 + lid * 2;
-                const auto load_code_pair = [&](int code_row, int col) {
-                    const int chunk  = (warp_koff + col) >> 4;
-                    const int offset = (chunk ^ (code_row & 7)) * 16 + (col & 15);
-                    return static_cast<unsigned>(
-                        *reinterpret_cast<const unsigned short*>(&code_shared[code_row][offset]));
-                };
-                const unsigned af0 = bf16_pair_from_s8(load_code_pair(gid, code_col));
-                const unsigned af1 = bf16_pair_from_s8(load_code_pair(gid + 8, code_col));
-                const unsigned af2 = bf16_pair_from_s8(load_code_pair(gid, code_col + 8));
-                const unsigned af3 = bf16_pair_from_s8(load_code_pair(gid + 8, code_col + 8));
+                const int ks = group * 2 + ki;
+                // WMMA A fragment: active lane l holds row m = l>>1 and the full 16-K window
+                // [warp_koff + ks*16, +16). The 16 w8 codes lie in one swizzled 16-byte chunk.
+                const int m                 = lane >> 1;
+                const int chunk             = (warp_koff + ks * 16) >> 4;
+                const unsigned short* base  = reinterpret_cast<const unsigned short*>(
+                    &code_shared[m][(chunk ^ (m & 7)) * 16]);
+                unsigned a_frag[8];
+                const bool a_active = wmma_a_lane_active(lane);
 #pragma unroll
-                for (int ni = 0; ni < kNt; ++ni) {
-                    unsigned bf0, bf1;
-                    const int br = ni * 8 + b_rin;
-                    ldmatrix_x2(
-                        bf0, bf1,
-                        smem_addr(&b_shared[warp][br * kTileK + swizzle_64(br, ks * 16 + b_koff)]));
-                    mma_bf16(group_acc[ni][0], group_acc[ni][1], group_acc[ni][2], group_acc[ni][3],
-                             af0, af1, af2, af3, bf0, bf1);
+                for (int j = 0; j < 8; ++j) {
+                    const unsigned pair = bf16_pair_from_s8(static_cast<unsigned>(base[j]));
+                    a_frag[j]           = a_active ? pair : 0u;
+                }
+#pragma unroll
+                for (int ni = 0; ni < kWmmaNt; ++ni) {
+                    unsigned b_frag[8];
+                    const int col = ni * 16 + (lane & 15);
+                    wmma_load_b_bf16(b_frag, b_shared[warp], col, ks * 16, kTileK, swizzle_64);
+                    WmmaC8& c  = *reinterpret_cast<WmmaC8*>(group_acc[ni]);
+                    WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag);
+                    WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag);
+                    c          = wmma_bf16(a, b, c);
                 }
             }
-            const unsigned top_bits = group == 0 ? top_scale_pair & 0xffffu : top_scale_pair >> 16;
-            const unsigned bot_bits = group == 0 ? bot_scale_pair & 0xffffu : bot_scale_pair >> 16;
-            const float top_scale   = __half2float(__ushort_as_half(top_bits));
-            const float bot_scale   = __half2float(__ushort_as_half(bot_bits));
+            float row_scale[8];
 #pragma unroll
-            for (int ni = 0; ni < kNt; ++ni) {
-                acc[ni][0] = fmaf(group_acc[ni][0], top_scale, acc[ni][0]);
-                acc[ni][1] = fmaf(group_acc[ni][1], top_scale, acc[ni][1]);
-                acc[ni][2] = fmaf(group_acc[ni][2], bot_scale, acc[ni][2]);
-                acc[ni][3] = fmaf(group_acc[ni][3], bot_scale, acc[ni][3]);
+            for (int r = 0; r < 8; ++r) {
+                const unsigned bits = group == 0 ? row_scale_pair[r] & 0xffffu
+                                                 : row_scale_pair[r] >> 16;
+                row_scale[r]        = __half2float(__ushort_as_half(bits));
+            }
+#pragma unroll
+            for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    acc[ni][r] = fmaf(group_acc[ni][r], row_scale[r], acc[ni][r]);
+                }
             }
         }
 
@@ -214,26 +218,29 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_gdn_input_medium_t_s
     auto* partial = reinterpret_cast<float*>(b_shared);
     if ((k_split & 1) != 0) {
 #pragma unroll
-        for (int ni = 0; ni < kNt; ++ni) {
-            store_vec(partial + ((warp * kNt + ni) * 32 + lane) * 4,
-                      make_float4(acc[ni][0], acc[ni][1], acc[ni][2], acc[ni][3]));
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                partial[((warp * kWmmaNt + ni) * 32 + lane) * 8 + r] = acc[ni][r];
+            }
         }
     }
     __syncthreads();
 
     if ((k_split & 1) == 0) {
 #pragma unroll
-        for (int ni = 0; ni < kNt; ++ni) {
-            const float4 partner =
-                load_vec<float4>(partial + (((warp + 1) * kNt + ni) * 32 + lane) * 4);
-            acc[ni][0] += partner.x;
-            acc[ni][1] += partner.y;
-            acc[ni][2] += partner.z;
-            acc[ni][3] += partner.w;
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                acc[ni][r] +=
+                    partial[(((warp + 1) * kWmmaNt + ni) * 32 + lane) * 8 + r];
+            }
             if constexpr (KSplits == 4) {
                 if (k_split == 2) {
-                    store_vec(partial + ((warp * kNt + ni) * 32 + lane) * 4,
-                              make_float4(acc[ni][0], acc[ni][1], acc[ni][2], acc[ni][3]));
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        partial[((warp * kWmmaNt + ni) * 32 + lane) * 8 + r] = acc[ni][r];
+                    }
                 }
             }
         }
@@ -243,14 +250,13 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_gdn_input_medium_t_s
         __syncthreads();
         if (k_split == 0) {
 #pragma unroll
-            for (int ni = 0; ni < kNt; ++ni) {
+            for (int ni = 0; ni < kWmmaNt; ++ni) {
                 const int partner_warp = n_group * KSplits + 2;
-                const float4 partner =
-                    load_vec<float4>(partial + ((partner_warp * kNt + ni) * 32 + lane) * 4);
-                acc[ni][0] += partner.x;
-                acc[ni][1] += partner.y;
-                acc[ni][2] += partner.z;
-                acc[ni][3] += partner.w;
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    acc[ni][r] +=
+                        partial[((partner_warp * kWmmaNt + ni) * 32 + lane) * 8 + r];
+                }
             }
         }
     }
@@ -258,15 +264,18 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_gdn_input_medium_t_s
     if (k_split == 0) {
         const W8OutputTile output_tile = output.tile(cta_row0);
 #pragma unroll
-        for (int ni = 0; ni < kNt; ++ni) {
-            const int col0 = n_base + ni * 8 + 2 * lid;
-            if (col0 < active_cols) {
-                *output_tile.at(cta_row0 + gid, col0)     = __float2bfloat16_rn(acc[ni][0]);
-                *output_tile.at(cta_row0 + gid + 8, col0) = __float2bfloat16_rn(acc[ni][2]);
-            }
-            if (col0 + 1 < active_cols) {
-                *output_tile.at(cta_row0 + gid, col0 + 1)     = __float2bfloat16_rn(acc[ni][1]);
-                *output_tile.at(cta_row0 + gid + 8, col0 + 1) = __float2bfloat16_rn(acc[ni][3]);
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+            // WMMA C layout: lane l holds (row r + 8*(l>=16), col = n_base + ni*16 + (l&15)).
+            const int col       = n_base + ni * 16 + (lane & 15);
+            const int local_col = ni * 16 + (lane & 15);
+            const int row_lo    = cta_row0 + (lane < 16 ? 0 : 8);
+            // Skip the overlap columns when kWarpCols is not a multiple of 16.
+            if (local_col >= kWarpCols) { continue; }
+            if (col < active_cols) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    *output_tile.at(row_lo + r, col) = __float2bfloat16_rn(acc[ni][r]);
+                }
             }
         }
     }
@@ -274,16 +283,16 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_gdn_input_medium_t_s
 
 template <int ActiveCols>
 void launch_active_cols(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                        cudaStream_t stream) {
+                        hipStream_t stream) {
     constexpr int TileCols =
         ActiveCols <= 8 ? 8 : (ActiveCols <= 16 ? 16 : (ActiveCols <= 24 ? 24 : 32));
     using Geometry = W8LinearGeometry<kRows, kHidden>;
     using Schedule = W8SmallTMmaDefaultSchedule<TileCols, ActiveCols>;
     static_assert((8192 % kRowsPerCta) == 0 && (4096 % kRowsPerCta) == 0);
-    const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
+    const Output output{static_cast<__hip_bfloat16*>(qkv.data), static_cast<__hip_bfloat16*>(z.data)};
     w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule>
         <<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output);
 }
@@ -292,23 +301,23 @@ template <int ActiveCols, class Publish>
 void launch_active_cols_conv(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
                              const Tensor& conv_states, const Tensor& valid_columns,
                              const Tensor& initial_slot, Tensor& query, Tensor& key, Tensor& value,
-                             Tensor& z, Publish publish, cudaStream_t stream) {
+                             Tensor& z, Publish publish, hipStream_t stream) {
     static_assert(ActiveCols >= 2 && ActiveCols <= 16);
     constexpr int TileCols = ActiveCols <= 8 ? 8 : 16;
     using Geometry         = W8LinearGeometry<kRows, kHidden>;
     using Schedule         = W8SmallTMmaDefaultSchedule<TileCols, ActiveCols>;
-    const Output ignored_output{static_cast<__nv_bfloat16*>(query.data),
-                                static_cast<__nv_bfloat16*>(z.data)};
+    const Output ignored_output{static_cast<__hip_bfloat16*>(query.data),
+                                static_cast<__hip_bfloat16*>(z.data)};
     const W8GdnSplitKConvEpilogue<Publish> epilogue{
         {
-            static_cast<const __nv_bfloat16*>(conv_weight.data),
-            static_cast<const __nv_bfloat16*>(conv_states.data),
+            static_cast<const __hip_bfloat16*>(conv_weight.data),
+            static_cast<const __hip_bfloat16*>(conv_states.data),
             static_cast<const std::int32_t*>(initial_slot.data),
             valid_columns.data == nullptr ? nullptr
                                           : static_cast<const std::int32_t*>(valid_columns.data),
-            static_cast<__nv_bfloat16*>(query.data),
-            static_cast<__nv_bfloat16*>(key.data),
-            static_cast<__nv_bfloat16*>(value.data),
+            static_cast<__hip_bfloat16*>(query.data),
+            static_cast<__hip_bfloat16*>(key.data),
+            static_cast<__hip_bfloat16*>(value.data),
             8192,
             2048,
             2048,
@@ -318,11 +327,11 @@ void launch_active_cols_conv(const Tensor& x, const Weight& weight, const Tensor
             0,
             publish,
         },
-        static_cast<__nv_bfloat16*>(z.data),
+        static_cast<__hip_bfloat16*>(z.data),
     };
     w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule, Output, W8GdnSplitKConvEpilogue<Publish>>
         <<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue);
 }
@@ -332,10 +341,10 @@ void launch_active_cols_conv_snapshot(const Tensor& x, const Weight& weight,
                                       const Tensor& conv_weight, Tensor& conv_states,
                                       const Tensor& valid_columns, const Tensor& initial_slot,
                                       const Tensor& snapshot_base_slot, Tensor& query, Tensor& key,
-                                      Tensor& value, Tensor& z, cudaStream_t stream) {
+                                      Tensor& value, Tensor& z, hipStream_t stream) {
     launch_active_cols_conv<ActiveCols>(
         x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z,
-        SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
+        SnapshotHistoryPublish{static_cast<__hip_bfloat16*>(conv_states.data),
                                static_cast<const std::int32_t*>(snapshot_base_slot.data), 8192},
         stream);
 }
@@ -345,32 +354,32 @@ void launch_active_cols_conv_record(const Tensor& x, const Weight& weight,
                                     const Tensor& conv_weight, const Tensor& conv_states,
                                     const Tensor& valid_columns, const Tensor& initial_slot,
                                     Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value,
-                                    Tensor& z, cudaStream_t stream) {
+                                    Tensor& z, hipStream_t stream) {
     launch_active_cols_conv<ActiveCols>(
         x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z,
-        RecordColumnPublish{static_cast<__nv_bfloat16*>(conv_record.data), 8192, ActiveCols},
+        RecordColumnPublish{static_cast<__hip_bfloat16*>(conv_record.data), 8192, ActiveCols},
         stream);
 }
 
 template <int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_medium_cols(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                        cudaStream_t stream) {
+                        hipStream_t stream) {
     static_assert((8192 % kRowsPerCta) == 0 && (4096 % kRowsPerCta) == 0);
-    const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
+    const Output output{static_cast<__hip_bfloat16*>(qkv.data), static_cast<__hip_bfloat16*>(z.data)};
     w8_gdn_input_medium_t_splitk_kernel<TileCols, KSplits, NGroups, MinBlocks>
         <<<kRows / kRowsPerCta, KSplits * NGroups * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
 }
 
-using ProjectionLauncher = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, cudaStream_t);
+using ProjectionLauncher = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, hipStream_t);
 using SnapshotLauncher   = void (*)(const Tensor&, const Weight&, const Tensor&, Tensor&,
                                   const Tensor&, const Tensor&, const Tensor&, Tensor&, Tensor&,
-                                  Tensor&, Tensor&, cudaStream_t);
+                                  Tensor&, Tensor&, hipStream_t);
 using RecordLauncher     = void (*)(const Tensor&, const Weight&, const Tensor&, const Tensor&,
                                 const Tensor&, const Tensor&, Tensor&, Tensor&, Tensor&, Tensor&,
-                                Tensor&, cudaStream_t);
+                                Tensor&, hipStream_t);
 
 template <std::size_t... Offsets>
 constexpr auto make_projection_launchers(std::index_sequence<Offsets...>) {
@@ -400,7 +409,7 @@ constexpr auto kRecordLaunchers =
 } // namespace
 
 void w8_gdn_input_splitk_mma_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     const std::int32_t cols = x.ne[1];
     if (cols < kFirstExactCols || cols > 96) {
         throw std::invalid_argument("W8 GDN split-K MMA requires T=2..96");
@@ -414,13 +423,13 @@ void w8_gdn_input_splitk_mma_launch(const Tensor& x, const Weight& weight, Tenso
     } else {
         launch_medium_cols<96, 2, 4, 3>(x, weight, qkv, z, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void w8_gdn_input_splitk_conv_snapshot_launch(
     const Tensor& x, const Weight& weight, const Tensor& conv_weight, Tensor& conv_states,
     const Tensor& valid_columns, const Tensor& initial_slot, const Tensor& snapshot_base_slot,
-    Tensor& query, Tensor& key, Tensor& value, Tensor& z, cudaStream_t stream) {
+    Tensor& query, Tensor& key, Tensor& value, Tensor& z, hipStream_t stream) {
     const std::int32_t cols = x.ne[1];
     if (cols < kFirstExactCols || cols > kLastSnapshotExactCols) {
         throw std::invalid_argument("W8 fused GDN input snapshot requires T=2..16");
@@ -428,14 +437,14 @@ void w8_gdn_input_splitk_conv_snapshot_launch(
     kSnapshotLaunchers[cols - kFirstExactCols](x, weight, conv_weight, conv_states, valid_columns,
                                                initial_slot, snapshot_base_slot, query, key, value,
                                                z, stream);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void w8_gdn_input_splitk_conv_record_launch(const Tensor& x, const Weight& weight,
                                             const Tensor& conv_weight, const Tensor& conv_states,
                                             const Tensor& valid_columns, const Tensor& initial_slot,
                                             Tensor& conv_record, Tensor& query, Tensor& key,
-                                            Tensor& value, Tensor& z, cudaStream_t stream) {
+                                            Tensor& value, Tensor& z, hipStream_t stream) {
     const std::int32_t cols = x.ne[1];
     if (cols < kFirstExactCols || cols > kLastSnapshotExactCols) {
         throw std::invalid_argument("W8 fused GDN input record requires T=2..16");
@@ -443,7 +452,7 @@ void w8_gdn_input_splitk_conv_record_launch(const Tensor& x, const Weight& weigh
     kRecordLaunchers[cols - kFirstExactCols](x, weight, conv_weight, conv_states, valid_columns,
                                              initial_slot, conv_record, query, key, value, z,
                                              stream);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

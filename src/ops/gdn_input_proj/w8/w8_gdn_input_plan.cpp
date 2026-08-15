@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/gdn_input_proj/w8/w8_gdn_input_plan.h"
 
 #include "ops/gdn_input_proj/w8/w8_gdn_input_kernels.h"
@@ -92,7 +93,7 @@ W8GdnInputConvPlan w8_gdn_input_conv_resolve_plan(const W8GdnInputProblem& probl
 }
 
 void w8_gdn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                           cudaStream_t stream) {
+                           hipStream_t stream) {
     const W8GdnInputProblem problem{x.ne[0], qkv.ne[0], z.ne[0], weight.n, weight.padded_shape[1],
                                     x.ne[1]};
     const W8GdnInputPlan plan = w8_gdn_input_resolve_plan(problem);

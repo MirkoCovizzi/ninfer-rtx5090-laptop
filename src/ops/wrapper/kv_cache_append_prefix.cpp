@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/kv_cache_append_prefix.h"
 
 #include "ops/launcher/kv_cache_append_prefix.h"
@@ -119,7 +120,7 @@ void validate_cyclic_cache(const CyclicKVCacheLayerView& cache,
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
                             const Tensor& counts, const Tensor& table_rows,
                             KVCacheAppendPrefixExecutionEnvelope envelope,
-                            PagedKVBatchLayerView cache, cudaStream_t stream) {
+                            PagedKVBatchLayerView cache, hipStream_t stream) {
     const auto plan = validate_inputs(k, v, positions, counts, table_rows, envelope);
     validate_paged_cache(cache, envelope);
     detail::kv_cache_append_prefix_launch(k, v, positions, counts, table_rows, cache, plan, stream);
@@ -128,7 +129,7 @@ void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& posi
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
                             const Tensor& counts, const Tensor& lanes,
                             KVCacheAppendPrefixExecutionEnvelope envelope,
-                            CyclicKVCacheLayerView cache, cudaStream_t stream) {
+                            CyclicKVCacheLayerView cache, hipStream_t stream) {
     const auto plan = validate_inputs(k, v, positions, counts, lanes, envelope);
     validate_cyclic_cache(cache, envelope);
     detail::kv_cache_append_prefix_launch(k, v, positions, counts, lanes, cache, plan, stream);

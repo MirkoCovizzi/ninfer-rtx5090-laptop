@@ -3,7 +3,7 @@
 #include "core/layout.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime_api.h>
+#include <hip/hip_runtime_api.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -67,7 +67,7 @@ public:
     [[nodiscard]] CyclicKVCacheLayerView layer_view(std::uint32_t layer) const;
 
     // Copies one lane's complete fixed state. Source and destination must have identical layouts.
-    void copy_lane_from(const CyclicKVCache& source, std::int32_t lane, cudaStream_t stream);
+    void copy_lane_from(const CyclicKVCache& source, std::int32_t lane, hipStream_t stream);
 
 private:
     std::vector<Tensor> k_;

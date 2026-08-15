@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 
 #include "artifact/typed_binding.h"

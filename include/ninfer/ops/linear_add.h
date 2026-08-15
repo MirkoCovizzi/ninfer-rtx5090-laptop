@@ -6,7 +6,7 @@
 #include "core/tensor.h"
 #include "ninfer/ops/linear.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -61,9 +61,9 @@ namespace ninfer::ops {
  *   the call. There is no persistent state side effect.
  */
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual, WorkspaceArena& ws,
-                cudaStream_t stream);
+                hipStream_t stream);
 
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual, LinearPolicy policy,
-                WorkspaceArena& ws, cudaStream_t stream);
+                WorkspaceArena& ws, hipStream_t stream);
 
 } // namespace ninfer::ops

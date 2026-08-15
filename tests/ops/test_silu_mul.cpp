@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/silu_mul.h"
 #include "ops/op_tester.h"
 
@@ -53,7 +54,7 @@ int run_contiguous_case(const char* label, std::int32_t rows, std::int32_t colum
     Tensor up_tensor(device_up.data(), DType::BF16, {rows, columns});
     Tensor out_tensor(device_out.data(), DType::BF16, {rows, columns});
     ops::silu_mul(gate_tensor, up_tensor, out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_out.data(), count), expected,
                                     silu_mul_bf16_criterion());
@@ -96,7 +97,7 @@ int run_strided_gate_up_case() {
     Tensor up_tensor   = gate_up_tensor.slice(0, rows, rows);
     Tensor out_tensor(device_out.data(), DType::BF16, {rows, columns});
     ops::silu_mul(gate_tensor, up_tensor, out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures =
         verify_pointwise("silu_mul strided gate/up", from_device_bf16(device_out.data(), count),
@@ -128,7 +129,7 @@ int run_edge_case() {
     Tensor up_tensor(device_up.data(), DType::BF16, {static_cast<int>(up.size())});
     Tensor out_tensor(device_out.data(), DType::BF16, {static_cast<int>(expected.size())});
     ops::silu_mul(gate_tensor, up_tensor, out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_pointwise("silu_mul edge values",
                                     from_device_bf16(device_out.data(), expected.size()), expected,
@@ -142,7 +143,7 @@ int run_edge_case() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/sparse_moe/prefill/sparse_moe_prefill.h"
 
 #include "core/layout.h"

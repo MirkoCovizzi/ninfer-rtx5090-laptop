@@ -4,7 +4,7 @@
 #include "core/tensor.h"
 #include "ninfer/ops/linear.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -16,14 +16,14 @@ namespace ninfer::ops::detail {
                                                                        std::int32_t max_tokens);
 
 void nvfp4_linear_swiglu_decode_launch(const Tensor& x, const Weight& weight, Tensor& out,
-                                       cudaStream_t stream);
+                                       hipStream_t stream);
 void nvfp4_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
-                                        cudaStream_t stream);
+                                        hipStream_t stream);
 void nvfp4_linear_swiglu_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& out,
-                                     WorkspaceArena& workspace, cudaStream_t stream);
+                                     WorkspaceArena& workspace, hipStream_t stream);
 
 void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor& out,
                                   LinearPolicy policy, WorkspaceArena& workspace,
-                                  cudaStream_t stream);
+                                  hipStream_t stream);
 
 } // namespace ninfer::ops::detail

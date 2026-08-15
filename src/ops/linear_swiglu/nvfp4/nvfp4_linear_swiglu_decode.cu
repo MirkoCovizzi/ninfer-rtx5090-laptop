@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 
 #include "core/device.h"
@@ -6,7 +7,8 @@
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_gemv.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 namespace ninfer::ops::detail {
 namespace {
@@ -24,13 +26,13 @@ static_assert((kIntermediate % Schedule::kWarpsPerCta) == 0);
 __global__ __launch_bounds__(
     Schedule::kThreads,
     Schedule::
-        kMinBlocksPerSm) void nvfp4_linear_swiglu_decode_kernel(const __nv_bfloat16* __restrict__ x,
+        kMinBlocksPerSm) void nvfp4_linear_swiglu_decode_kernel(const __hip_bfloat16* __restrict__ x,
                                                                 const std::
                                                                     uint8_t* __restrict__ codes,
                                                                 const std::
                                                                     uint8_t* __restrict__ scales,
                                                                 float inverse_weight_divisor,
-                                                                __nv_bfloat16* __restrict__ out) {
+                                                                __hip_bfloat16* __restrict__ out) {
     __shared__ Nvfp4GemvSharedStorage<Geometry, Schedule> shared;
     constexpr int kCtasPerM128                    = 128 / Schedule::kWarpsPerCta;
     const int block                               = static_cast<int>(blockIdx.x);
@@ -64,14 +66,14 @@ __global__ __launch_bounds__(
 } // namespace
 
 void nvfp4_linear_swiglu_decode_launch(const Tensor& x, const Weight& weight, Tensor& out,
-                                       cudaStream_t stream) {
+                                       hipStream_t stream) {
     constexpr int kBlocks = kIntermediate / Schedule::kWarpsPerCta;
     const float inverse   = 1.0F / weight.weight_scale_divisor;
     nvfp4_linear_swiglu_decode_kernel<<<kBlocks, Schedule::kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
         static_cast<const std::uint8_t*>(weight.scales), inverse,
-        static_cast<__nv_bfloat16*>(out.data));
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<__hip_bfloat16*>(out.data));
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

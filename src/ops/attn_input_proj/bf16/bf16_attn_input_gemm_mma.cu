@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/attn_input_proj/bf16/bf16_attn_input_plan.h"
 
 #include "core/device.h"
@@ -5,7 +6,8 @@
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_gemm_mma_config.h"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -13,10 +15,10 @@ namespace ninfer::ops::detail {
 namespace {
 
 struct Bf16AttentionInputMmaOutput {
-    __nv_bfloat16* query;
-    __nv_bfloat16* key;
-    __nv_bfloat16* gate;
-    __nv_bfloat16* value;
+    __hip_bfloat16* query;
+    __hip_bfloat16* key;
+    __hip_bfloat16* gate;
+    __hip_bfloat16* value;
 
     __device__ __forceinline__ Bf16MmaOutputTile tile(std::int32_t parent_row) const {
         constexpr std::int32_t kQueryRows  = 6144;
@@ -35,7 +37,7 @@ struct Bf16AttentionInputMmaOutput {
 
 template <bool FullTokens>
 void launch_variant(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tensor& k,
-                    Tensor& v, cudaStream_t stream) {
+                    Tensor& v, hipStream_t stream) {
     using Geometry = Bf16GemvGeometry<14336, 5120>;
     using Schedule = Bf16MmaProductionSchedule<Geometry>;
     static_assert((Geometry::kOutputRows % Schedule::kBlockRows) == 0);
@@ -47,29 +49,29 @@ void launch_variant(const Tensor& x, const Weight& weight, Tensor& q, Tensor& ga
     const int tiles_n     = div_up(x.ne[1], Schedule::kBlockCols);
     const int blocks      = tiles_m * tiles_n;
     const Bf16AttentionInputMmaOutput output{
-        static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data),
-        static_cast<__nv_bfloat16*>(gate.data),
-        static_cast<__nv_bfloat16*>(v.data),
+        static_cast<__hip_bfloat16*>(q.data),
+        static_cast<__hip_bfloat16*>(k.data),
+        static_cast<__hip_bfloat16*>(gate.data),
+        static_cast<__hip_bfloat16*>(v.data),
     };
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attr = cudaFuncSetAttribute(
-            bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16AttentionInputMmaOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attr);
+        static const hipError_t attr = hipFuncSetAttribute(reinterpret_cast<const void*>(
+            bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16AttentionInputMmaOutput>),
+            hipFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
+        HIP_CHECK(attr);
     }
     bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.qdata), output, x.ne[1]);
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.qdata), output, x.ne[1]);
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
 
 void bf16_attn_input_mma_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                Tensor& k, Tensor& v, cudaStream_t stream) {
+                                Tensor& k, Tensor& v, hipStream_t stream) {
     using Geometry = Bf16GemvGeometry<14336, 5120>;
     using Schedule = Bf16MmaProductionSchedule<Geometry>;
     if ((x.ne[1] % Schedule::kBlockCols) == 0) {

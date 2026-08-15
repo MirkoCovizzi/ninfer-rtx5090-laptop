@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "runtime/engine/kv_capacity.h"
 
 #include <algorithm>

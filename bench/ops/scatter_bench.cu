@@ -1,7 +1,8 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/scatter.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -37,12 +38,12 @@ void run(std::int32_t d, std::int32_t vision_tokens, bool control, bool profile_
     std::vector<std::int32_t> indices(static_cast<std::size_t>(vision_tokens));
     std::iota(indices.begin(), indices.end(), 1);
     DeviceBuffer device_indices(indices.size() * sizeof(std::int32_t));
-    cudaMemcpy(device_indices.p, indices.data(), device_indices.bytes, cudaMemcpyHostToDevice);
+    hipMemcpy(device_indices.p, indices.data(), device_indices.bytes, hipMemcpyHostToDevice);
     Tensor source_tensor(source.p, DType::BF16, {d, vision_tokens});
     Tensor destination_tensor(destination.p, DType::BF16, {d, prompt_tokens});
     Tensor indices_tensor(device_indices.p, DType::I32, {vision_tokens});
 
-    const auto launch = [&](cudaStream_t stream) {
+    const auto launch = [&](hipStream_t stream) {
         if (control) {
             scatter_payload_control_x8<<<static_cast<unsigned>(vision_tokens), kBlock, 0, stream>>>(
                 static_cast<const uint4*>(source.p), static_cast<uint4*>(destination.p), d / 8);
@@ -53,7 +54,7 @@ void run(std::int32_t d, std::int32_t vision_tokens, bool control, bool profile_
 
     if (profile_once) {
         launch(nullptr);
-        cudaDeviceSynchronize();
+        hipDeviceSynchronize();
         std::printf("scatter %s profile D=%d V=%d grid=%d block=%d\n",
                     control ? "control" : "production", d, vision_tokens, vision_tokens, kBlock);
         return;
@@ -71,7 +72,7 @@ void run(std::int32_t d, std::int32_t vision_tokens, bool control, bool profile_
 
 int main(int argc, char** argv) {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

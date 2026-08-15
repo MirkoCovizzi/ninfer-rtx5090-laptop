@@ -9,30 +9,30 @@
 namespace ninfer {
 namespace {
 
-void log_cuda_error(const char* op, cudaError_t err) noexcept {
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "CUDA cleanup failed during %s: %s: %s\n", op, cudaGetErrorName(err),
-                     cudaGetErrorString(err));
+void log_hip_error(const char* op, hipError_t err) noexcept {
+    if (err != hipSuccess) {
+        std::fprintf(stderr, "HIP cleanup failed during %s: %s: %s\n", op, hipGetErrorName(err),
+                     hipGetErrorString(err));
     }
 }
 
-void destroy_graph_exec(cudaGraphExec_t& exec) noexcept {
+void destroy_graph_exec(hipGraphExec_t& exec) noexcept {
     if (exec != nullptr) {
-        log_cuda_error("cudaGraphExecDestroy", cudaGraphExecDestroy(exec));
+        log_hip_error("hipGraphExecDestroy", hipGraphExecDestroy(exec));
         exec = nullptr;
     }
 }
 
-void destroy_graph(cudaGraph_t& graph) noexcept {
+void destroy_graph(hipGraph_t& graph) noexcept {
     if (graph != nullptr) {
-        log_cuda_error("cudaGraphDestroy", cudaGraphDestroy(graph));
+        log_hip_error("hipGraphDestroy", hipGraphDestroy(graph));
         graph = nullptr;
     }
 }
 
-void discard_capture(cudaStream_t stream) noexcept {
-    cudaGraph_t discard = nullptr;
-    log_cuda_error("cudaStreamEndCapture(discard)", cudaStreamEndCapture(stream, &discard));
+void discard_capture(hipStream_t stream) noexcept {
+    hipGraph_t discard = nullptr;
+    log_hip_error("hipStreamEndCapture(discard)", hipStreamEndCapture(stream, &discard));
     destroy_graph(discard);
 }
 
@@ -55,10 +55,10 @@ DecodeGraphDefinition& DecodeGraphDefinition::operator=(DecodeGraphDefinition&& 
     return *this;
 }
 
-void DecodeGraphDefinition::capture(cudaStream_t stream, const std::function<void()>& body) {
+void DecodeGraphDefinition::capture(hipStream_t stream, const std::function<void()>& body) {
     reset();
 
-    CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+    HIP_CHECK(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal));
 
     try {
         body();
@@ -67,12 +67,12 @@ void DecodeGraphDefinition::capture(cudaStream_t stream, const std::function<voi
         throw;
     }
 
-    cudaGraph_t graph = nullptr;
+    hipGraph_t graph = nullptr;
 
-    cudaError_t err = cudaStreamEndCapture(stream, &graph);
-    if (err != cudaSuccess) {
+    hipError_t err = hipStreamEndCapture(stream, &graph);
+    if (err != hipSuccess) {
         destroy_graph(graph);
-        CUDA_CHECK(err);
+        HIP_CHECK(err);
     }
 
     graph_ = graph;
@@ -100,41 +100,45 @@ DecodeGraphExecutable& DecodeGraphExecutable::operator=(DecodeGraphExecutable&& 
 
 void DecodeGraphExecutable::instantiate(const DecodeGraphDefinition& definition) {
     if (!definition.ready()) {
-        throw std::logic_error("cannot instantiate an empty CUDA Graph definition");
+        throw std::logic_error("cannot instantiate an empty HIP Graph definition");
     }
     reset();
 
-    cudaGraphExec_t exec  = nullptr;
-    const cudaError_t err = cudaGraphInstantiate(&exec, definition.graph_, 0);
-    if (err != cudaSuccess) {
+    hipGraphExec_t exec      = nullptr;
+    hipGraphNode_t error_node = nullptr;
+    char log_buffer[512]     = {};
+    const hipError_t err = hipGraphInstantiate(&exec, definition.graph_, &error_node, log_buffer,
+                                               sizeof(log_buffer));
+    if (err != hipSuccess) {
         destroy_graph_exec(exec);
-        CUDA_CHECK(err);
+        HIP_CHECK(err);
     }
     exec_ = exec;
 }
 
 void DecodeGraphExecutable::update(const DecodeGraphDefinition& definition) {
     if (!ready() || !definition.ready()) {
-        throw std::logic_error("CUDA Graph update requires a definition and executable");
+        throw std::logic_error("HIP Graph update requires a definition and executable");
     }
 
-    cudaGraphExecUpdateResultInfo result{};
-    const cudaError_t err = cudaGraphExecUpdate(exec_, definition.graph_, &result);
-    if (err != cudaSuccess || result.result != cudaGraphExecUpdateSuccess) {
+    hipGraphNode_t error_node      = nullptr;
+    hipGraphExecUpdateResult result = hipGraphExecUpdateSuccess;
+    const hipError_t err = hipGraphExecUpdate(exec_, definition.graph_, &error_node, &result);
+    if (err != hipSuccess || result != hipGraphExecUpdateSuccess) {
         throw std::runtime_error(
-            "CUDA Graph executable update failed: " + std::string(cudaGetErrorName(err)) +
-            " (update result " + std::to_string(static_cast<int>(result.result)) + ")");
+            "HIP Graph executable update failed: " + std::string(hipGetErrorName(err)) +
+            " (update result " + std::to_string(static_cast<int>(result)) + ")");
     }
 }
 
-void DecodeGraphExecutable::upload(cudaStream_t stream) {
-    if (!ready()) { throw std::logic_error("cannot upload an empty CUDA Graph executable"); }
-    CUDA_CHECK(cudaGraphUpload(exec_, stream));
+void DecodeGraphExecutable::upload(hipStream_t stream) {
+    if (!ready()) { throw std::logic_error("cannot upload an empty HIP Graph executable"); }
+    HIP_CHECK(hipGraphUpload(exec_, stream));
 }
 
-void DecodeGraphExecutable::launch(cudaStream_t stream) {
-    if (!ready()) { throw std::logic_error("cannot launch an empty CUDA Graph executable"); }
-    CUDA_CHECK(cudaGraphLaunch(exec_, stream));
+void DecodeGraphExecutable::launch(hipStream_t stream) {
+    if (!ready()) { throw std::logic_error("cannot launch an empty HIP Graph executable"); }
+    HIP_CHECK(hipGraphLaunch(exec_, stream));
 }
 
 bool DecodeGraphExecutable::ready() const noexcept { return exec_ != nullptr; }

@@ -1,11 +1,13 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/math.cuh"
 #include "ops/common/mma.cuh"
 #include "ops/common/warp.cuh"
 
-#include <cuda_bf16.h>
-#include <math_constants.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_math_constants.h>
 
 #include <cstdint>
 
@@ -26,8 +28,8 @@ struct alignas(16) VisionAttentionTile {
 
 static_assert(sizeof(VisionAttentionTile) == 16);
 
-__device__ __forceinline__ const __nv_bfloat16*
-vision_attention_ptr(const __nv_bfloat16* data, std::int64_t stride_d, std::int64_t stride_h,
+__device__ __forceinline__ const __hip_bfloat16*
+vision_attention_ptr(const __hip_bfloat16* data, std::int64_t stride_d, std::int64_t stride_h,
                      std::int64_t stride_t, int d, int h, int t) {
     return data + static_cast<std::int64_t>(d) * stride_d +
            static_cast<std::int64_t>(h) * stride_h + static_cast<std::int64_t>(t) * stride_t;
@@ -37,10 +39,10 @@ __device__ __forceinline__ int vision_attention_swz(int row, int col) {
     return (((col >> 3) ^ (row & 7)) << 3) | (col & 7);
 }
 
-__device__ __forceinline__ unsigned vision_attention_swz_addr(unsigned lane_base, unsigned ck,
-                                                              unsigned as, unsigned r) {
-    return lane_base + ((ck | as) ^ r);
-}
+// Identity swizzle for the transposed V tile. The Xor64 swizzle only fits 64-wide
+// rows; for Bc = 16/32 the transposed [d][Bc] row is narrower, so feature keys are
+// stored contiguously (vs[d * Bc + key]) and loaded with the identity swizzle.
+__device__ __forceinline__ int vision_attention_swz_id(int /*row*/, int col) { return col; }
 
 __global__ void vision_attention_prepare_tiles_kernel(const std::int32_t* cu_seqlens,
                                                       std::int32_t segments,
@@ -67,7 +69,7 @@ __global__ void vision_attention_prepare_tiles_kernel(const std::int32_t* cu_seq
 
 template <int Br, int Threads>
 __device__ __forceinline__ void
-vision_attention_stage_q(__nv_bfloat16* dst, const __nv_bfloat16* q, int q0, int end, int head,
+vision_attention_stage_q(__hip_bfloat16* dst, const __hip_bfloat16* q, int q0, int end, int head,
                          int tid, std::int64_t stride_d, std::int64_t stride_h,
                          std::int64_t stride_t) {
     constexpr int VecsPerRow = kVisionAttentionPaddedD / 8;
@@ -75,8 +77,8 @@ vision_attention_stage_q(__nv_bfloat16* dst, const __nv_bfloat16* q, int q0, int
         const int row       = chunk / VecsPerRow;
         const int d         = (chunk % VecsPerRow) * 8;
         const bool in_range = q0 + row < end && d < kVisionAttentionHeadDim;
-        __nv_bfloat16* smem = &dst[row * kVisionAttentionPaddedD + vision_attention_swz(row, d)];
-        const __nv_bfloat16* global = vision_attention_ptr(
+        __hip_bfloat16* smem = &dst[row * kVisionAttentionPaddedD + vision_attention_swz(row, d)];
+        const __hip_bfloat16* global = vision_attention_ptr(
             q, stride_d, stride_h, stride_t, in_range ? d : 0, head, in_range ? q0 + row : q0);
         cp_async_zfill<16, Cache::cg>(smem, global, in_range ? 16 : 0);
     }
@@ -84,7 +86,7 @@ vision_attention_stage_q(__nv_bfloat16* dst, const __nv_bfloat16* q, int q0, int
 
 template <int Bc, int Threads>
 __device__ __forceinline__ void
-vision_attention_stage_kv(__nv_bfloat16* dst, const __nv_bfloat16* src, int key0, int end, int head,
+vision_attention_stage_kv(__hip_bfloat16* dst, const __hip_bfloat16* src, int key0, int end, int head,
                           int tid, std::int64_t stride_d, std::int64_t stride_h,
                           std::int64_t stride_t) {
     constexpr int VecsPerRow = kVisionAttentionPaddedD / 8;
@@ -92,19 +94,49 @@ vision_attention_stage_kv(__nv_bfloat16* dst, const __nv_bfloat16* src, int key0
         const int row       = chunk / VecsPerRow;
         const int d         = (chunk % VecsPerRow) * 8;
         const bool in_range = key0 + row < end && d < kVisionAttentionHeadDim;
-        __nv_bfloat16* smem = &dst[row * kVisionAttentionPaddedD + vision_attention_swz(row, d)];
-        const __nv_bfloat16* global =
+        __hip_bfloat16* smem = &dst[row * kVisionAttentionPaddedD + vision_attention_swz(row, d)];
+        const __hip_bfloat16* global =
             vision_attention_ptr(src, stride_d, stride_h, stride_t, in_range ? d : 0, head,
                                  in_range ? key0 + row : key0);
         cp_async_zfill<16, Cache::cg>(smem, global, in_range ? 16 : 0);
     }
 }
 
+// Transposed V staging for the WMMA PV B-operand. The WMMA B-fragment for
+// O += P*V holds column n = d and elements k = key, reading v_t[d * Bc +
+// swz(d, key)] — contiguous per 8-key group. The untransposed [key][d] layout
+// would scatter the fragment over one element per smem row. Rows d in [D, 80)
+// (the unused tail of the last 16-wide atom) are never written and stay zero.
+template <int Bc, int Threads>
+__device__ __forceinline__ void
+vision_attention_stage_kv_t(__hip_bfloat16* dst, const __hip_bfloat16* src, int key0, int end,
+                            int head, int tid, std::int64_t stride_d, std::int64_t stride_h,
+                            std::int64_t stride_t) {
+    constexpr int D      = kVisionAttentionHeadDim;
+    constexpr int Chunks = Bc * (D / 8);
+    for (int chunk = tid; chunk < Chunks; chunk += Threads) {
+        const int key = chunk / (D / 8);
+        const int d8  = chunk - key * (D / 8);
+        const bool in_range = key0 + key < end;
+        const __hip_bfloat16* global =
+            vision_attention_ptr(src, stride_d, stride_h, stride_t, d8 * 8, head,
+                                 in_range ? key0 + key : key0);
+        if (in_range) {
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                const int d = d8 * 8 + i;
+                if (d < D) { dst[d * Bc + key] = global[i]; }
+            }
+        }
+    }
+}
+
+
 template <int Br, int Bc>
 __launch_bounds__(Br * 2, 128 / Br) __global__ void vision_attention_flash_kernel(
-    const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ k,
-    const __nv_bfloat16* __restrict__ v, const VisionAttentionTile* __restrict__ tiles,
-    std::int32_t patches, std::int32_t uniform_segment_length, __nv_bfloat16* __restrict__ out,
+    const __hip_bfloat16* __restrict__ q, const __hip_bfloat16* __restrict__ k,
+    const __hip_bfloat16* __restrict__ v, const VisionAttentionTile* __restrict__ tiles,
+    std::int32_t patches, std::int32_t uniform_segment_length, __hip_bfloat16* __restrict__ out,
     std::int64_t q_stride_d, std::int64_t q_stride_h, std::int64_t q_stride_t,
     std::int64_t k_stride_d, std::int64_t k_stride_h, std::int64_t k_stride_t,
     std::int64_t v_stride_d, std::int64_t v_stride_h, std::int64_t v_stride_t) {
@@ -113,13 +145,12 @@ __launch_bounds__(Br * 2, 128 / Br) __global__ void vision_attention_flash_kerne
     constexpr int D             = kVisionAttentionHeadDim;
     constexpr int Dp            = kVisionAttentionPaddedD;
     constexpr int Threads       = Br * 2;
-    constexpr int QKNt          = Bc / 8;
     constexpr int QKKs          = 5; // ceil(72 / 16)
-    constexpr int PVNt          = D / 8;
-    constexpr int PVKs          = Bc / 16;
-    constexpr int RowBytes      = Dp * static_cast<int>(sizeof(__nv_bfloat16));
+    constexpr int WQKNt         = Bc / 16; // QK score n-atoms
+    constexpr int PVKs          = Bc / 16; // PV contraction steps over keys
+    constexpr int WPVNt         = 5;       // ceil(72 / 16) PV n-atoms
     constexpr float ScaleLog2E  = 0.11785113019775792073f * 1.4426950408889634074f;
-    constexpr unsigned FullMask = 0xffffffffu;
+    constexpr unsigned long long FullMask = 0xffffffffull;
 
     VisionAttentionTile tile;
     if (tiles != nullptr) {
@@ -138,180 +169,174 @@ __launch_bounds__(Br * 2, 128 / Br) __global__ void vision_attention_flash_kerne
     const int tid  = static_cast<int>(threadIdx.x);
     const int warp = tid >> 5;
     const int lane = tid & 31;
-
-    extern __shared__ __align__(16) __nv_bfloat16 shared[];
-    __nv_bfloat16* q_s = shared;
-    __nv_bfloat16* k_s = q_s + Br * Dp;
-    __nv_bfloat16* v_s = k_s + Bc * Dp;
-
-    const int gid       = lane >> 2;
-    const int lid       = lane & 3;
-    const int a_mat     = lane >> 3;
-    const int a_rin     = lane & 7;
-    const int a_rowoff  = a_rin + ((a_mat & 1) << 3);
-    const int b_rin     = lane & 7;
-    const int b_koff    = ((lane >> 3) & 1) << 3;
+    const bool lane_hi = (lane >> 4) != 0;
     const int warp_row0 = warp * 16;
 
-    const unsigned q_sbase     = smem_addr(q_s);
-    const unsigned k_sbase     = smem_addr(k_s);
-    const unsigned v_sbase     = smem_addr(v_s);
-    const unsigned q_lane_base = q_sbase + static_cast<unsigned>((warp_row0 + a_rowoff) * RowBytes);
-    const unsigned q_as        = static_cast<unsigned>((a_mat >> 1) << 4);
-    const unsigned q_r         = static_cast<unsigned>(a_rin << 4);
-    const unsigned k_lane_base = k_sbase + static_cast<unsigned>(b_rin * RowBytes) +
-                                 static_cast<unsigned>((lane >> 4) * 8 * RowBytes);
-    const unsigned k_as        = static_cast<unsigned>((b_koff >> 3) << 4);
-    const unsigned k_r         = static_cast<unsigned>(b_rin << 4);
-    const unsigned v_lane_base = v_sbase + static_cast<unsigned>(((lane >> 3) & 1) * 8 * RowBytes) +
-                                 static_cast<unsigned>(b_rin * RowBytes);
-    const unsigned v_as = static_cast<unsigned>((lane >> 4) << 4);
-    const unsigned v_r  = static_cast<unsigned>(b_rin << 4);
+    extern __shared__ __align__(16) __hip_bfloat16 shared[];
+    __hip_bfloat16* q_s = shared;
+    __hip_bfloat16* k_s = q_s + Br * Dp;
+    __hip_bfloat16* v_s = k_s + Bc * Dp;
 
     vision_attention_stage_q<Br, Threads>(q_s, q, tile.q0, tile.end, head, tid, q_stride_d,
                                           q_stride_h, q_stride_t);
 
-    float acc[PVNt][4];
+    float acc[WPVNt][8];
 #pragma unroll
-    for (int n = 0; n < PVNt; ++n) {
+    for (int n = 0; n < WPVNt; ++n) {
 #pragma unroll
-        for (int item = 0; item < 4; ++item) { acc[n][item] = 0.0f; }
+        for (int i = 0; i < 8; ++i) { acc[n][i] = 0.0f; }
     }
-    float m0 = -CUDART_INF_F;
-    float m1 = -CUDART_INF_F;
-    float l0 = 0.0f;
-    float l1 = 0.0f;
+    float m0[8], m1[8], l0[8], l1[8];
+#pragma unroll
+    for (int r = 0; r < 8; ++r) {
+        m0[r] = -HIP_INF_F;
+        m1[r] = -HIP_INF_F;
+        l0[r] = 0.0f;
+        l1[r] = 0.0f;
+    }
 
     cp_commit();
     vision_attention_stage_kv<Bc, Threads>(k_s, k, tile.begin, tile.end, head, tid, k_stride_d,
                                            k_stride_h, k_stride_t);
     cp_commit();
 
+    // Pre-zero the transposed V region so the unused d >= 72 tail is finite.
+#pragma unroll 1
+    for (int i = tid; i < 80 * Bc; i += Threads) v_s[i] = __hip_bfloat16(0);
+
     const int key_blocks = (tile.end - tile.begin + Bc - 1) / Bc;
+    const int qrow_off   = tile.q0 + warp_row0;
+
     for (int kb = 0; kb < key_blocks; ++kb) {
         const int key0 = tile.begin + kb * Bc;
         cp_wait<0>();
         __syncthreads();
 
-        vision_attention_stage_kv<Bc, Threads>(v_s, v, key0, tile.end, head, tid, v_stride_d,
-                                               v_stride_h, v_stride_t);
+        vision_attention_stage_kv_t<Bc, Threads>(v_s, v, key0, tile.end, head, tid, v_stride_d,
+                                                 v_stride_h, v_stride_t);
         cp_commit();
 
-        float score[QKNt][4];
+        float score[WQKNt][8];
 #pragma unroll
-        for (int nt = 0; nt < QKNt; ++nt) {
-            score[nt][0] = score[nt][1] = score[nt][2] = score[nt][3] = 0.0f;
-        }
-        unsigned af[2][4];
-        unsigned bf[2][QKNt][2];
-        ldmatrix_x4(af[0][0], af[0][1], af[0][2], af[0][3],
-                    vision_attention_swz_addr(q_lane_base, 0u, q_as, q_r));
+        for (int nt = 0; nt < WQKNt; ++nt) {
 #pragma unroll
-        for (int nt2 = 0; nt2 < QKNt; nt2 += 2) {
-            ldmatrix_x4(
-                bf[0][nt2][0], bf[0][nt2][1], bf[0][nt2 + 1][0], bf[0][nt2 + 1][1],
-                vision_attention_swz_addr(k_lane_base + static_cast<unsigned>(nt2 * 8 * RowBytes),
-                                          0u, k_as, k_r));
+            for (int i = 0; i < 8; ++i) { score[nt][i] = 0.0f; }
         }
+        unsigned a_frag[8];
+        unsigned b_frag[WQKNt][8];
 #pragma unroll
         for (int ks = 0; ks < QKKs; ++ks) {
-            const int cur = ks & 1;
-            const int nxt = cur ^ 1;
-            if (ks + 1 < QKKs) {
-                const unsigned ck = static_cast<unsigned>((ks + 1) << 5);
-                ldmatrix_x4(af[nxt][0], af[nxt][1], af[nxt][2], af[nxt][3],
-                            vision_attention_swz_addr(q_lane_base, ck, q_as, q_r));
-#pragma unroll
-                for (int nt2 = 0; nt2 < QKNt; nt2 += 2) {
-                    ldmatrix_x4(bf[nxt][nt2][0], bf[nxt][nt2][1], bf[nxt][nt2 + 1][0],
-                                bf[nxt][nt2 + 1][1],
-                                vision_attention_swz_addr(
-                                    k_lane_base + static_cast<unsigned>(nt2 * 8 * RowBytes), ck,
-                                    k_as, k_r));
-                }
+            const int k0   = ks * 16;
+            const int arow = warp_row0 + (lane >> 1);
+            if (wmma_a_lane_active(lane)) {
+                wmma_load_a_bf16(a_frag, q_s, arow, k0, Dp, vision_attention_swz);
             }
 #pragma unroll
-            for (int nt = 0; nt < QKNt; ++nt) {
-                mma_bf16(score[nt][0], score[nt][1], score[nt][2], score[nt][3], af[cur][0],
-                         af[cur][1], af[cur][2], af[cur][3], bf[cur][nt][0], bf[cur][nt][1]);
+            for (int nt = 0; nt < WQKNt; ++nt) {
+                const int bcol = nt * 16 + (lane & 15);
+                wmma_load_b_bf16(b_frag[nt], k_s, bcol, k0, Dp, vision_attention_swz);
+            }
+#pragma unroll
+            for (int nt = 0; nt < WQKNt; ++nt) {
+                WmmaC8& c = *reinterpret_cast<WmmaC8*>(score[nt]);
+                WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag);
+                WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag[nt]);
+                c         = wmma_bf16(a, b, c);
             }
         }
 
-        const int row0       = warp_row0 + gid;
-        const int row1       = row0 + 8;
-        const int query0     = tile.q0 + row0;
-        const int query1     = tile.q0 + row1;
         const bool full_tile = tile.q0 + Br <= tile.end && key0 + Bc <= tile.end;
-        float block_max0     = -CUDART_INF_F;
-        float block_max1     = -CUDART_INF_F;
+        float bm0[8], bm1[8];
+#pragma unroll
+        for (int r = 0; r < 8; ++r) { bm0[r] = -HIP_INF_F; bm1[r] = -HIP_INF_F; }
         if (full_tile) {
 #pragma unroll
-            for (int nt = 0; nt < QKNt; ++nt) {
-                block_max0 = fmaxf(block_max0, fmaxf(score[nt][0], score[nt][1]));
-                block_max1 = fmaxf(block_max1, fmaxf(score[nt][2], score[nt][3]));
+            for (int nt = 0; nt < WQKNt; ++nt) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    bm0[r] = fmaxf(bm0[r], score[nt][r]);
+                    bm1[r] = fmaxf(bm1[r], score[nt][r]);
+                }
             }
         } else {
 #pragma unroll
-            for (int nt = 0; nt < QKNt; ++nt) {
-                const int key_a = key0 + nt * 8 + 2 * lid;
-                const int key_b = key_a + 1;
-                score[nt][0] = query0 < tile.end && key_a < tile.end ? score[nt][0] : -CUDART_INF_F;
-                score[nt][1] = query0 < tile.end && key_b < tile.end ? score[nt][1] : -CUDART_INF_F;
-                score[nt][2] = query1 < tile.end && key_a < tile.end ? score[nt][2] : -CUDART_INF_F;
-                score[nt][3] = query1 < tile.end && key_b < tile.end ? score[nt][3] : -CUDART_INF_F;
-                block_max0   = fmaxf(block_max0, fmaxf(score[nt][0], score[nt][1]));
-                block_max1   = fmaxf(block_max1, fmaxf(score[nt][2], score[nt][3]));
+            for (int nt = 0; nt < WQKNt; ++nt) {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    const int qrow  = qrow_off + r + (lane_hi ? 8 : 0);
+                    const int key   = key0 + nt * 16 + (lane & 15);
+                    const bool keep = qrow < tile.end && key < tile.end;
+                    score[nt][r]    = keep ? score[nt][r] : -HIP_INF_F;
+                    bm0[r]          = fmaxf(bm0[r], score[nt][r]);
+                    bm1[r]          = fmaxf(bm1[r], score[nt][r]);
+                }
             }
         }
-        block_max0 = warp_max<4>(block_max0, FullMask);
-        block_max1 = warp_max<4>(block_max1, FullMask);
-
-        const float next_m0 = fmaxf(m0, block_max0);
-        const float next_m1 = fmaxf(m1, block_max1);
-        const float m0_l2   = next_m0 * ScaleLog2E;
-        const float m1_l2   = next_m1 * ScaleLog2E;
-        const float alpha0  = exp2_approx(__fmaf_rn(m0, ScaleLog2E, -m0_l2));
-        const float alpha1  = exp2_approx(__fmaf_rn(m1, ScaleLog2E, -m1_l2));
-
-        float block_sum0 = 0.0f;
-        float block_sum1 = 0.0f;
-        unsigned p_frag[PVKs][4];
 #pragma unroll
-        for (int nt = 0; nt < QKNt; ++nt) {
-            const float p00 = score[nt][0] > -CUDART_INF_F
-                                  ? exp2_approx(__fmaf_rn(score[nt][0], ScaleLog2E, -m0_l2))
-                                  : 0.0f;
-            const float p01 = score[nt][1] > -CUDART_INF_F
-                                  ? exp2_approx(__fmaf_rn(score[nt][1], ScaleLog2E, -m0_l2))
-                                  : 0.0f;
-            const float p10 = score[nt][2] > -CUDART_INF_F
-                                  ? exp2_approx(__fmaf_rn(score[nt][2], ScaleLog2E, -m1_l2))
-                                  : 0.0f;
-            const float p11 = score[nt][3] > -CUDART_INF_F
-                                  ? exp2_approx(__fmaf_rn(score[nt][3], ScaleLog2E, -m1_l2))
-                                  : 0.0f;
-            block_sum0 += p00 + p01;
-            block_sum1 += p10 + p11;
-            const int pk = nt >> 1;
-            if ((nt & 1) == 0) {
-                p_frag[pk][0] = pack_bf16x2(p00, p01);
-                p_frag[pk][1] = pack_bf16x2(p10, p11);
-            } else {
-                p_frag[pk][2] = pack_bf16x2(p00, p01);
-                p_frag[pk][3] = pack_bf16x2(p10, p11);
+        for (int r = 0; r < 8; ++r) {
+            bm0[r] = warp_max<16>(bm0[r], FullMask);
+            bm1[r] = warp_max<16>(bm1[r], FullMask);
+        }
+
+        float nm0[8], nm1[8], alpha0[8], alpha1[8];
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            nm0[r]    = fmaxf(m0[r], bm0[r]);
+            nm1[r]    = fmaxf(m1[r], bm1[r]);
+            alpha0[r] = exp2_approx(__fmaf_rn(m0[r], ScaleLog2E, -nm0[r] * ScaleLog2E));
+            alpha1[r] = exp2_approx(__fmaf_rn(m1[r], ScaleLog2E, -nm1[r] * ScaleLog2E));
+        }
+
+        float bl0[8], bl1[8];
+#pragma unroll
+        for (int r = 0; r < 8; ++r) { bl0[r] = 0.0f; bl1[r] = 0.0f; }
+        const int arow = lane >> 1;
+        const int a_rr = arow & 7;
+        unsigned pv_a[PVKs][8];
+#pragma unroll
+        for (int nt = 0; nt < WQKNt; ++nt) {
+            float p[8];
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const float s  = score[nt][r];
+                const float nm = lane_hi ? nm1[r] : nm0[r];
+                p[r] = (s > -HIP_INF_F) ? exp2_approx(__fmaf_rn(s, ScaleLog2E, -nm * ScaleLog2E))
+                                        : 0.0f;
+                bl0[r] += p[r];
+                bl1[r] += p[r];
+            }
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const int src0 = 2 * j + (lane_hi ? 16 : 0);
+                const int src1 = 2 * j + 1 + (lane_hi ? 16 : 0);
+                // A-fragment element (row q, key i) lives in lane (i & 15) +
+                // 16 * (q >= 8) at register (q & 7) of the score C fragment. The
+                // shuffle only sends a uniform register per call, so iterate the 8
+                // registers and keep a_rr (src lanes evaluate p[own row], not p[q]).
+                float e0 = 0.0f, e1 = 0.0f;
+#pragma unroll
+                for (int rr = 0; rr < 8; ++rr) {
+                    const float v0 = __shfl_sync(FullMask, p[rr], src0);
+                    const float v1 = __shfl_sync(FullMask, p[rr], src1);
+                    if (rr == a_rr) { e0 = v0; e1 = v1; }
+                }
+                pv_a[nt][j]    = pack_bf16x2(e0, e1);
             }
         }
 
-        l0 = __fmaf_rn(l0, alpha0, block_sum0);
-        l1 = __fmaf_rn(l1, alpha1, block_sum1);
-        m0 = next_m0;
-        m1 = next_m1;
 #pragma unroll
-        for (int n = 0; n < PVNt; ++n) {
-            acc[n][0] *= alpha0;
-            acc[n][1] *= alpha0;
-            acc[n][2] *= alpha1;
-            acc[n][3] *= alpha1;
+        for (int r = 0; r < 8; ++r) {
+            l0[r] = __fmaf_rn(l0[r], alpha0[r], bl0[r]);
+            l1[r] = __fmaf_rn(l1[r], alpha1[r], bl1[r]);
+            m0[r] = nm0[r];
+            m1[r] = nm1[r];
+        }
+#pragma unroll
+        for (int n = 0; n < WPVNt; ++n) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                acc[n][r] *= (lane_hi ? alpha1[r] : alpha0[r]);
+            }
         }
 
         cp_wait<0>();
@@ -322,53 +347,43 @@ __launch_bounds__(Br * 2, 128 / Br) __global__ void vision_attention_flash_kerne
             cp_commit();
         }
 
-        constexpr int PVTilePairs = (PVNt + 1) / 2;
-        constexpr int PVLoads     = PVKs * PVTilePairs;
-        unsigned vf[2][4];
-        ldmatrix_x4_t(vf[0][0], vf[0][1], vf[0][2], vf[0][3],
-                      vision_attention_swz_addr(v_lane_base, 0u, v_as, v_r));
 #pragma unroll
-        for (int load = 0; load < PVLoads; ++load) {
-            const int pk   = load / PVTilePairs;
-            const int n2   = (load % PVTilePairs) * 2;
-            const int cur  = load & 1;
-            const int next = cur ^ 1;
-            if (load + 1 < PVLoads) {
-                const int next_pk = (load + 1) / PVTilePairs;
-                const int next_n2 = ((load + 1) % PVTilePairs) * 2;
-                ldmatrix_x4_t(vf[next][0], vf[next][1], vf[next][2], vf[next][3],
-                              vision_attention_swz_addr(
-                                  v_lane_base + static_cast<unsigned>(next_pk * 16 * RowBytes),
-                                  static_cast<unsigned>(next_n2 << 4), v_as, v_r));
-            }
-            mma_bf16(acc[n2][0], acc[n2][1], acc[n2][2], acc[n2][3], p_frag[pk][0], p_frag[pk][1],
-                     p_frag[pk][2], p_frag[pk][3], vf[cur][0], vf[cur][1]);
-            if (n2 + 1 < PVNt) {
-                mma_bf16(acc[n2 + 1][0], acc[n2 + 1][1], acc[n2 + 1][2], acc[n2 + 1][3],
-                         p_frag[pk][0], p_frag[pk][1], p_frag[pk][2], p_frag[pk][3], vf[cur][2],
-                         vf[cur][3]);
+        for (int kk = 0; kk < PVKs; ++kk) {
+            WmmaA16I a = *reinterpret_cast<WmmaA16I*>(pv_a[kk]);
+#pragma unroll
+            for (int n = 0; n < WPVNt; ++n) {
+                unsigned bfrag[8];
+                const int dcol = n * 16 + (lane & 15);
+                wmma_load_b_bf16(bfrag, v_s, dcol, kk * 16, Bc, vision_attention_swz_id);
+                WmmaC8& c   = *reinterpret_cast<WmmaC8*>(acc[n]);
+                WmmaA16I b   = *reinterpret_cast<WmmaA16I*>(bfrag);
+                c          = wmma_bf16(a, b, c);
             }
         }
     }
 
-    l0                 = warp_sum<4>(l0, FullMask);
-    l1                 = warp_sum<4>(l1, FullMask);
-    const float inv_l0 = l0 > 0.0f ? __frcp_rn(l0) : 0.0f;
-    const float inv_l1 = l1 > 0.0f ? __frcp_rn(l1) : 0.0f;
 #pragma unroll
-    for (int n = 0; n < PVNt; ++n) {
-        const int d0     = n * 8 + 2 * lid;
-        const int query0 = tile.q0 + warp_row0 + gid;
-        const int query1 = query0 + 8;
-        if (query0 < tile.end) {
-            const std::int64_t offset =
-                (static_cast<std::int64_t>(query0) * kVisionAttentionHeads + head) * D + d0;
-            store_vec(&out[offset], pack_bf16x2(acc[n][0] * inv_l0, acc[n][1] * inv_l0));
-        }
-        if (query1 < tile.end) {
-            const std::int64_t offset =
-                (static_cast<std::int64_t>(query1) * kVisionAttentionHeads + head) * D + d0;
-            store_vec(&out[offset], pack_bf16x2(acc[n][2] * inv_l1, acc[n][3] * inv_l1));
+    for (int r = 0; r < 8; ++r) {
+        l0[r] = warp_sum<16>(l0[r], FullMask);
+        l1[r] = warp_sum<16>(l1[r], FullMask);
+    }
+    float inv_l0[8], inv_l1[8];
+#pragma unroll
+    for (int r = 0; r < 8; ++r) {
+        inv_l0[r] = l0[r] > 0.0f ? __frcp_rn(l0[r]) : 0.0f;
+        inv_l1[r] = l1[r] > 0.0f ? __frcp_rn(l1[r]) : 0.0f;
+    }
+#pragma unroll
+    for (int n = 0; n < WPVNt; ++n) {
+        const int d = n * 16 + (lane & 15);
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            const int qrow = qrow_off + r + (lane_hi ? 8 : 0);
+            if (d < D && qrow < tile.end) {
+                const std::int64_t offset =
+                    (static_cast<std::int64_t>(qrow) * kVisionAttentionHeads + head) * D + d;
+                out[offset] = __float2bfloat16_rn(acc[n][r] * (lane_hi ? inv_l1[r] : inv_l0[r]));
+            }
         }
     }
 }

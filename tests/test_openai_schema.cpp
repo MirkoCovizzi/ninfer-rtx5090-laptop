@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Contract test for the OpenAI serving layer: request parsing (string + parts
 // content, unsupported-feature rejection), response/chunk/models/error
 // serialization shapes, and finish_reason mapping. This is the schema boundary

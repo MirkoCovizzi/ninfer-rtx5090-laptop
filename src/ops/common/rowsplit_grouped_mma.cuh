@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Closed Q4/Q5 RowSplit grouped-MMA mechanism. Semantic Ops own the exact job
@@ -9,7 +10,8 @@
 #include "ops/linear/q5/q5_rowsplit_storage.cuh"
 #include "core/tensor.h"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -19,7 +21,7 @@ struct RowSplitGroupedMmaJob {
     const std::uint8_t* codes   = nullptr;
     const std::uint8_t* high    = nullptr;
     const std::uint8_t* scales  = nullptr;
-    __nv_bfloat16* out          = nullptr;
+    __hip_bfloat16* out          = nullptr;
     std::int32_t n              = 0;
     std::int32_t out_ld         = 0;
     std::int32_t out_row_offset = 0;
@@ -35,7 +37,7 @@ enum class RowSplitGroupedMmaCodec : std::uint8_t {
 template <class Cfg, bool FullTiles, RowSplitGroupedMmaCodec Codec = RowSplitGroupedMmaCodec::Mixed,
           int Jobs = 4>
 __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_grouped_mma_kernel(
-    const __nv_bfloat16* __restrict__ x, RowSplitGroupedMmaJob job0, RowSplitGroupedMmaJob job1,
+    const __hip_bfloat16* __restrict__ x, RowSplitGroupedMmaJob job0, RowSplitGroupedMmaJob job1,
     RowSplitGroupedMmaJob job2, RowSplitGroupedMmaJob job3, std::int32_t k, std::int32_t t,
     std::int32_t padded_k) {
     constexpr int BM   = Cfg::BM;
@@ -53,8 +55,8 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
     static_assert(GPB == 1, "grouped input GEMM requires BK=group_size=64");
     static_assert(Jobs == 2 || Jobs == 4, "grouped input GEMM supports two or four jobs");
 
-    __shared__ __align__(16) __nv_bfloat16 As[BM * BK];
-    __shared__ __align__(16) __nv_bfloat16 Bs[S][BN * BK];
+    __shared__ __align__(16) __hip_bfloat16 As[BM * BK];
+    __shared__ __align__(16) __hip_bfloat16 Bs[S][BN * BK];
     __shared__ __align__(16) std::uint8_t Cr[S][BM * 32];
     __shared__ __align__(16) std::uint8_t Hr[S][BM * HB];
     __shared__ __align__(16) std::uint8_t Sr[S][BM * SB];
@@ -90,30 +92,25 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
     const int lane = tid & 31;
     const int wm   = warp / Cfg::WARPS_N;
     const int wn   = warp % Cfg::WARPS_N;
-    const int gid  = lane >> 2;
-    const int lid  = lane & 3;
     const int m0   = tile * BM;
     const int t0   = static_cast<int>(blockIdx.y) * BN;
 
-    float acc[MT][NT][4];
+    // gfx1151 WMMA atoms are 16x16 (not 16x8). Each warp covers WMT x WNT
+    // 16x16 atoms; kWarpCols (Cfg::WN) is a multiple of the block tile width
+    // in these schedules, so WNT divides evenly.
+    constexpr int WMT = MT;
+    constexpr int WNT = (Cfg::WN + 15) / 16;
+    float acc[WMT][WNT][8];
 #pragma unroll
-    for (int mi = 0; mi < MT; ++mi) {
+    for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni) {
-            acc[mi][ni][0] = 0.0f;
-            acc[mi][ni][1] = 0.0f;
-            acc[mi][ni][2] = 0.0f;
-            acc[mi][ni][3] = 0.0f;
+        for (int ni = 0; ni < WNT; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { acc[mi][ni][r] = 0.0f; }
         }
     }
 
-    const int NKT      = padded_k / BK;
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int b_rin    = lane & 7;
-    const int b_koff   = ((lane >> 3) & 1) << 3;
+    const int NKT = padded_k / BK;
 
     auto stage_load_x = [&](int stage, int kt) {
         const int k0 = kt * BK;
@@ -124,7 +121,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
             const int kl       = kg8 * 8;
             const int col      = t0 + tl;
             const int kk       = k0 + kl;
-            __nv_bfloat16* dst = &Bs[stage][tl * BK + gemm_swz64(tl, kl)];
+            __hip_bfloat16* dst = &Bs[stage][tl * BK + gemm_swz64(tl, kl)];
             if constexpr (FullTiles) {
                 gemm_cp_async<16, Cfg>(dst, &x[static_cast<std::int64_t>(col) * k + kk]);
             } else if (col < t && kk + 8 <= k) {
@@ -239,7 +236,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
     auto dequant_to_As = [&](int stage, int kt) {
         const int scale_off = ((kt * BK >> 6) & 1) * 2;
         for (int row = warp; row < BM; row += Cfg::WARPS) {
-            __nv_bfloat162 w;
+            __hip_bfloat162 w;
             if constexpr (Codec == RowSplitGroupedMmaCodec::Q5) {
                 if constexpr (Cfg::SCALE_PAIR_LOAD) {
                     w = Q5MmaDecodeAtom::decode_pair(Cr[stage], Hr[stage],
@@ -289,29 +286,34 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
         dequant_to_As(stage, it);
         __syncthreads();
 
-        unsigned af[MT][4];
-        unsigned bf[NT][2];
+        unsigned a_frag[WMT][8];
+        unsigned b_frag[WNT][8];
+        auto load_fragments = [&](int ks) {
+#pragma unroll
+            for (int mi = 0; mi < WMT; ++mi) {
+                const int arow = wm * WM + mi * 16 + (lane >> 1);
+                if (wmma_a_lane_active(lane)) {
+                    wmma_load_a_bf16(a_frag[mi], As, arow, ks, BK, gemm_swz64);
+                }
+            }
+#pragma unroll
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int bcol = wn * WN + ni * 16 + (lane & 15);
+                wmma_load_b_bf16(b_frag[ni], Bs[stage], bcol, ks, BK, gemm_swz64);
+            }
+        };
 #pragma unroll
         for (int ki = 0; ki < KSUB; ++ki) {
             const int ks = ki * 16;
+            load_fragments(ks);
 #pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
-                const int arow = wm * WM + mi * 16 + a_rowoff;
-                ldmatrix_x4(af[mi][0], af[mi][1], af[mi][2], af[mi][3],
-                            smem_addr(&As[arow * BK + gemm_swz64(arow, ks + a_coloff)]));
-            }
+            for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int brow = wn * WN + ni * 8 + b_rin;
-                ldmatrix_x2(bf[ni][0], bf[ni][1],
-                            smem_addr(&Bs[stage][brow * BK + gemm_swz64(brow, ks + b_koff)]));
-            }
-#pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
-#pragma unroll
-                for (int ni = 0; ni < NT; ++ni) {
-                    mma_bf16(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
-                             af[mi][0], af[mi][1], af[mi][2], af[mi][3], bf[ni][0], bf[ni][1]);
+                for (int ni = 0; ni < WNT; ++ni) {
+                    WmmaC8& c = *reinterpret_cast<WmmaC8*>(acc[mi][ni]);
+                    WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag[mi]);
+                    WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag[ni]);
+                    c = wmma_bf16(a, b, c);
                 }
             }
         }
@@ -322,30 +324,30 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
     }
 
 #pragma unroll
-    for (int mi = 0; mi < MT; ++mi) {
-        const int r0 = m0 + wm * WM + mi * 16 + gid;
-        const int r1 = r0 + 8;
+    for (int mi = 0; mi < WMT; ++mi) {
+        const int row_base = m0 + wm * WM + mi * 16;
+        const int row_lo   = row_base + (lane >= 16 ? 8 : 0);
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni) {
-            const int cc0 = t0 + wn * WN + ni * 8 + 2 * lid;
-            const int cc1 = cc0 + 1;
-            auto store    = [&](int col, int row, float value) {
-                job.out[static_cast<std::int64_t>(col) * job.out_ld + job.out_row_offset + row] =
-                    __float2bfloat16_rn(value);
-            };
+        for (int ni = 0; ni < WNT; ++ni) {
+            const int col_base   = t0 + wn * WN + ni * 16;
+            const int local_col  = ni * 16 + (lane & 15);
+            const int output_col = col_base + (lane & 15);
+            // Skip overlap columns when kWarpCols is not a multiple of 16.
+            if (local_col >= Cfg::WN) { continue; }
+            const float* values = acc[mi][ni];
             if constexpr (FullTiles) {
-                store(cc0, r0, acc[mi][ni][0]);
-                store(cc1, r0, acc[mi][ni][1]);
-                store(cc0, r1, acc[mi][ni][2]);
-                store(cc1, r1, acc[mi][ni][3]);
-            } else {
-                if (r0 < job.n) {
-                    if (cc0 < t) { store(cc0, r0, acc[mi][ni][0]); }
-                    if (cc1 < t) { store(cc1, r0, acc[mi][ni][1]); }
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    job.out[static_cast<std::int64_t>(output_col) * job.out_ld +
+                            job.out_row_offset + row_lo + r] = __float2bfloat16_rn(values[r]);
                 }
-                if (r1 < job.n) {
-                    if (cc0 < t) { store(cc0, r1, acc[mi][ni][2]); }
-                    if (cc1 < t) { store(cc1, r1, acc[mi][ni][3]); }
+            } else {
+                for (int r = 0; r < 8; ++r) {
+                    const int row = row_lo + r;
+                    if (row < job.n && output_col < t) {
+                        job.out[static_cast<std::int64_t>(output_col) * job.out_ld +
+                                job.out_row_offset + row] = __float2bfloat16_rn(values[r]);
+                    }
                 }
             }
         }

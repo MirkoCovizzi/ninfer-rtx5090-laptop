@@ -1,9 +1,11 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_attention/gated_delta_net/launch.h"
 
 #include "core/device.h"
 #include "ops/linear_attention/gated_delta_net/recurrent.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 #include <stdexcept>
@@ -20,7 +22,7 @@ static_assert(std::is_trivially_copyable_v<GdnReplayFoldKernelRows>);
 
 void launch_recurrent_fp32_fixed(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                                  const Tensor& beta, float scale, Tensor& ssm_state, Tensor& out,
-                                 cudaStream_t stream) {
+                                 hipStream_t stream) {
     const std::int64_t T = q.ne[2];
     const auto heads     = head_map::of(q.ne[1], v.ne[1]);
     const dim3 grid(static_cast<unsigned>(v.ne[1]), 1, static_cast<unsigned>(kStateDim / kBlockDv));
@@ -31,24 +33,24 @@ void launch_recurrent_fp32_fixed(const Tensor& q, const Tensor& k, const Tensor&
         static_cast<const float*>(v.data), static_cast<const float*>(g.data),
         static_cast<const float*>(beta.data), static_cast<float*>(ssm_state.data),
         static_cast<float*>(out.data), T, heads, scale);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <bool NormalizeQK>
 void launch_recurrent_direct_fixed(const Tensor& q, const Tensor& k, const Tensor& v,
                                    const Tensor& g, const Tensor& beta, float scale,
                                    const Tensor& state_read, Tensor& state_write, Tensor& out,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     const auto heads = head_map::of(q.ne[1], v.ne[1]);
     const dim3 grid(static_cast<unsigned>(v.ne[1]), 1, static_cast<unsigned>(kStateDim / kBlockDv));
     const dim3 block(kWarpSize, kNumWarps, 1);
     recurrent_bf16_direct_kernel<NormalizeQK><<<grid, block, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
-        static_cast<const __nv_bfloat16*>(v.data), static_cast<const float*>(g.data),
+        static_cast<const __hip_bfloat16*>(q.data), static_cast<const __hip_bfloat16*>(k.data),
+        static_cast<const __hip_bfloat16*>(v.data), static_cast<const float*>(g.data),
         static_cast<const float*>(beta.data), static_cast<const float*>(state_read.data),
-        static_cast<float*>(state_write.data), static_cast<__nv_bfloat16*>(out.data), q.ne[2],
+        static_cast<float*>(state_write.data), static_cast<__hip_bfloat16*>(out.data), q.ne[2],
         heads, scale);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <bool NormalizeInputs, bool Batched, bool Masked>
@@ -57,7 +59,7 @@ void launch_recurrent_snapshot_fixed(const Tensor& q, const Tensor& k, const Ten
                                      Tensor& ssm_states, const Tensor& valid_columns,
                                      const Tensor& initial_state_slots,
                                      const Tensor& snapshot_base_slots, Tensor& out,
-                                     cudaStream_t stream) {
+                                     hipStream_t stream) {
     const auto heads = head_map::of(q.ne[1], v.ne[1]);
     const dim3 grid(static_cast<unsigned>(v.ne[1]), Batched ? static_cast<unsigned>(q.ne[3]) : 1U,
                     static_cast<unsigned>(kStateDim / kBlockDv));
@@ -65,23 +67,23 @@ void launch_recurrent_snapshot_fixed(const Tensor& q, const Tensor& k, const Ten
     const std::int64_t state_slot_stride =
         static_cast<std::int64_t>(kStateDim) * kStateDim * ssm_states.ne[2];
     const SnapshotAccess<Batched, Masked> access{
-        static_cast<const __nv_bfloat16*>(q.data),
-        static_cast<const __nv_bfloat16*>(k.data),
-        static_cast<const __nv_bfloat16*>(v.data),
+        static_cast<const __hip_bfloat16*>(q.data),
+        static_cast<const __hip_bfloat16*>(k.data),
+        static_cast<const __hip_bfloat16*>(v.data),
         static_cast<const float*>(g.data),
         static_cast<const float*>(beta.data),
         static_cast<float*>(ssm_states.data),
         Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr,
         static_cast<const std::int32_t*>(initial_state_slots.data),
         static_cast<const std::int32_t*>(snapshot_base_slots.data),
-        static_cast<__nv_bfloat16*>(out.data),
+        static_cast<__hip_bfloat16*>(out.data),
         heads,
         q.ne[2],
         state_slot_stride,
         scale,
     };
     recurrent_snapshot_kernel<NormalizeInputs, Batched, Masked><<<grid, block, 0, stream>>>(access);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <bool Masked>
@@ -90,7 +92,7 @@ void launch_recurrent_record_fixed(const Tensor& q, const Tensor& k, const Tenso
                                    const Tensor& ssm_states, const Tensor& valid_columns,
                                    const Tensor& initial_state_slots, Tensor& key_record,
                                    Tensor& value_record, Tensor& gate_record, Tensor& out,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     const auto heads = head_map::of(q.ne[1], v.ne[1]);
     const dim3 grid(static_cast<unsigned>(v.ne[1]), static_cast<unsigned>(q.ne[3]),
                     static_cast<unsigned>(kStateDim / kBlockDv));
@@ -98,41 +100,41 @@ void launch_recurrent_record_fixed(const Tensor& q, const Tensor& k, const Tenso
     const std::int64_t state_slot_stride =
         static_cast<std::int64_t>(kStateDim) * kStateDim * ssm_states.ne[2];
     const RecordAccess<Masked> access{
-        static_cast<const __nv_bfloat16*>(q.data),
-        static_cast<const __nv_bfloat16*>(k.data),
-        static_cast<const __nv_bfloat16*>(v.data),
+        static_cast<const __hip_bfloat16*>(q.data),
+        static_cast<const __hip_bfloat16*>(k.data),
+        static_cast<const __hip_bfloat16*>(v.data),
         static_cast<const float*>(g.data),
         static_cast<const float*>(beta.data),
         static_cast<const float*>(ssm_states.data),
         Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr,
         static_cast<const std::int32_t*>(initial_state_slots.data),
-        static_cast<__nv_bfloat16*>(key_record.data),
-        static_cast<__nv_bfloat16*>(value_record.data),
+        static_cast<__hip_bfloat16*>(key_record.data),
+        static_cast<__hip_bfloat16*>(value_record.data),
         reinterpret_cast<uint2*>(gate_record.data),
-        static_cast<__nv_bfloat16*>(out.data),
+        static_cast<__hip_bfloat16*>(out.data),
         heads,
         q.ne[2],
         state_slot_stride,
         scale,
     };
     recurrent_record_kernel<Masked><<<grid, block, 0, stream>>>(access);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Geometry>
 void launch_replay_fold_fixed(const GdnReplayRecords& records,
                               LinearAttentionStateAllLayersView states,
                               const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
-                              cudaStream_t stream) {
+                              hipStream_t stream) {
     const FoldAccess<Geometry> access{
-        static_cast<const __nv_bfloat16*>(records.key.data),
-        static_cast<const __nv_bfloat16*>(records.value.data),
+        static_cast<const __hip_bfloat16*>(records.key.data),
+        static_cast<const __hip_bfloat16*>(records.value.data),
         reinterpret_cast<const uint2*>(records.gate.data),
-        static_cast<const __nv_bfloat16*>(records.conv.data),
+        static_cast<const __hip_bfloat16*>(records.conv.data),
         static_cast<float*>(states.recurrent_layer0.data),
-        static_cast<__nv_bfloat16*>(states.conv_layer0.data),
+        static_cast<__hip_bfloat16*>(states.conv_layer0.data),
         states.recurrent_layer_stride_bytes / static_cast<std::int64_t>(sizeof(float)),
-        states.conv_layer_stride_bytes / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
+        states.conv_layer_stride_bytes / static_cast<std::int64_t>(sizeof(__hip_bfloat16)),
         records.spec.record_capacity,
         records.spec.width,
         rows,
@@ -142,20 +144,20 @@ void launch_replay_fold_fixed(const GdnReplayRecords& records,
                     static_cast<unsigned>(Geometry::kLayers * (kStateDim / kBlockDv)));
     const dim3 block(kWarpSize, kNumWarps, 1);
     recurrent_fold_kernel<Geometry><<<grid, block, 0, stream>>>(access);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
 
 void launch_recurrent_fp32(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                            const Tensor& beta, float scale, Tensor& ssm_state, Tensor& out,
-                           cudaStream_t stream) {
+                           hipStream_t stream) {
     launch_recurrent_fp32_fixed(q, k, v, g, beta, scale, ssm_state, out, stream);
 }
 
 void launch_recurrent(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                       const Tensor& beta, float scale, bool normalize_qk, Tensor& ssm_state,
-                      Tensor& out, cudaStream_t stream) {
+                      Tensor& out, hipStream_t stream) {
     if (normalize_qk) {
         launch_recurrent_direct_fixed<true>(q, k, v, g, beta, scale, ssm_state, ssm_state, out,
                                             stream);
@@ -168,7 +170,7 @@ void launch_recurrent(const Tensor& q, const Tensor& k, const Tensor& v, const T
 void launch_recurrent_inout(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                             const Tensor& beta, float scale, bool normalize_qk,
                             const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
-                            cudaStream_t stream) {
+                            hipStream_t stream) {
     if (normalize_qk) {
         launch_recurrent_direct_fixed<true>(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out,
                                             out, stream);
@@ -182,7 +184,7 @@ void launch_recurrent_snapshot(const Tensor& q, const Tensor& k, const Tensor& v
                                const Tensor& beta, float scale, bool normalize_qk,
                                Tensor& ssm_states, const Tensor& valid_columns,
                                const Tensor& initial_state_slots, const Tensor& snapshot_base_slots,
-                               Tensor& out, cudaStream_t stream) {
+                               Tensor& out, hipStream_t stream) {
     const bool dense_single = q.ne[3] == 1 && valid_columns.data == nullptr;
     if (dense_single && normalize_qk) {
         launch_recurrent_snapshot_fixed<true, false, false>(q, k, v, g, beta, scale, ssm_states,
@@ -215,7 +217,7 @@ void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, 
                              const Tensor& beta, float scale, const Tensor& ssm_states,
                              const Tensor& valid_columns, const Tensor& initial_state_slots,
                              Tensor& key_record, Tensor& value_record, Tensor& gate_record,
-                             Tensor& out, cudaStream_t stream) {
+                             Tensor& out, hipStream_t stream) {
     if (valid_columns.data == nullptr) {
         launch_recurrent_record_fixed<false>(q, k, v, g, beta, scale, ssm_states, valid_columns,
                                              initial_state_slots, key_record, value_record,
@@ -229,7 +231,7 @@ void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, 
 
 void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
                         const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
-                        cudaStream_t stream) {
+                        hipStream_t stream) {
     if (records.spec.layers == FoldGeometry48x48::kLayers &&
         records.spec.qk_heads == FoldGeometry48x48::kQkHeads &&
         records.spec.value_heads == FoldGeometry48x48::kValueHeads &&

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/l2norm.h"
 #include "ops/norm_test_common.h"
 
@@ -67,7 +68,7 @@ int run_case(const char* label, const Shape& shape, std::uint32_t seed, float sc
     Tensor tx(device_x.data, DType::BF16, {shape.d, shape.heads, shape.tokens});
     Tensor tout(output_data, DType::BF16, {shape.d, shape.heads, shape.tokens});
     ops::l2norm(tx, kEps, tout, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_reduction(label, from_device_bf16(output_data, n), reference,
                                     l2norm_bf16_criterion());
@@ -80,7 +81,7 @@ int run_case(const char* label, const Shape& shape, std::uint32_t seed, float sc
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

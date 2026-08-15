@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "serve/console_log.h"
 #include "serve/request_log.h"
 
@@ -92,8 +93,8 @@ int main() {
     memory.available_after_weights_bytes     = 1700;
     memory.available_after_startup_bytes     = 180;
     memory.planned_slack_bytes               = 100;
-    memory.cuda_graph_allowance_bytes        = 600;
-    memory.cuda_graph_observed_bytes         = 550;
+    memory.hip_graph_allowance_bytes        = 600;
+    memory.hip_graph_observed_bytes         = 550;
     memory.kv_payload_bytes                  = 400;
 
     ServerLogEnvironment environment;
@@ -103,9 +104,9 @@ int main() {
     environment.total_device_memory_bytes = 32000000000ULL;
     environment.compute_capability_major  = 12;
     environment.compute_capability_minor  = 0;
-    environment.cuda_compile_version      = "13.1";
-    environment.cuda_runtime_version      = "13.1";
-    environment.cuda_driver_version       = "13.1";
+    environment.hip_compile_version      = "13.1";
+    environment.hip_runtime_version      = "13.1";
+    environment.hip_driver_version       = "13.1";
 
     const Json server = Json::parse(
         format_server_start_json("serve-test", 1000, options, sampling_defaults, "deployment-alias",
@@ -155,14 +156,14 @@ int main() {
     failures += check(server.at("memory").at("request_transient").at("capacity_bytes") == 500 &&
                           server.at("memory").at("request_transient").at("peak_used_bytes") == 450,
                       "request transient memory missing");
-    failures += check(server.at("memory").at("cuda_graph_allowance_bytes") == 600,
+    failures += check(server.at("memory").at("hip_graph_allowance_bytes") == 600,
                       "CUDA Graph allowance missing");
     failures += check(server.at("memory").at("runtime_reservation_bytes") == 1600 &&
                           server.at("memory").at("available_after_weights_bytes") == 1700 &&
                           server.at("memory").at("available_after_startup_bytes") == 180 &&
                           server.at("memory").at("kv_capacity_headroom_bytes") == 0 &&
                           server.at("memory").at("planned_slack_bytes") == 100 &&
-                          server.at("memory").at("cuda_graph_observed_bytes") == 550,
+                          server.at("memory").at("hip_graph_observed_bytes") == 550,
                       "adaptive KV memory ledger missing");
     failures += check(server.dump().find("must-not-appear") == std::string::npos,
                       "server JSON leaked the API key");

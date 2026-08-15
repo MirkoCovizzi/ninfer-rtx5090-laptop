@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/launcher/vision_pos_embed.h"
 
 #include "ops/common/math.h"
@@ -23,7 +24,7 @@ int small_p_tiles(int patches) {
 } // namespace
 
 void vision_pos_embed_add_launch(const Tensor& table, const Tensor& indices, const Tensor& weights,
-                                 Tensor& x, cudaStream_t stream) {
+                                 Tensor& x, hipStream_t stream) {
     constexpr int block = 128;
     const bool paired =
         x.ne[0] == 1152 &&
@@ -34,30 +35,30 @@ void vision_pos_embed_add_launch(const Tensor& table, const Tensor& indices, con
             const int tiles     = small_p_tiles(x.ne[1]);
             const unsigned grid = static_cast<unsigned>(x.ne[1] * tiles);
             vision_pos_embed_add_d1152_warp_kernel<<<grid, 32, 0, stream>>>(
-                static_cast<const __nv_bfloat162*>(table.data),
+                static_cast<const __hip_bfloat162*>(table.data),
                 static_cast<const std::int32_t*>(indices.data),
-                static_cast<const float*>(weights.data), static_cast<__nv_bfloat162*>(x.data),
+                static_cast<const float*>(weights.data), static_cast<__hip_bfloat162*>(x.data),
                 x.ne[1], tiles);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         vision_pos_embed_add_d1152_kernel<block>
             <<<static_cast<unsigned>(x.ne[1]), block, 0, stream>>>(
-                static_cast<const __nv_bfloat162*>(table.data),
+                static_cast<const __hip_bfloat162*>(table.data),
                 static_cast<const std::int32_t*>(indices.data),
-                static_cast<const float*>(weights.data), static_cast<__nv_bfloat162*>(x.data),
+                static_cast<const float*>(weights.data), static_cast<__hip_bfloat162*>(x.data),
                 x.ne[1]);
-        CUDA_CHECK(cudaGetLastError());
+        HIP_CHECK(hipGetLastError());
         return;
     }
     const std::int64_t n = x.numel();
     const int grid       = static_cast<int>(std::min<std::int64_t>(
         div_up(n, static_cast<std::int64_t>(block)), std::numeric_limits<int>::max()));
     vision_pos_embed_add_kernel<<<grid, block, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(table.data),
+        static_cast<const __hip_bfloat16*>(table.data),
         static_cast<const std::int32_t*>(indices.data), static_cast<const float*>(weights.data),
-        static_cast<__nv_bfloat16*>(x.data), x.ne[0], x.ne[1], table.ne[1], n);
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<__hip_bfloat16*>(x.data), x.ne[0], x.ne[1], table.ne[1], n);
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

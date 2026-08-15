@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.h"
 
 #include "ops/common/math.cuh"
@@ -5,9 +6,10 @@
 #include "ops/common/warp.cuh"
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_gemm_mma.cuh"
 
-#include "core/device.h" // CUDA_CHECK
+#include "core/device.h" // HIP_CHECK
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstddef>
 #include <cstdint>
@@ -35,14 +37,14 @@ constexpr int k35LogicalRows = 2 * k35N;
 
 template <int TokenTile, int KSlice, int RowsPerBlock>
 __global__ void bf16_gdn_gating_proj_small_t_partial_kernel(
-    const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ a_weight,
-    const __nv_bfloat16* __restrict__ b_weight, float* __restrict__ partial, std::int32_t t) {
+    const __hip_bfloat16* __restrict__ x, const __hip_bfloat16* __restrict__ a_weight,
+    const __hip_bfloat16* __restrict__ b_weight, float* __restrict__ partial, std::int32_t t) {
     static_assert(TokenTile == kSmallTMax, "small-T token tile is fixed to 8");
     static_assert(KSlice == kSmallTKSlice, "small-T K split is fixed to 512");
     static_assert(RowsPerBlock == kSmallTRowsPerBlock, "small-T rows/block mismatch");
     constexpr int kVecsPerCol = KSlice / 8;
 
-    __shared__ __align__(16) __nv_bfloat16 x_sh[TokenTile][KSlice];
+    __shared__ __align__(16) __hip_bfloat16 x_sh[TokenTile][KSlice];
 
     const int lane   = static_cast<int>(threadIdx.x) & 31;
     const int warp   = static_cast<int>(threadIdx.x) >> 5;
@@ -66,7 +68,7 @@ __global__ void bf16_gdn_gating_proj_small_t_partial_kernel(
     if (logical_row >= kLogicalRows) { return; }
     const bool is_b = logical_row >= kN;
     const int row   = is_b ? logical_row - kN : logical_row;
-    const __nv_bfloat16* wrow =
+    const __hip_bfloat16* wrow =
         (is_b ? b_weight : a_weight) + static_cast<std::int64_t>(row) * kK + k0;
 
     float acc[TokenTile];
@@ -141,9 +143,9 @@ __global__ void bf16_gdn_gating_proj_small_t_reduce_kernel(const float* __restri
     beta[out_index]              = sigmoid(acc_b);
 }
 
-__global__ void bf16_gdn_gating_proj_gemv_kernel(const __nv_bfloat16* x,
-                                                 const __nv_bfloat16* a_weight,
-                                                 const __nv_bfloat16* b_weight, const float* A_log,
+__global__ void bf16_gdn_gating_proj_gemv_kernel(const __hip_bfloat16* x,
+                                                 const __hip_bfloat16* a_weight,
+                                                 const __hip_bfloat16* b_weight, const float* A_log,
                                                  const float* dt_bias, float* g, float* beta) {
     const int global_row = static_cast<int>(blockIdx.x);
     const bool is_b      = global_row >= kN;
@@ -154,9 +156,9 @@ __global__ void bf16_gdn_gating_proj_gemv_kernel(const __nv_bfloat16* x,
     float acc                   = 0.0f;
     constexpr int kPairs        = kK / 2;
     const std::int64_t row_base = static_cast<std::int64_t>(row) * kK;
-    const auto* x2              = reinterpret_cast<const __nv_bfloat162*>(x);
+    const auto* x2              = reinterpret_cast<const __hip_bfloat162*>(x);
     const auto* w2 =
-        reinterpret_cast<const __nv_bfloat162*>(weight + static_cast<std::int64_t>(row_base));
+        reinterpret_cast<const __hip_bfloat162*>(weight + static_cast<std::int64_t>(row_base));
     for (int p = static_cast<int>(threadIdx.x); p < kPairs; p += static_cast<int>(blockDim.x)) {
         const float2 wf = bf16x2_to_float2(w2[p]);
         const float2 xf = bf16x2_to_float2(x2[p]);
@@ -176,9 +178,9 @@ __global__ void bf16_gdn_gating_proj_gemv_kernel(const __nv_bfloat16* x,
 }
 
 template <int ColsPerTile>
-__global__ void bf16_gdn_gating_proj_35_simt_kernel(const __nv_bfloat16* __restrict__ x,
-                                                    const __nv_bfloat16* __restrict__ a_weight,
-                                                    const __nv_bfloat16* __restrict__ b_weight,
+__global__ void bf16_gdn_gating_proj_35_simt_kernel(const __hip_bfloat16* __restrict__ x,
+                                                    const __hip_bfloat16* __restrict__ a_weight,
+                                                    const __hip_bfloat16* __restrict__ b_weight,
                                                     const float* __restrict__ A_log,
                                                     const float* __restrict__ dt_bias,
                                                     float* __restrict__ g, float* __restrict__ beta,
@@ -261,7 +263,7 @@ void launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                              const Tensor* norm_weight, float norm_eps, Tensor* normalized_x,
                              const Weight& a_weight, const Weight& b_weight, const Tensor& A_log,
                              const Tensor& dt_bias, void* workspace, Tensor& g, Tensor& beta,
-                             cudaStream_t stream) {
+                             hipStream_t stream) {
     const std::int32_t t     = x.ne[1];
     constexpr int kBlockN    = Geometry::kBlockN;
     constexpr int kSmemBytes = kBf16GdnSmemBytes<kBlockN>;
@@ -271,33 +273,33 @@ void launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                     static_cast<unsigned>(SplitK));
     auto launch = [&](auto full_tokens) {
         constexpr bool FullTokens     = decltype(full_tokens)::value;
-        static const cudaError_t attr = cudaFuncSetAttribute(
+        static const hipError_t attr = hipFuncSetAttribute(reinterpret_cast<const void*>(
             bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps,
-                                                 NormalizeInput, NormTokenCapacity>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes);
-        CUDA_CHECK(attr);
+                                                 NormalizeInput, NormTokenCapacity>),
+            hipFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes);
+        HIP_CHECK(attr);
         if constexpr (SplitK > 1) {
-            cudaLaunchConfig_t config{};
+            hipLaunchConfig_t config{};
             config.gridDim          = grid;
             config.blockDim         = block;
             config.dynamicSmemBytes = kSmemBytes;
             config.stream           = stream;
-            cudaLaunchAttribute cooperative{};
-            cooperative.id              = cudaLaunchAttributeCooperative;
+            hipLaunchAttribute cooperative{};
+            cooperative.id              = hipLaunchAttributeCooperative;
             cooperative.val.cooperative = 1;
             config.attrs                = &cooperative;
             config.numAttrs             = 1;
-            CUDA_CHECK(cudaLaunchKernelEx(
+            HIP_CHECK(hipLaunchKernelEx(
                 &config,
                 bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps,
                                                      NormalizeInput, NormTokenCapacity>,
-                static_cast<const __nv_bfloat16*>(x.data),
-                norm_weight != nullptr ? static_cast<const __nv_bfloat16*>(norm_weight->data)
-                                       : static_cast<const __nv_bfloat16*>(nullptr),
-                normalized_x != nullptr ? static_cast<__nv_bfloat16*>(normalized_x->data)
-                                        : static_cast<__nv_bfloat16*>(nullptr),
-                norm_eps, static_cast<const __nv_bfloat16*>(a_weight.qdata),
-                static_cast<const __nv_bfloat16*>(b_weight.qdata),
+                static_cast<const __hip_bfloat16*>(x.data),
+                norm_weight != nullptr ? static_cast<const __hip_bfloat16*>(norm_weight->data)
+                                       : static_cast<const __hip_bfloat16*>(nullptr),
+                normalized_x != nullptr ? static_cast<__hip_bfloat16*>(normalized_x->data)
+                                        : static_cast<__hip_bfloat16*>(nullptr),
+                norm_eps, static_cast<const __hip_bfloat16*>(a_weight.qdata),
+                static_cast<const __hip_bfloat16*>(b_weight.qdata),
                 static_cast<const float*>(A_log.data), static_cast<const float*>(dt_bias.data),
                 static_cast<float*>(workspace), static_cast<float*>(g.data),
                 static_cast<float*>(beta.data), t));
@@ -305,13 +307,13 @@ void launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
             bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps,
                                                  NormalizeInput, NormTokenCapacity>
                 <<<grid, block, kSmemBytes, stream>>>(
-                    static_cast<const __nv_bfloat16*>(x.data),
-                    norm_weight != nullptr ? static_cast<const __nv_bfloat16*>(norm_weight->data)
-                                           : static_cast<const __nv_bfloat16*>(nullptr),
-                    normalized_x != nullptr ? static_cast<__nv_bfloat16*>(normalized_x->data)
-                                            : static_cast<__nv_bfloat16*>(nullptr),
-                    norm_eps, static_cast<const __nv_bfloat16*>(a_weight.qdata),
-                    static_cast<const __nv_bfloat16*>(b_weight.qdata),
+                    static_cast<const __hip_bfloat16*>(x.data),
+                    norm_weight != nullptr ? static_cast<const __hip_bfloat16*>(norm_weight->data)
+                                           : static_cast<const __hip_bfloat16*>(nullptr),
+                    normalized_x != nullptr ? static_cast<__hip_bfloat16*>(normalized_x->data)
+                                            : static_cast<__hip_bfloat16*>(nullptr),
+                    norm_eps, static_cast<const __hip_bfloat16*>(a_weight.qdata),
+                    static_cast<const __hip_bfloat16*>(b_weight.qdata),
                     static_cast<const float*>(A_log.data), static_cast<const float*>(dt_bias.data),
                     static_cast<float*>(workspace), static_cast<float*>(g.data),
                     static_cast<float*>(beta.data), t);
@@ -325,7 +327,7 @@ void launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
         throw std::invalid_argument(
             "BF16 GDN gating MMA requires Full or Predicated token variant");
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
@@ -333,23 +335,23 @@ void launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
 void bf16_gdn_gating_proj_gemv_launch(const Tensor& x, const Weight& a_weight,
                                       const Weight& b_weight, const Tensor& A_log,
                                       const Tensor& dt_bias, Tensor& g, Tensor& beta,
-                                      cudaStream_t stream) {
+                                      hipStream_t stream) {
     require_shape(a_weight, "a_weight");
     require_shape(b_weight, "b_weight");
     bf16_gdn_gating_proj_gemv_kernel<<<2 * kN, kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data),
-        static_cast<const __nv_bfloat16*>(a_weight.qdata),
-        static_cast<const __nv_bfloat16*>(b_weight.qdata), static_cast<const float*>(A_log.data),
+        static_cast<const __hip_bfloat16*>(x.data),
+        static_cast<const __hip_bfloat16*>(a_weight.qdata),
+        static_cast<const __hip_bfloat16*>(b_weight.qdata), static_cast<const float*>(A_log.data),
         static_cast<const float*>(dt_bias.data), static_cast<float*>(g.data),
         static_cast<float*>(beta.data));
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void bf16_gdn_gating_proj_small_t_split10_launch(const Tensor& x, const Weight& a_weight,
                                                  const Weight& b_weight, const Tensor& A_log,
                                                  const Tensor& dt_bias, void* workspace,
                                                  std::size_t workspace_bytes, Tensor& g,
-                                                 Tensor& beta, cudaStream_t stream) {
+                                                 Tensor& beta, hipStream_t stream) {
     require_shape(a_weight, "a_weight");
     require_shape(b_weight, "b_weight");
     const std::int32_t t       = x.ne[1];
@@ -365,10 +367,10 @@ void bf16_gdn_gating_proj_small_t_split10_launch(const Tensor& x, const Weight& 
                       div_up(t, kSmallTMax));
     bf16_gdn_gating_proj_small_t_partial_kernel<kSmallTMax, kSmallTKSlice, kSmallTRowsPerBlock>
         <<<partial_grid, partial_block, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(a_weight.qdata),
-            static_cast<const __nv_bfloat16*>(b_weight.qdata), static_cast<float*>(workspace), t);
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(a_weight.qdata),
+            static_cast<const __hip_bfloat16*>(b_weight.qdata), static_cast<float*>(workspace), t);
+    HIP_CHECK(hipGetLastError());
 
     constexpr int kReduceThreads = 128;
     const int reduce_elems       = kN * t;
@@ -377,14 +379,14 @@ void bf16_gdn_gating_proj_small_t_split10_launch(const Tensor& x, const Weight& 
         static_cast<const float*>(workspace), static_cast<const float*>(A_log.data),
         static_cast<const float*>(dt_bias.data), static_cast<float*>(g.data),
         static_cast<float*>(beta.data), t);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void bf16_gdn_gating_proj_mma_split8_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                                             const Weight& a_weight, const Weight& b_weight,
                                             const Tensor& A_log, const Tensor& dt_bias,
                                             void* workspace, Tensor& g, Tensor& beta,
-                                            cudaStream_t stream) {
+                                            hipStream_t stream) {
     launch_bf16_prefill_mma<Bf16Gdn27Geometry, 8, 8>(variant, x, nullptr, 0.0F, nullptr, a_weight,
                                                      b_weight, A_log, dt_bias, workspace, g, beta,
                                                      stream);
@@ -394,7 +396,7 @@ void bf16_gdn_gating_proj_mma_split4_launch(Bf16GdnGatingTokenVariant variant, c
                                             const Weight& a_weight, const Weight& b_weight,
                                             const Tensor& A_log, const Tensor& dt_bias,
                                             void* workspace, Tensor& g, Tensor& beta,
-                                            cudaStream_t stream) {
+                                            hipStream_t stream) {
     launch_bf16_prefill_mma<Bf16Gdn27Geometry, 4>(variant, x, nullptr, 0.0F, nullptr, a_weight,
                                                   b_weight, A_log, dt_bias, workspace, g, beta,
                                                   stream);
@@ -404,7 +406,7 @@ void bf16_gdn_gating_proj_mma_split2_launch(Bf16GdnGatingTokenVariant variant, c
                                             const Weight& a_weight, const Weight& b_weight,
                                             const Tensor& A_log, const Tensor& dt_bias,
                                             void* workspace, Tensor& g, Tensor& beta,
-                                            cudaStream_t stream) {
+                                            hipStream_t stream) {
     launch_bf16_prefill_mma<Bf16Gdn27Geometry, 2>(variant, x, nullptr, 0.0F, nullptr, a_weight,
                                                   b_weight, A_log, dt_bias, workspace, g, beta,
                                                   stream);
@@ -413,7 +415,7 @@ void bf16_gdn_gating_proj_mma_split2_launch(Bf16GdnGatingTokenVariant variant, c
 void bf16_gdn_gating_proj_mma_unsplit_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                                              const Weight& a_weight, const Weight& b_weight,
                                              const Tensor& A_log, const Tensor& dt_bias, Tensor& g,
-                                             Tensor& beta, cudaStream_t stream) {
+                                             Tensor& beta, hipStream_t stream) {
     launch_bf16_prefill_mma<Bf16Gdn27Geometry, 1, 8>(variant, x, nullptr, 0.0F, nullptr, a_weight,
                                                      b_weight, A_log, dt_bias, nullptr, g, beta,
                                                      stream);
@@ -422,31 +424,31 @@ void bf16_gdn_gating_proj_mma_unsplit_launch(Bf16GdnGatingTokenVariant variant, 
 template <int ColsPerTile>
 void launch_35_simt(const Tensor& x, const Weight& a_weight, const Weight& b_weight,
                     const Tensor& A_log, const Tensor& dt_bias, Tensor& g, Tensor& beta,
-                    cudaStream_t stream) {
+                    hipStream_t stream) {
     require_shape35(a_weight, "a_weight");
     require_shape35(b_weight, "b_weight");
     const dim3 grid(static_cast<unsigned>(k35LogicalRows),
                     static_cast<unsigned>(div_up(x.ne[1], ColsPerTile)), 1u);
     bf16_gdn_gating_proj_35_simt_kernel<ColsPerTile><<<grid, 32, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data),
-        static_cast<const __nv_bfloat16*>(a_weight.qdata),
-        static_cast<const __nv_bfloat16*>(b_weight.qdata), static_cast<const float*>(A_log.data),
+        static_cast<const __hip_bfloat16*>(x.data),
+        static_cast<const __hip_bfloat16*>(a_weight.qdata),
+        static_cast<const __hip_bfloat16*>(b_weight.qdata), static_cast<const float*>(A_log.data),
         static_cast<const float*>(dt_bias.data), static_cast<float*>(g.data),
         static_cast<float*>(beta.data), x.ne[1]);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void bf16_gdn_gating_proj_35_simt_c4_launch(const Tensor& x, const Weight& a_weight,
                                             const Weight& b_weight, const Tensor& A_log,
                                             const Tensor& dt_bias, Tensor& g, Tensor& beta,
-                                            cudaStream_t stream) {
+                                            hipStream_t stream) {
     launch_35_simt<4>(x, a_weight, b_weight, A_log, dt_bias, g, beta, stream);
 }
 
 void bf16_gdn_gating_proj_35_simt_c8_launch(const Tensor& x, const Weight& a_weight,
                                             const Weight& b_weight, const Tensor& A_log,
                                             const Tensor& dt_bias, Tensor& g, Tensor& beta,
-                                            cudaStream_t stream) {
+                                            hipStream_t stream) {
     launch_35_simt<8>(x, a_weight, b_weight, A_log, dt_bias, g, beta, stream);
 }
 
@@ -454,7 +456,7 @@ void bf16_gdn_gating_proj_35_mma_split32_launch(Bf16GdnGatingTokenVariant varian
                                                 const Weight& a_weight, const Weight& b_weight,
                                                 const Tensor& A_log, const Tensor& dt_bias,
                                                 void* workspace, Tensor& g, Tensor& beta,
-                                                cudaStream_t stream) {
+                                                hipStream_t stream) {
     require_shape35(a_weight, "a_weight");
     require_shape35(b_weight, "b_weight");
     launch_bf16_prefill_mma<Bf16Gdn35Geometry, 32, 8>(variant, x, nullptr, 0.0F, nullptr, a_weight,
@@ -467,7 +469,7 @@ void bf16_gdn_norm_gating_proj_35_mma_split32_launch(Bf16GdnGatingTokenVariant v
                                                      float eps, Tensor& h, const Weight& a_weight,
                                                      const Weight& b_weight, const Tensor& A_log,
                                                      const Tensor& dt_bias, void* workspace,
-                                                     Tensor& g, Tensor& beta, cudaStream_t stream) {
+                                                     Tensor& g, Tensor& beta, hipStream_t stream) {
     require_shape35(a_weight, "a_weight");
     require_shape35(b_weight, "b_weight");
     const auto launch = [&](auto token_capacity) {
@@ -493,7 +495,7 @@ void bf16_gdn_gating_proj_35_mma_split16_launch(Bf16GdnGatingTokenVariant varian
                                                 const Weight& a_weight, const Weight& b_weight,
                                                 const Tensor& A_log, const Tensor& dt_bias,
                                                 void* workspace, Tensor& g, Tensor& beta,
-                                                cudaStream_t stream) {
+                                                hipStream_t stream) {
     require_shape35(a_weight, "a_weight");
     require_shape35(b_weight, "b_weight");
     launch_bf16_prefill_mma<Bf16Gdn35Geometry, 16, 8>(variant, x, nullptr, 0.0F, nullptr, a_weight,
@@ -505,7 +507,7 @@ void bf16_gdn_gating_proj_35_mma_split8_launch(Bf16GdnGatingTokenVariant variant
                                                const Weight& a_weight, const Weight& b_weight,
                                                const Tensor& A_log, const Tensor& dt_bias,
                                                void* workspace, Tensor& g, Tensor& beta,
-                                               cudaStream_t stream) {
+                                               hipStream_t stream) {
     require_shape35(a_weight, "a_weight");
     require_shape35(b_weight, "b_weight");
     launch_bf16_prefill_mma<Bf16Gdn35Geometry, 8, 8>(variant, x, nullptr, 0.0F, nullptr, a_weight,
@@ -517,7 +519,7 @@ void bf16_gdn_gating_proj_35_mma_split4_launch(Bf16GdnGatingTokenVariant variant
                                                const Weight& a_weight, const Weight& b_weight,
                                                const Tensor& A_log, const Tensor& dt_bias,
                                                void* workspace, Tensor& g, Tensor& beta,
-                                               cudaStream_t stream) {
+                                               hipStream_t stream) {
     require_shape35(a_weight, "a_weight");
     require_shape35(b_weight, "b_weight");
     launch_bf16_prefill_mma<Bf16Gdn35Geometry, 4, 8>(variant, x, nullptr, 0.0F, nullptr, a_weight,
@@ -529,7 +531,7 @@ void bf16_gdn_gating_proj_35_mma_split2_launch(Bf16GdnGatingTokenVariant variant
                                                const Weight& a_weight, const Weight& b_weight,
                                                const Tensor& A_log, const Tensor& dt_bias,
                                                void* workspace, Tensor& g, Tensor& beta,
-                                               cudaStream_t stream) {
+                                               hipStream_t stream) {
     require_shape35(a_weight, "a_weight");
     require_shape35(b_weight, "b_weight");
     launch_bf16_prefill_mma<Bf16Gdn35Geometry, 2, 8>(variant, x, nullptr, 0.0F, nullptr, a_weight,
@@ -540,7 +542,7 @@ void bf16_gdn_gating_proj_35_mma_split2_launch(Bf16GdnGatingTokenVariant variant
 void bf16_gdn_gating_proj_35_mma_unsplit_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                                                 const Weight& a_weight, const Weight& b_weight,
                                                 const Tensor& A_log, const Tensor& dt_bias,
-                                                Tensor& g, Tensor& beta, cudaStream_t stream) {
+                                                Tensor& g, Tensor& beta, hipStream_t stream) {
     require_shape35(a_weight, "a_weight");
     require_shape35(b_weight, "b_weight");
     launch_bf16_prefill_mma<Bf16Gdn35Geometry, 1, 8>(variant, x, nullptr, 0.0F, nullptr, a_weight,

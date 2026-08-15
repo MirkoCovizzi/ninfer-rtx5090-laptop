@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Test-owned packed-weight fixtures for every registered quantized Weight format. Physical

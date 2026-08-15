@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 
 #include "core/device.h"
@@ -8,7 +9,8 @@
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
 #include "ops/linear/nvfp4/nvfp4_w4a4_plan.h"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -32,11 +34,11 @@ struct Nvfp4SwiGluRows {
 
 union Nvfp4SwiGluBf16Pair {
     unsigned bits;
-    __nv_bfloat162 values;
+    __hip_bfloat162 values;
 };
 
 struct Nvfp4SwiGluOutput {
-    __nv_bfloat16* data;
+    __hip_bfloat16* data;
 
     __device__ __forceinline__ unsigned combine(unsigned gate_bits, unsigned up_bits) const {
         Nvfp4SwiGluBf16Pair gate{gate_bits};
@@ -59,26 +61,26 @@ struct Nvfp4SwiGluOutput {
 
 template <class Schedule>
 void launch_gemm(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace workspace,
-                 std::int32_t tokens, cudaStream_t stream) {
+                 std::int32_t tokens, hipStream_t stream) {
     constexpr int kPairRows = Schedule::kBlockN / 2;
     static_assert(kPairRows == Nvfp4SwiGluRows::kRowsPerBranch);
     const dim3 grid(kIntermediate / kPairRows,
                     (tokens + Schedule::kBlockM - 1) / Schedule::kBlockM);
     const Nvfp4W4a4MaterializedActivation activation{workspace.codes, workspace.scales};
     const Nvfp4SwiGluRows row_policy{};
-    const Nvfp4SwiGluOutput output{static_cast<__nv_bfloat16*>(out.data)};
+    const Nvfp4SwiGluOutput output{static_cast<__hip_bfloat16*>(out.data)};
     const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
     nvfp4_w4a4_mma_kernel<Geometry, Schedule, Nvfp4IdentityEpilogue, Nvfp4SwiGluOutput,
                           Nvfp4SwiGluRows, true><<<grid, Schedule::kThreads, 0, stream>>>(
         activation, static_cast<const std::uint8_t*>(weight.qdata),
         static_cast<const std::uint8_t*>(weight.scales), tokens, alpha, Nvfp4IdentityEpilogue{},
         output, row_policy);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Schedule>
 void launch(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceArena& workspace,
-            cudaStream_t stream) {
+            hipStream_t stream) {
     auto scope = workspace.scope();
     const Nvfp4W4a4Workspace scratch =
         allocate_nvfp4_w4a4_workspace(workspace, x.ne[1], Geometry::kInputRows);
@@ -89,7 +91,7 @@ void launch(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceArena& 
 } // namespace
 
 void nvfp4_linear_swiglu_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& out,
-                                     WorkspaceArena& workspace, cudaStream_t stream) {
+                                     WorkspaceArena& workspace, hipStream_t stream) {
     launch<M48N64>(x, weight, out, workspace, stream);
 }
 

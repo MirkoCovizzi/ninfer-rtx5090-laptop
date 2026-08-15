@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/arena.h"
@@ -6,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <cuda_runtime.h> // cudaStream_t
+#include <hip/hip_runtime.h> // hipStream_t
 
 namespace ninfer::ops {
 
@@ -74,6 +75,6 @@ struct SamplingConfig {
  */
 void sample(const Tensor& logits, Tensor& out, std::int32_t token_domain,
             const SamplingConfig* configs, const Tensor& logical_positions, std::int32_t purpose,
-            WorkspaceArena& workspace, cudaStream_t stream);
+            WorkspaceArena& workspace, hipStream_t stream);
 
 } // namespace ninfer::ops

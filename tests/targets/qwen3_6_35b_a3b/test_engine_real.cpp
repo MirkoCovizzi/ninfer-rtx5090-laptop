@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/engine.h"
 
 #include <cstdint>
@@ -21,7 +22,7 @@ ninfer::EngineOptions engine_options(const char* artifact) {
     options.speculative.draft_tokens  = 3;
     options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
     options.enable_vision             = true;
-    options.use_cuda_graph            = true;
+    options.use_hip_graph            = true;
     return options;
 }
 
@@ -72,7 +73,7 @@ int verify_loaded_product(const ninfer::Engine& engine) {
         memory.sequence.used_bytes > memory.sequence.capacity_bytes ||
         memory.workspace.capacity_bytes == 0 || memory.request_transient.capacity_bytes == 0 ||
         memory.request_transient.used_bytes != 0 || memory.workspace_logical_peak_bytes != 0 ||
-        memory.cuda_graph_allowance_bytes == 0) {
+        memory.hip_graph_allowance_bytes == 0) {
         std::cerr << "35B Engine construction has an invalid memory summary\n";
         return 1;
     }
@@ -190,7 +191,7 @@ int exercise_maximum_configuration(const char* artifact) {
         memory.sequence.used_bytes == 0 ||
         memory.sequence.used_bytes > memory.sequence.capacity_bytes ||
         memory.workspace.capacity_bytes == 0 || memory.request_transient.capacity_bytes == 0 ||
-        memory.request_transient.used_bytes != 0 || memory.cuda_graph_allowance_bytes == 0) {
+        memory.request_transient.used_bytes != 0 || memory.hip_graph_allowance_bytes == 0) {
         std::cerr << "35B maximum configuration does not match the planned 256K layout: context="
                   << memory.max_context << " kv_payload=" << memory.kv_payload_bytes
                   << " sequence=" << memory.sequence.capacity_bytes

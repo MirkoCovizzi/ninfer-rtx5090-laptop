@@ -50,7 +50,7 @@ int scatter_case(std::int32_t rows, const std::vector<std::int32_t>& indices,
     Tensor indices_tensor(device_indices.data(), DType::I32, {source_columns});
     Tensor destination_tensor(device_destination.data(), DType::BF16, {rows, destination_columns});
     ops::scatter(source_tensor, indices_tensor, destination_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label =
         "scatter D=" + std::to_string(rows) + " V=" + std::to_string(source_columns);
@@ -88,7 +88,7 @@ int extract_case(std::int32_t source_rows, std::int32_t destination_rows,
     Tensor source_tensor(device_source.data(), DType::BF16, {source_rows, tokens});
     Tensor destination_tensor(device_destination.data(), DType::BF16, {destination_rows, tokens});
     ops::extract_bf16_columns(source_tensor, source_offset, destination_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = "extract_bf16_columns source=" + std::to_string(source_rows) +
                               " offset=" + std::to_string(source_offset) +
@@ -159,7 +159,7 @@ int batch_prefix_case() {
     Tensor counts_tensor(device_counts.data(), DType::I32, {batch});
     ops::prepare_ragged_prefix(pool_tensor, lanes_tensor, starts_tensor, ends_tensor,
                                gathered_tensor, positions_tensor, counts_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     auto expected_gathered = source;
     std::fill(expected_gathered.begin() + static_cast<std::ptrdiff_t>(2 * rows),
@@ -189,7 +189,7 @@ int batch_prefix_case() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

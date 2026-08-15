@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 
 #include "ops/op_tester.h"
@@ -270,7 +271,7 @@ int run_projection_case(const Geometry& geometry, std::int32_t tokens, std::uint
         ops::gdn_gating_proj(tensor_x, weight_a, weight_b, tensor_a_log, tensor_dt_bias, workspace,
                              tensor_g, tensor_beta, nullptr);
     }
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::vector<double> full_g    = read_fp32(device_g.data(), output_elements);
     const std::vector<double> full_beta = read_fp32(device_beta.data(), output_elements);
@@ -367,7 +368,7 @@ int run_norm_projection_case(const Geometry& geometry, std::int32_t tokens, std:
                                   tensor_a_log, tensor_dt_bias, workspace, tensor_h, tensor_g,
                                   tensor_beta, nullptr);
     }
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label =
         std::string("gdn_norm_gating_proj ") + geometry.label + " T=" + std::to_string(tokens);
@@ -429,7 +430,7 @@ int verify_workspace_capacity_contract(const Geometry& geometry,
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

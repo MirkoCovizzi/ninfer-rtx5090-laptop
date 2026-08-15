@@ -2,7 +2,8 @@
 
 #include "ops/common/mma.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 namespace ninfer::ops::detail {
 

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/mtp_round.h"
 #include "ops/launcher/mtp_round.h"
 
@@ -49,7 +50,7 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
                             const Tensor& rope_deltas, Tensor& alignment_ids, Tensor& next_extents,
                             Tensor& ar_positions, Tensor& ar_rope_positions,
                             Tensor& ar_valid_columns, std::int32_t max_context,
-                            cudaStream_t stream) {
+                            hipStream_t stream) {
     constexpr const char* op = "mtp_prepare_next_round";
     const std::int32_t T     = verify_ids.ne[0];
     const std::int32_t batch = verify_ids.ne[1];

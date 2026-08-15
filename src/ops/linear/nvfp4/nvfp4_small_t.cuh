@@ -1,9 +1,11 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/linear/nvfp4/nvfp4_gemv.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -24,7 +26,7 @@ struct Nvfp4SmallTSharedStorage {
     static constexpr int kPartialTokens = Schedule::kWarpsPerRow > 1 ? Schedule::kTokenTile : 1;
 
     Nvfp4GemvSharedStorage<Geometry, Schedule> gemv;
-    alignas(16) __nv_bfloat16 activation[kActivationElements];
+    alignas(16) __hip_bfloat16 activation[kActivationElements];
     float partials[Schedule::kRowGroupsPerCta][Schedule::kRowsPerWarp][kPartialTokens]
                   [Schedule::kWarpsPerRow];
 };
@@ -37,7 +39,7 @@ struct Nvfp4ActivationPack {
 
 template <int Values>
 __device__ __forceinline__ Nvfp4ActivationPack<Values>
-load_nvfp4_activation_pack(const __nv_bfloat16* pointer) {
+load_nvfp4_activation_pack(const __hip_bfloat16* pointer) {
     Nvfp4ActivationPack<Values> result;
 #pragma unroll
     for (int chunk = 0; chunk < Values / 8; ++chunk) {
@@ -52,7 +54,7 @@ load_nvfp4_activation_pack(const __nv_bfloat16* pointer) {
 
 template <class Geometry, int ActiveTokens, class Schedule>
 __device__ __forceinline__ void compute_nvfp4_small_t_rows(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales,
     Nvfp4SmallTSharedStorage<Geometry, ActiveTokens, Schedule>& shared,
     float inverse_weight_divisor, const int (&parent_rows)[Schedule::kRowsPerWarp], int flat_row0,
@@ -79,7 +81,7 @@ __device__ __forceinline__ void compute_nvfp4_small_t_rows(
                 const int local_pack  = task - local_token * kPacksPerToken;
                 const int token       = token0 + local_token;
                 if (token < ActiveTokens) {
-                    const __nv_bfloat16* source =
+                    const __hip_bfloat16* source =
                         x + static_cast<std::int64_t>(token) * Geometry::kInputRows +
                         phase * kValuesPerPhase + local_pack * 8;
                     destination[task] = load_vec<uint4>(source);
@@ -209,7 +211,7 @@ template <class Geometry, int ActiveTokens, class Schedule, class Epilogue, clas
           Nvfp4SmallTFinalization Finalization = Nvfp4SmallTFinalization::Elementwise>
 __global__
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_small_t_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales, float inverse_weight_divisor, Epilogue epilogue,
     OutputPolicy output) {
     static_assert(ActiveTokens >= 2);

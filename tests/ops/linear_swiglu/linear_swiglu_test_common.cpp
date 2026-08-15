@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/linear_swiglu_test_common.h"
 
 #include "core/arena.h"
@@ -5,7 +6,7 @@
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cmath>
@@ -37,7 +38,7 @@ constexpr ReductionCriterion tolerance_for(ActivationCompute activation_compute)
     throw std::invalid_argument("linear_swiglu test: unknown activation compute profile");
 }
 
-bool cuda_available() { return !test::cuda_unavailable(); }
+bool hip_available() { return !test::hip_unavailable(); }
 
 std::size_t checked_elements(std::int32_t first, std::int32_t second, const char* label) {
     if (first <= 0 || second <= 0) {
@@ -176,8 +177,8 @@ std::vector<double> linear_swiglu_oracle_fp64(const Profile& profile,
 std::vector<double> read_bf16_output(const test::GuardedDeviceBuffer& output,
                                      std::size_t elements) {
     std::vector<std::uint16_t> bits(elements);
-    cuda_check(cudaMemcpy(bits.data(), output.data(), elements * sizeof(std::uint16_t),
-                          cudaMemcpyDeviceToHost),
+    hip_check(hipMemcpy(bits.data(), output.data(), elements * sizeof(std::uint16_t),
+                          hipMemcpyDeviceToHost),
                "copy LinearSwiGLU output");
     std::vector<double> values(elements);
     for (std::size_t index = 0; index < elements; ++index) {
@@ -233,7 +234,7 @@ int run_profile(std::string_view label, const Profile& profile,
                 std::span<const std::int32_t> token_cases) {
     validate_profile(profile);
     if (token_cases.empty()) { throw std::invalid_argument("linear_swiglu test: no token cases"); }
-    if (!cuda_available()) {
+    if (!hip_available()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
@@ -287,7 +288,7 @@ int run_profile(std::string_view label, const Profile& profile,
         const std::string case_label = std::string(label) + " T=" + std::to_string(tokens);
         try {
             ops::linear_swiglu(x, weight, destination, policy, workspace, nullptr);
-            test::cuda_check(cudaDeviceSynchronize(), "synchronize LinearSwiGLU");
+            test::hip_check(hipDeviceSynchronize(), "synchronize LinearSwiGLU");
         } catch (const std::exception& error) {
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
             ++failures;

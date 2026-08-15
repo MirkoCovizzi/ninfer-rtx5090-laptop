@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "product/load_progress/load_progress.h"
 
 #include <unistd.h>

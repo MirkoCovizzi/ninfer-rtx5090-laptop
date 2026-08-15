@@ -1,20 +1,22 @@
+#include "hip/hip_runtime.h"
 #include "ops/attn_input_proj/bf16/bf16_attn_input_plan.h"
 
 #include "core/device.h"
 #include "ops/linear/bf16/bf16_gemv.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 namespace ninfer::ops::detail {
 namespace {
 
 struct Bf16AttentionInputOutput {
-    __nv_bfloat16* query;
-    __nv_bfloat16* key;
-    __nv_bfloat16* gate;
-    __nv_bfloat16* value;
+    __hip_bfloat16* query;
+    __hip_bfloat16* key;
+    __hip_bfloat16* gate;
+    __hip_bfloat16* value;
 
-    __device__ __forceinline__ void store(std::int32_t parent_row, __nv_bfloat16 result) const {
+    __device__ __forceinline__ void store(std::int32_t parent_row, __hip_bfloat16 result) const {
         constexpr std::int32_t kQueryRows  = 6144;
         constexpr std::int32_t kKeyRows    = 1024;
         constexpr std::int32_t kGateRows   = 6144;
@@ -37,23 +39,23 @@ struct Bf16AttentionInputOutput {
 } // namespace
 
 void bf16_attn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                   Tensor& k, Tensor& v, cudaStream_t stream) {
+                                   Tensor& k, Tensor& v, hipStream_t stream) {
     using Geometry = Bf16GemvGeometry<14336, 5120>;
     using Schedule = Bf16LinearDecodeSchedule<Geometry>;
     static_assert((6144 % Schedule::kRowsPerCta) == 0);
     static_assert((1024 % Schedule::kRowsPerCta) == 0);
 
     const Bf16AttentionInputOutput output{
-        static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data),
-        static_cast<__nv_bfloat16*>(gate.data),
-        static_cast<__nv_bfloat16*>(v.data),
+        static_cast<__hip_bfloat16*>(q.data),
+        static_cast<__hip_bfloat16*>(k.data),
+        static_cast<__hip_bfloat16*>(gate.data),
+        static_cast<__hip_bfloat16*>(v.data),
     };
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
     bf16_gemv_kernel<Geometry, Schedule><<<kBlocks, Schedule::kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const __nv_bfloat16*>(weight.qdata),
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const __hip_bfloat16*>(weight.qdata),
         output);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

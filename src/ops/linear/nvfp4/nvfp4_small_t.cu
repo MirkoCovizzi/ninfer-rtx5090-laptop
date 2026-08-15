@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear/nvfp4/nvfp4_launch.h"
 
 #include "core/device.h"
@@ -11,24 +12,24 @@
 namespace ninfer::ops::detail {
 namespace {
 
-using Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+using Launch = void (*)(const Tensor&, const Weight&, Tensor&, hipStream_t);
 
 template <class Geometry, int ActiveTokens>
-void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     using Schedule = typename Nvfp4LinearSmallTProductionSchedule<Geometry, ActiveTokens>::Type;
     constexpr int kTokenTiles = (ActiveTokens + Schedule::kTokenTile - 1) / Schedule::kTokenTile;
     constexpr int kBlocks     = (Geometry::kOutputRows / Schedule::kRowsPerCta) * kTokenTiles;
 
-    const Nvfp4ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data),
+    const Nvfp4ContiguousOutput output{static_cast<__hip_bfloat16*>(out.data),
                                        Geometry::kOutputRows};
     const float inverse_weight_divisor = 1.0F / weight.weight_scale_divisor;
     nvfp4_small_t_kernel<Geometry, ActiveTokens, Schedule>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), inverse_weight_divisor,
             Nvfp4IdentityEpilogue{}, output);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Geometry, std::size_t... Offsets>
@@ -46,7 +47,7 @@ const auto& launchers() {
 
 } // namespace
 
-void launch_nvfp4_small_t(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_nvfp4_small_t(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     const std::size_t index = static_cast<std::size_t>(x.ne[1] - kNvfp4FirstSmallT);
     switch (resolve_nvfp4_problem(weight.n, weight.k)) {
     case Nvfp4Problem::AttnInput:

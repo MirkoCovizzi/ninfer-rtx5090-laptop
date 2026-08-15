@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/add_bias.h"
 #include "ninfer_bench_common.h"
 #include "ops/common/bf16_vector.cuh"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -60,7 +61,7 @@ void run(int d, int columns, bool control) {
     Tensor tb(bias.p, DType::BF16, {d});
 
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 constexpr int block   = 256;
                 const int packs       = d / 8;
@@ -115,7 +116,7 @@ void run_matrix(bool control) {
 
 int main(int argc, char** argv) {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

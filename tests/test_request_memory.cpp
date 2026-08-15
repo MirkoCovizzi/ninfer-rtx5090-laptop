@@ -1,7 +1,7 @@
 #include "core/device.h"
 #include "runtime/engine/request_memory.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <iostream>
@@ -9,8 +9,8 @@
 
 namespace {
 
-bool cuda_unavailable(cudaError_t error) {
-    return error == cudaErrorNoDevice || error == cudaErrorInsufficientDriver;
+bool hip_unavailable(hipError_t error) {
+    return error == hipErrorNoDevice || error == hipErrorInsufficientDriver;
 }
 
 int expect(bool condition, const char* message) {
@@ -32,13 +32,13 @@ int expect_throws(Fn&& fn, const char* message) {
 
 int main() {
     int count                   = 0;
-    const cudaError_t count_err = cudaGetDeviceCount(&count);
-    if (cuda_unavailable(count_err) || (count_err == cudaSuccess && count == 0)) {
+    const hipError_t count_err = hipGetDeviceCount(&count);
+    if (hip_unavailable(count_err) || (count_err == hipSuccess && count == 0)) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
-    if (count_err != cudaSuccess) {
-        std::cerr << "cudaGetDeviceCount failed: " << cudaGetErrorString(count_err) << '\n';
+    if (count_err != hipSuccess) {
+        std::cerr << "hipGetDeviceCount failed: " << hipGetErrorString(count_err) << '\n';
         return 1;
     }
 

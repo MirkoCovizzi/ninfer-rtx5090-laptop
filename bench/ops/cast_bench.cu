@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/cast.h"
 #include "core/device.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -45,12 +46,12 @@ void run(std::int32_t patches, bool control, bool profile_once) {
     const std::int64_t vectors = count / 4;
     DeviceBuffer source(static_cast<std::size_t>(count) * sizeof(float));
     DeviceBuffer destination(static_cast<std::size_t>(count) * sizeof(std::uint16_t));
-    CUDA_CHECK(cudaMemset(source.p, 0x3c, source.bytes));
-    CUDA_CHECK(cudaMemset(destination.p, 0, destination.bytes));
+    HIP_CHECK(hipMemset(source.p, 0x3c, source.bytes));
+    HIP_CHECK(hipMemset(destination.p, 0, destination.bytes));
     Tensor source_tensor(source.p, DType::FP32, {kD, patches});
     Tensor destination_tensor(destination.p, DType::BF16, {kD, patches});
 
-    const auto launch = [&](cudaStream_t stream) {
+    const auto launch = [&](hipStream_t stream) {
         if (!control) {
             ops::cast_fp32_to_bf16(source_tensor, destination_tensor, stream);
         } else {
@@ -62,7 +63,7 @@ void run(std::int32_t patches, bool control, bool profile_once) {
 
     if (profile_once) {
         launch(nullptr);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        HIP_CHECK(hipDeviceSynchronize());
         std::printf("cast %s profile P=%d grid=%d block=%d\n", control ? "control" : "fp32-bf16",
                     patches, cast_grid(vectors), kBlock);
         return;
@@ -80,7 +81,7 @@ void run(std::int32_t patches, bool control, bool profile_once) {
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/mma.cuh"
@@ -5,8 +6,9 @@
 #include "ops/linear/nvfp4/nvfp4_codec.cuh"
 #include "ops/linear/nvfp4/nvfp4_output.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -330,8 +332,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
     const int accumulator_col   = 2 * (lane & 3);
     constexpr int kOutputStride = Schedule::kBlockN + 8;
     static_assert(sizeof(Nvfp4W4a4SharedStorage<Schedule>) >=
-                  Schedule::kBlockM * kOutputStride * sizeof(__nv_bfloat16));
-    auto* shared_output = reinterpret_cast<__nv_bfloat16*>(&shared);
+                  Schedule::kBlockM * kOutputStride * sizeof(__hip_bfloat16));
+    auto* shared_output = reinterpret_cast<__hip_bfloat16*>(&shared);
 #pragma unroll
     for (int mma_m = 0; mma_m < Schedule::kMmaM; ++mma_m) {
         const int token0 = token_begin + warp_m * Schedule::kWarpM + mma_m * 16 + accumulator_row;
@@ -340,9 +342,9 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
         for (int mma_n = 0; mma_n < Schedule::kMmaN; ++mma_n) {
             const int local_row0  = warp_n * Schedule::kWarpN + mma_n * 8 + accumulator_col;
             const int parent_row0 = row_policy.weight_row(row_begin, local_row0);
-            auto* destination0    = reinterpret_cast<__nv_bfloat162*>(
+            auto* destination0    = reinterpret_cast<__hip_bfloat162*>(
                 shared_output + (token0 - token_begin) * kOutputStride + local_row0);
-            auto* destination1 = reinterpret_cast<__nv_bfloat162*>(
+            auto* destination1 = reinterpret_cast<__hip_bfloat162*>(
                 shared_output + (token1 - token_begin) * kOutputStride + local_row0);
             const int parent_row1 = row_policy.weight_row(row_begin, local_row0 + 1);
             float value00         = accumulators[mma_m][mma_n][0] * alpha;
@@ -386,7 +388,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
 
 template <class Geometry, int Threads = 256>
 __global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_w4a4_quantize_kernel(
-    const __nv_bfloat16* __restrict__ input, std::uint8_t* __restrict__ codes,
+    const __hip_bfloat16* __restrict__ input, std::uint8_t* __restrict__ codes,
     std::uint8_t* __restrict__ scales, std::int32_t tokens, float input_scale_divisor) {
     static_assert(Threads == 128 || Threads == 256 || Threads == 512);
     constexpr int kGroupsPerRow = Geometry::kInputRows / 16;

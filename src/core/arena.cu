@@ -1,6 +1,7 @@
+#include "hip/hip_runtime.h"
 #include "core/arena.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdio>
 #include <limits>
@@ -11,14 +12,14 @@
 namespace ninfer {
 namespace {
 
-std::string cuda_error_message(const char* prefix, cudaError_t err) {
-    return std::string(prefix) + ": " + cudaGetErrorName(err) + ": " + cudaGetErrorString(err);
+std::string hip_error_message(const char* prefix, hipError_t err) {
+    return std::string(prefix) + ": " + hipGetErrorName(err) + ": " + hipGetErrorString(err);
 }
 
-void log_cuda_error(const char* op, cudaError_t err) noexcept {
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "CUDA cleanup failed during %s: %s: %s\n", op, cudaGetErrorName(err),
-                     cudaGetErrorString(err));
+void log_hip_error(const char* op, hipError_t err) noexcept {
+    if (err != hipSuccess) {
+        std::fprintf(stderr, "HIP cleanup failed during %s: %s: %s\n", op, hipGetErrorName(err),
+                     hipGetErrorString(err));
     }
 }
 
@@ -39,14 +40,14 @@ std::uintptr_t align_up_addr(std::uintptr_t addr, std::size_t align) {
 
 void free_device(void*& ptr) noexcept {
     if (ptr != nullptr) {
-        log_cuda_error("cudaFree", cudaFree(ptr));
+        log_hip_error("hipFree", hipFree(ptr));
         ptr = nullptr;
     }
 }
 
 void free_pinned(void*& ptr) noexcept {
     if (ptr != nullptr) {
-        log_cuda_error("cudaFreeHost", cudaFreeHost(ptr));
+        log_hip_error("hipHostFree", hipHostFree(ptr));
         ptr = nullptr;
     }
 }
@@ -57,9 +58,9 @@ DeviceBuffer::DeviceBuffer(std::size_t size_bytes) : bytes(size_bytes) {
     if (bytes == 0) { return; }
 
     void* ptr             = nullptr;
-    const cudaError_t err = cudaMalloc(&ptr, bytes);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaMalloc failed", err));
+    const hipError_t err = hipMalloc(&ptr, bytes);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipMalloc failed", err));
     }
     p = ptr;
 }
@@ -85,9 +86,9 @@ DeviceBuffer& DeviceBuffer::operator=(DeviceBuffer&& other) noexcept {
 
 void DeviceBuffer::fill(int byte_value) {
     if (bytes == 0) { return; }
-    const cudaError_t err = cudaMemset(p, byte_value, bytes);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaMemset failed", err));
+    const hipError_t err = hipMemset(p, byte_value, bytes);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipMemset failed", err));
     }
 }
 
@@ -95,9 +96,9 @@ void DeviceBuffer::copy_from_host(const void* source, std::size_t count, std::si
     require_range(byte_offset, count, "host-to-device copy");
     if (count == 0) { return; }
     void* destination     = static_cast<std::uint8_t*>(p) + byte_offset;
-    const cudaError_t err = cudaMemcpy(destination, source, count, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaMemcpy host-to-device failed", err));
+    const hipError_t err = hipMemcpy(destination, source, count, hipMemcpyHostToDevice);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipMemcpy host-to-device failed", err));
     }
 }
 
@@ -106,9 +107,9 @@ void DeviceBuffer::copy_to_host(void* destination, std::size_t count,
     require_range(byte_offset, count, "device-to-host copy");
     if (count == 0) { return; }
     const void* source    = static_cast<const std::uint8_t*>(p) + byte_offset;
-    const cudaError_t err = cudaMemcpy(destination, source, count, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaMemcpy device-to-host failed", err));
+    const hipError_t err = hipMemcpy(destination, source, count, hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipMemcpy device-to-host failed", err));
     }
 }
 
@@ -137,9 +138,9 @@ DeviceArena::DeviceArena(std::size_t capacity_bytes) {
     }
 
     void* ptr             = nullptr;
-    const cudaError_t err = cudaMalloc(&ptr, capacity_bytes);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaMalloc failed", err));
+    const hipError_t err = hipMalloc(&ptr, capacity_bytes);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipMalloc failed", err));
     }
 
     base_ = ptr;
@@ -238,9 +239,9 @@ PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     if (size_bytes == 0) { throw std::invalid_argument("PinnedHostBuffer size must be nonzero"); }
 
     void* ptr             = nullptr;
-    const cudaError_t err = cudaMallocHost(&ptr, size_bytes);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaMallocHost failed", err));
+    const hipError_t err = hipHostMalloc(&ptr, size_bytes);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipHostMalloc failed", err));
     }
 
     data_ = ptr;

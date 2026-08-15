@@ -1,7 +1,8 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/residual_add.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -56,7 +57,7 @@ void run(int d, int tokens, bool control) {
     Tensor tx(x.p, DType::BF16, {d, tokens});
 
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 constexpr int block   = 256;
                 constexpr int maxGrid = 4096;
@@ -81,7 +82,7 @@ void run(int d, int tokens, bool control) {
 
 int main(int argc, char** argv) {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

@@ -1,7 +1,8 @@
+#include "hip/hip_runtime.h"
 #include "core/arena.h"
 #include "core/device.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <array>
 #include <cstdint>
@@ -18,8 +19,8 @@ int fail(const char* message) {
     return 1;
 }
 
-bool cuda_unavailable(cudaError_t err) {
-    return err == cudaErrorNoDevice || err == cudaErrorInsufficientDriver;
+bool hip_unavailable(hipError_t err) {
+    return err == hipErrorNoDevice || err == hipErrorInsufficientDriver;
 }
 
 template <typename Exception, typename Fn>
@@ -47,13 +48,13 @@ int expect_ptr(void* actual, void* expected, const char* label) {
 
 int main() {
     int count                   = 0;
-    const cudaError_t count_err = cudaGetDeviceCount(&count);
-    if (cuda_unavailable(count_err)) {
+    const hipError_t count_err = hipGetDeviceCount(&count);
+    if (hip_unavailable(count_err)) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
-    if (count_err != cudaSuccess) {
-        std::cerr << "cudaGetDeviceCount failed: " << cudaGetErrorString(count_err) << '\n';
+    if (count_err != hipSuccess) {
+        std::cerr << "hipGetDeviceCount failed: " << hipGetErrorString(count_err) << '\n';
         return 1;
     }
     if (count == 0) {
@@ -62,7 +63,7 @@ int main() {
     }
 
     int failures = 0;
-    CUDA_CHECK(cudaSetDevice(0));
+    HIP_CHECK(hipSetDevice(0));
 
     ninfer::DeviceBuffer empty;
     failures += expect_ptr(empty.p, nullptr, "empty device buffer pointer");
@@ -171,7 +172,7 @@ int main() {
     failures += expect_size(moved.peak_used(), 4, "moved arena peak");
 
     void* external = nullptr;
-    CUDA_CHECK(cudaMalloc(&external, 512));
+    HIP_CHECK(hipMalloc(&external, 512));
     {
         ninfer::DeviceArena borrowed(ninfer::DeviceSpan{external, 512});
         failures += expect_ptr(borrowed.base(), external, "borrowed arena base");
@@ -180,8 +181,8 @@ int main() {
         failures += expect_ptr(item.data, external, "borrowed arena allocation");
         failures += expect_size(borrowed.used(), 17, "borrowed arena used");
     }
-    CUDA_CHECK(cudaMemset(external, 0, 512));
-    CUDA_CHECK(cudaFree(external));
+    HIP_CHECK(hipMemset(external, 0, 512));
+    HIP_CHECK(hipFree(external));
 
     ninfer::PinnedHostBuffer pinned(128);
     if (pinned.data() == nullptr) {

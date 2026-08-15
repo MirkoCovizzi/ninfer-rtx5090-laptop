@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h> // cudaStream_t
+#include <hip/hip_runtime.h> // hipStream_t
 
 namespace ninfer::ops {
 
@@ -19,6 +20,6 @@ namespace ninfer::ops {
  * and accumulator precision are implementation choices. There is no workspace or persistent state
  * side effect.
  */
-void l2norm(const Tensor& x, float eps, Tensor& out, cudaStream_t stream);
+void l2norm(const Tensor& x, float eps, Tensor& out, hipStream_t stream);
 
 } // namespace ninfer::ops

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_pair/w8/w8_pair_kernels.h"
 #include "ops/linear_pair/w8/w8_pair_plan.h"
 
@@ -5,7 +6,8 @@
 #include "ops/linear/w8/w8_small_t_mma.cuh"
 #include "ops/linear/w8/w8_rowsplit_gemm_medium_t_splitk.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <array>
 #include <cstddef>
@@ -23,7 +25,7 @@ constexpr int kFirstExactT = 2;
 constexpr int kLastExactT  = 32;
 using PairOutput           = W8SplitOutput2<kRows, kRows>;
 using PairLauncher         = void (*)(const Tensor&, const Weight&, const Weight&, Tensor&, Tensor&,
-                              cudaStream_t);
+                              hipStream_t);
 
 struct W8PairExactTRows {
     static constexpr int kOutputRowsPerCta = kRowsPerCta;
@@ -35,12 +37,12 @@ struct W8PairExactTRows {
 };
 
 struct W8PairExactTEpilogue {
-    __nv_bfloat16* first;
-    __nv_bfloat16* second;
+    __hip_bfloat16* first;
+    __hip_bfloat16* second;
 
     template <int ActiveCols>
     __device__ __forceinline__ void store(int row, float (&projected)[ActiveCols]) const {
-        constexpr unsigned kPairMask = 0x0000ffffu;
+        constexpr unsigned long long kPairMask = 0xffffffffffffffffull;
         const int lane               = static_cast<int>(threadIdx.x) & 31;
         const int output_row         = row - lane + (lane & (kRowsPerCta - 1));
 #pragma unroll
@@ -58,7 +60,7 @@ struct W8PairExactTEpilogue {
 
 template <int ActiveCols>
 void launch_active_cols(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
-                        Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+                        Tensor& first_out, Tensor& second_out, hipStream_t stream) {
     constexpr int TileCols =
         ActiveCols <= 8 ? 8 : (ActiveCols <= 16 ? 16 : (ActiveCols <= 24 ? 24 : 32));
     using Geometry           = W8LinearGeometry<2 * kRows, kHidden>;
@@ -71,12 +73,12 @@ void launch_active_cols(const Tensor& x, const Weight& first_weight, const Weigh
         throw std::invalid_argument("W8 exact pair requires adjacent K/V row views");
     }
 
-    const W8ContiguousOutput ignored{static_cast<__nv_bfloat16*>(first_out.data), kRows};
-    const W8PairExactTEpilogue epilogue{static_cast<__nv_bfloat16*>(first_out.data),
-                                        static_cast<__nv_bfloat16*>(second_out.data)};
+    const W8ContiguousOutput ignored{static_cast<__hip_bfloat16*>(first_out.data), kRows};
+    const W8PairExactTEpilogue epilogue{static_cast<__hip_bfloat16*>(first_out.data),
+                                        static_cast<__hip_bfloat16*>(second_out.data)};
     w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule, W8ContiguousOutput, W8PairExactTEpilogue,
                           W8PairExactTRows><<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, ignored, epilogue,
+        static_cast<const __hip_bfloat16*>(x.data), first_codes, first_scales, ignored, epilogue,
         W8PairExactTRows{});
 }
 
@@ -89,9 +91,11 @@ constexpr auto make_launchers(std::index_sequence<Offsets...>) {
 constexpr auto kLaunchers =
     make_launchers(std::make_index_sequence<kLastExactT - kFirstExactT + 1>{});
 
-template <int TileCols, int KSplits, int NGroups, int MinBlocks>
+// ColBlocks splits the TileCols-wide column range across ColBlocks CTAs (grid.y) to keep the
+// per-CTA static shared tile within gfx1151's 64 KiB LDS for the very wide schedules.
+template <int TileCols, int KSplits, int NGroups, int MinBlocks, int ColBlocks = 1>
 void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
-                   Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+                   Tensor& first_out, Tensor& second_out, hipStream_t stream) {
     const auto* first_codes  = static_cast<const std::uint8_t*>(first_weight.qdata);
     const auto* first_scales = static_cast<const std::uint8_t*>(first_weight.scales);
     if (static_cast<const std::uint8_t*>(second_weight.qdata) != first_codes + kRows * kHidden ||
@@ -99,18 +103,18 @@ void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& se
             first_scales + kRows * (kHidden / 32) * 2) {
         throw std::invalid_argument("W8 medium pair requires adjacent K/V row views");
     }
-    const PairOutput output{static_cast<__nv_bfloat16*>(first_out.data),
-                            static_cast<__nv_bfloat16*>(second_out.data)};
+    const PairOutput output{static_cast<__hip_bfloat16*>(first_out.data),
+                            static_cast<__hip_bfloat16*>(second_out.data)};
     w8_rowsplit_medium_t_splitk_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
-        <<<(2 * kRows) / 16, KSplits * NGroups * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, output, x.ne[1]);
+        <<<dim3((2 * kRows) / 16, ColBlocks), KSplits * NGroups * 32, 0, stream>>>(
+            static_cast<const __hip_bfloat16*>(x.data), first_codes, first_scales, output, x.ne[1]);
 }
 
 } // namespace
 
 void w8_pair_splitk_exact_t_launch(const Tensor& x, const Weight& first_weight,
                                    const Weight& second_weight, Tensor& first_out,
-                                   Tensor& second_out, cudaStream_t stream) {
+                                   Tensor& second_out, hipStream_t stream) {
     if (x.ne[0] != kHidden || x.ne[1] < kFirstExactT || x.ne[1] > kLastExactT ||
         first_out.ne[0] != kRows || first_out.ne[1] != x.ne[1] || second_out.ne[0] != kRows ||
         second_out.ne[1] != x.ne[1]) {
@@ -118,12 +122,12 @@ void w8_pair_splitk_exact_t_launch(const Tensor& x, const Weight& first_weight,
     }
     kLaunchers[x.ne[1] - kFirstExactT](x, first_weight, second_weight, first_out, second_out,
                                        stream);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
                                   const Weight& first_weight, const Weight& second_weight,
-                                  Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+                                  Tensor& first_out, Tensor& second_out, hipStream_t stream) {
     if (x.ne[0] != kHidden || x.ne[1] < 33 || first_out.ne[0] != kRows ||
         first_out.ne[1] != x.ne[1] || second_out.ne[0] != kRows || second_out.ne[1] != x.ne[1]) {
         throw std::invalid_argument("W8 medium pair requires [1024,2048] and T>=33");
@@ -133,7 +137,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 48) {
             launch_medium<48, 4, 2, 3>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -141,7 +145,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 64) {
             launch_medium<64, 4, 2, 2>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -149,7 +153,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 80) {
             launch_medium<80, 4, 2, 1>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -157,7 +161,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 88) {
             launch_medium<88, 4, 1, 1>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -165,7 +169,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 96) {
             launch_medium<96, 4, 1, 1>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -173,7 +177,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 104) {
             launch_medium<104, 4, 1, 1>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -181,7 +185,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 112) {
             launch_medium<112, 4, 1, 1>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -189,7 +193,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 128) {
             launch_medium<128, 2, 4, 2>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -197,7 +201,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 160) {
             launch_medium<160, 2, 5, 2>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -205,7 +209,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 192) {
             launch_medium<192, 2, 6, 2>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
@@ -213,15 +217,17 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         if (x.ne[1] <= 224) {
             launch_medium<224, 2, 7, 2>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
-            CUDA_CHECK(cudaGetLastError());
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;
     case W8PairScheduleId::DualSplitKMediumC256:
         if (x.ne[1] <= 256) {
-            launch_medium<256, 2, 8, 1>(x, first_weight, second_weight, first_out, second_out,
-                                        stream);
-            CUDA_CHECK(cudaGetLastError());
+            // The 256-column staging tile exceeds 64 KiB LDS; cover the width with two
+            // 128-column CTAs (grid.y). Math is identical, just split across blocks.
+            launch_medium<128, 2, 4, 2, 2>(x, first_weight, second_weight, first_out, second_out,
+                                           stream);
+            HIP_CHECK(hipGetLastError());
             return;
         }
         break;

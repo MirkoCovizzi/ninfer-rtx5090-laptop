@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h"
 
 #include "ninfer/ops/rmsnorm.h"
@@ -201,7 +202,7 @@ std::size_t checked_partial_bytes(std::int32_t heads, std::int32_t split_k, std:
 void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem& problem,
                       const Tensor& x, const Weight& a_weight, const Weight& b_weight,
                       const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g,
-                      Tensor& beta, cudaStream_t stream) {
+                      Tensor& beta, hipStream_t stream) {
     auto scratch_scope = ws.scope();
     DeviceSpan scratch{};
     if (plan.workspace_bytes != 0) { scratch = ws.alloc_bytes(plan.workspace_bytes); }
@@ -412,7 +413,7 @@ std::size_t bf16_gdn_norm_gating_capacity_workspace_bytes(std::int32_t heads,
 void bf16_gdn_gating_execute_plan(const Bf16GdnGatingPlan& plan, const Tensor& x,
                                   const Weight& a_weight, const Weight& b_weight,
                                   const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws,
-                                  Tensor& g, Tensor& beta, cudaStream_t stream) {
+                                  Tensor& g, Tensor& beta, hipStream_t stream) {
     const Bf16GdnGatingProblem problem{g.ne[0], x.ne[0], x.ne[1]};
     const Bf16GdnGatingPlan resolved = bf16_gdn_gating_resolve_plan(problem);
     if (resolved.schedule != plan.schedule || resolved.token_variant != plan.token_variant ||
@@ -426,7 +427,7 @@ void bf16_gdn_gating_execute_candidate(Bf16GdnGatingScheduleId schedule, const T
                                        const Weight& a_weight, const Weight& b_weight,
                                        const Tensor& A_log, const Tensor& dt_bias,
                                        WorkspaceArena& ws, Tensor& g, Tensor& beta,
-                                       cudaStream_t stream) {
+                                       hipStream_t stream) {
     const Bf16GdnGatingProblem problem{g.ne[0], x.ne[0], x.ne[1]};
     const Bf16GdnGatingPlan plan = bf16_gdn_gating_resolve_candidate(schedule, problem);
     execute_resolved(plan, problem, x, a_weight, b_weight, A_log, dt_bias, ws, g, beta, stream);
@@ -434,7 +435,7 @@ void bf16_gdn_gating_execute_candidate(Bf16GdnGatingScheduleId schedule, const T
 
 void bf16_gdn_gating_dispatch(const Tensor& x, const Weight& a_weight, const Weight& b_weight,
                               const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws,
-                              Tensor& g, Tensor& beta, cudaStream_t stream) {
+                              Tensor& g, Tensor& beta, hipStream_t stream) {
     const Bf16GdnGatingPlan plan = bf16_gdn_gating_resolve_plan({g.ne[0], x.ne[0], x.ne[1]});
     bf16_gdn_gating_execute_plan(plan, x, a_weight, b_weight, A_log, dt_bias, ws, g, beta, stream);
 }
@@ -442,7 +443,7 @@ void bf16_gdn_gating_dispatch(const Tensor& x, const Weight& a_weight, const Wei
 void bf16_gdn_norm_gating_dispatch(const Tensor& x, const Tensor& norm_weight, float eps, Tensor& h,
                                    const Weight& a_weight, const Weight& b_weight,
                                    const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws,
-                                   Tensor& g, Tensor& beta, cudaStream_t stream) {
+                                   Tensor& g, Tensor& beta, hipStream_t stream) {
     const Bf16GdnGatingProblem problem{g.ne[0], x.ne[0], x.ne[1]};
     const Bf16GdnNormGatingPlan plan = bf16_gdn_norm_gating_resolve_plan(problem);
     if (plan.schedule == Bf16GdnNormGatingScheduleId::Composed) {

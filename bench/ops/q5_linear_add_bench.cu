@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Cold-cache public Op benchmark for registered Q5 LinearAdd profiles.
 
 #include "ninfer/ops/linear_add.h"
@@ -7,7 +8,7 @@
 #include "quantized_weight.cuh"
 #include "ops/linear_add/q5/q5_linear_add_plan.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -102,8 +103,8 @@ int main(int argc, char** argv) {
         const std::int32_t min_t = *min_it;
         const std::int32_t max_t = *max_it;
 
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(kFlushBytes);
         DeviceBuffer input    = bench::make_bf16(static_cast<std::size_t>(options.hidden) * max_t);
         DeviceBuffer residual = bench::make_bf16(static_cast<std::size_t>(kRows) * max_t);
@@ -113,7 +114,7 @@ int main(int argc, char** argv) {
             QType::Q5G64_F16S, kRows, options.hidden, min_t, max_t);
         WorkspaceArena workspace(std::max<std::size_t>(workspace_capacity, 256));
 
-        const auto launch = [&](std::int32_t tokens, cudaStream_t launch_stream) {
+        const auto launch = [&](std::int32_t tokens, hipStream_t launch_stream) {
             Tensor x(input.p, DType::BF16, {options.hidden, tokens});
             Tensor out(residual.p, DType::BF16, {kRows, tokens});
             ops::linear_add(x, packed.weight, out, workspace, launch_stream);
@@ -122,13 +123,13 @@ int main(int argc, char** argv) {
         if (options.profile) {
             const std::int32_t tokens = options.tokens.front();
             launch(tokens, stream);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            HIP_CHECK(hipStreamSynchronize(stream));
             const auto plan = ops::detail::q5_linear_add_resolve_plan(
                 {kRows, options.hidden, options.hidden, tokens});
             std::printf("profile K=%d T=%d route=%s workspace=%zu\n", options.hidden, tokens,
                         ops::detail::q5_linear_add_schedule_name(plan.schedule),
                         workspace_capacity);
-            CUDA_CHECK(cudaStreamDestroy(stream));
+            HIP_CHECK(hipStreamDestroy(stream));
             return 0;
         }
 
@@ -148,10 +149,10 @@ int main(int argc, char** argv) {
             const auto plan = ops::detail::q5_linear_add_resolve_plan(
                 {kRows, options.hidden, options.hidden, tokens});
             measure(ops::detail::q5_linear_add_schedule_name(plan.schedule),
-                    [&](cudaStream_t launch_stream) { launch(tokens, launch_stream); });
+                    [&](hipStream_t launch_stream) { launch(tokens, launch_stream); });
         }
 
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_q5_linear_add_bench: %s\n", error.what());

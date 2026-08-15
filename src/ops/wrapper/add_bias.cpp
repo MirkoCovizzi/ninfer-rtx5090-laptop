@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/add_bias.h"
 
 #include "ops/launcher/add_bias.h"
@@ -24,7 +25,7 @@ std::int64_t checked_numel(const Tensor& t) {
 
 } // namespace
 
-void add_bias(const Tensor& bias, Tensor& x, cudaStream_t stream) {
+void add_bias(const Tensor& bias, Tensor& x, hipStream_t stream) {
     if (bias.dtype != DType::BF16 || x.dtype != DType::BF16) {
         throw std::invalid_argument("add_bias: bias/x must be BF16");
     }

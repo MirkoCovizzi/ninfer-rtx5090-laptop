@@ -1,12 +1,14 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/memory.cuh"
 #include "ops/common/mma.cuh"
 #include "ops/linear/nvfp4/nvfp4_output.cuh"
 
-#include <cuda.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <stdexcept>
@@ -21,10 +23,10 @@ struct alignas(128) Nvfp4W4a4TmaDescriptors {
     CUtensorMap b_scales;
 };
 
-inline void nvfp4_check_driver(CUresult status, const char* operation) {
-    if (status == CUDA_SUCCESS) { return; }
+inline void nvfp4_check_driver(hipError_t status, const char* operation) {
+    if (status == hipSuccess) { return; }
     const char* name = nullptr;
-    (void)cuGetErrorName(status, &name);
+    (void)hipDrvGetErrorName(status, &name);
     throw std::runtime_error(std::string(operation) + ": " +
                              (name != nullptr ? name : "CUDA error"));
 }
@@ -122,7 +124,7 @@ struct Nvfp4W4a4TmaTensorStorage {
 template <class Schedule>
 union alignas(128) Nvfp4W4a4TmaScratch {
     Nvfp4W4a4TmaTensorStorage<Schedule> tensors;
-    __nv_bfloat16 output[Schedule::kBlockM * (Schedule::kBlockN + 8)];
+    __hip_bfloat16 output[Schedule::kBlockM * (Schedule::kBlockN + 8)];
 };
 
 template <class Schedule>
@@ -334,9 +336,9 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
 #pragma unroll
         for (int mma_n = 0; mma_n < Schedule::kMmaN; ++mma_n) {
             const int parent_row = warp_n * Schedule::kWarpN + mma_n * 8 + accumulator_col;
-            auto* destination0   = reinterpret_cast<__nv_bfloat162*>(
+            auto* destination0   = reinterpret_cast<__hip_bfloat162*>(
                 shared_output + token0 * kOutputStride + parent_row);
-            auto* destination1 = reinterpret_cast<__nv_bfloat162*>(
+            auto* destination1 = reinterpret_cast<__hip_bfloat162*>(
                 shared_output + token1 * kOutputStride + parent_row);
             const int global_row0   = row_begin + parent_row;
             const int global_row1   = global_row0 + 1;

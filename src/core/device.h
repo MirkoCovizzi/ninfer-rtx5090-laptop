@@ -1,20 +1,20 @@
 #pragma once
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 
 namespace ninfer {
 
-void cuda_check(cudaError_t err, const char* expr, const char* file, int line);
+void hip_check(hipError_t err, const char* expr, const char* file, int line);
 
-#define CUDA_CHECK(expr) ::ninfer::cuda_check((expr), #expr, __FILE__, __LINE__)
+#define HIP_CHECK(expr) ::ninfer::hip_check((expr), #expr, __FILE__, __LINE__)
 
 struct DeviceContext {
     int device               = 0;
-    cudaStream_t stream      = nullptr;
-    cudaStream_t load_stream = nullptr;
-    cudaDeviceProp props{};
+    hipStream_t stream      = nullptr;
+    hipStream_t load_stream = nullptr;
+    hipDeviceProp_t props{};
 
     explicit DeviceContext(int device_id = 0);
     ~DeviceContext();
@@ -29,15 +29,15 @@ struct DeviceContext {
     void synchronize() const;
 };
 
-class CudaEventTimer {
+class HipEventTimer {
 public:
-    explicit CudaEventTimer(const DeviceContext& ctx);
-    ~CudaEventTimer();
+    explicit HipEventTimer(const DeviceContext& ctx);
+    ~HipEventTimer();
 
-    CudaEventTimer(const CudaEventTimer&)            = delete;
-    CudaEventTimer& operator=(const CudaEventTimer&) = delete;
-    CudaEventTimer(CudaEventTimer&& other) noexcept;
-    CudaEventTimer& operator=(CudaEventTimer&& other) noexcept;
+    HipEventTimer(const HipEventTimer&)            = delete;
+    HipEventTimer& operator=(const HipEventTimer&) = delete;
+    HipEventTimer(HipEventTimer&& other) noexcept;
+    HipEventTimer& operator=(HipEventTimer&& other) noexcept;
 
     void start();
     void record_stop();
@@ -45,9 +45,9 @@ public:
     float stop_ms();
 
 private:
-    cudaStream_t stream_ = nullptr;
-    cudaEvent_t start_   = nullptr;
-    cudaEvent_t stop_    = nullptr;
+    hipStream_t stream_ = nullptr;
+    hipEvent_t start_   = nullptr;
+    hipEvent_t stop_    = nullptr;
 };
 
 } // namespace ninfer

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Dedicated Large-T W8G32 x BF16 Tensor Core GEMM.
@@ -12,8 +13,9 @@
 #include "ops/common/math.cuh"
 #include "ops/linear/w8/w8_rowsplit_output.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 
@@ -21,7 +23,7 @@ namespace ninfer::ops::detail {
 
 union alignas(16) W8Bf16x8Bits {
     uint4 raw;
-    __nv_bfloat162 pair[4];
+    __hip_bfloat162 pair[4];
 };
 
 static_assert(sizeof(W8Bf16x8Bits) == 16);
@@ -65,7 +67,7 @@ __device__ __forceinline__ int w8g32_swz64(int row, int col) {
 template <class Cfg, bool Full, W8Epilogue Epilogue = W8Epilogue::Store,
           class Output = W8ContiguousOutput>
 __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gemm_mma_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales, Output output, std::int32_t m, std::int32_t k,
     std::int32_t n, std::int32_t padded_k) {
     constexpr int BM                = Cfg::BM;
@@ -81,9 +83,15 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
     static_assert(!kSwiGlu || (BM % 32) == 0);
     static_assert(!kSwiGlu || Cfg::WARPS_M == 1 || Cfg::WARPS_M == 2,
                   "SwiGLU supports warp-local or shared-memory row pairing");
+    // gfx1151 WMMA atoms are 16x16 (not 16x8). Each warp covers WMT x WNT 16x16
+    // atoms; when kWarpCols is not a multiple of 16 the final atom overlaps the
+    // neighbouring warp's columns (duplicate compute, correct results) and the
+    // store below emits only the warp's own columns.
+    constexpr int WMT = MT;
+    constexpr int WNT = (Cfg::WN + 15) / 16;
 
-    __shared__ __align__(16) __nv_bfloat16 As[BM * BK];
-    __shared__ __align__(16) __nv_bfloat16 Bs[Cfg::ACTIVATION_STAGES][BN * BK];
+    __shared__ __align__(16) __hip_bfloat16 As[BM * BK];
+    __shared__ __align__(16) __hip_bfloat16 Bs[Cfg::ACTIVATION_STAGES][BN * BK];
     __shared__ __align__(16) std::uint8_t Cr[BM * BK];
     __shared__ __align__(16) std::uint8_t Sr[BM * Cfg::SCALE_CACHE_BYTES];
 
@@ -92,32 +100,21 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
     const int lane = tid & 31;
     const int wm   = warp / Cfg::WARPS_N;
     const int wn   = warp % Cfg::WARPS_N;
-    const int gid  = lane >> 2;
-    const int lid  = lane & 3;
 
     const int m0           = output.row_begin(static_cast<int>(blockIdx.x), kOutputRowsPerCta);
     const int n0           = static_cast<int>(blockIdx.y) * BN;
     const int kg           = padded_k / 32;
     const auto output_tile = output.tile(m0);
 
-    float acc[MT][NT][4];
+    float acc[WMT][WNT][8];
 #pragma unroll
-    for (int mi = 0; mi < MT; ++mi) {
+    for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni) {
-            acc[mi][ni][0] = 0.0f;
-            acc[mi][ni][1] = 0.0f;
-            acc[mi][ni][2] = 0.0f;
-            acc[mi][ni][3] = 0.0f;
+        for (int ni = 0; ni < WNT; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { acc[mi][ni][r] = 0.0f; }
         }
     }
-
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int b_rin    = lane & 7;
-    const int b_koff   = ((lane >> 3) & 1) << 3;
 
     auto stage_x = [&](int stage, int kt) {
         const int k0 = kt * BK;
@@ -194,7 +191,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
                                   ? *reinterpret_cast<const std::uint32_t*>(
                                         &Sr[row * Cfg::SCALE_CACHE_BYTES + scale_pair_offset])
                                   : 0;
-                scale_pair0 = __shfl_sync(0xffffffffu, scale_pair0, half * 16);
+                scale_pair0 = __shfl_sync(0xffffffffffffffffull, scale_pair0, half * 16);
             } else {
                 static_assert(GROUPS == 4);
                 const unsigned lane_scale_pair =
@@ -202,8 +199,8 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
                         ? *reinterpret_cast<const std::uint32_t*>(
                               &Sr[row * Cfg::SCALE_CACHE_BYTES + scale_pair_offset + half_lane * 4])
                         : 0;
-                scale_pair0 = __shfl_sync(0xffffffffu, lane_scale_pair, half * 16);
-                scale_pair1 = __shfl_sync(0xffffffffu, lane_scale_pair, half * 16 + 1);
+                scale_pair0 = __shfl_sync(0xffffffffffffffffull, lane_scale_pair, half * 16);
+                scale_pair1 = __shfl_sync(0xffffffffffffffffull, lane_scale_pair, half * 16 + 1);
             }
 #pragma unroll
             for (int gg = 0; gg < GROUPS; ++gg) {
@@ -215,7 +212,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
                     *reinterpret_cast<const std::uint16_t*>(&Cr[row * BK + col]);
                 const int q0 = static_cast<int>(static_cast<std::int8_t>(packed & 0xffu));
                 const int q1 = static_cast<int>(static_cast<std::int8_t>(packed >> 8));
-                const __nv_bfloat162 values = __floats2bfloat162_rn(static_cast<float>(q0) * scale,
+                const __hip_bfloat162 values = __floats2bfloat162_rn(static_cast<float>(q0) * scale,
                                                                     static_cast<float>(q1) * scale);
                 store_vec(&As[row * BK + w8g32_swz64(row, col)], values);
             }
@@ -245,23 +242,21 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
             ninfer::ops::cp_commit();
         }
 
-        unsigned af[2][MT][4];
-        unsigned bf[2][NT][2];
+        unsigned af[2][WMT][8];
+        unsigned bf[2][WNT][8];
         auto load_fragments = [&](int slot, int ks) {
 #pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
-                const int ar = wm * WM + mi * 16 + a_rowoff;
-                const int ac = ks * 16 + a_coloff;
-                ldmatrix_x4(af[slot][mi][0], af[slot][mi][1], af[slot][mi][2], af[slot][mi][3],
-                            smem_addr(&As[ar * BK + w8g32_swz64(ar, ac)]));
+            for (int mi = 0; mi < WMT; ++mi) {
+                const int ar = wm * WM + mi * 16 + (lane >> 1);
+                if (wmma_a_lane_active(lane)) {
+                    wmma_load_a_bf16(af[slot][mi], As, ar, ks * 16, BK, w8g32_swz64);
+                }
             }
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int br = wn * WN + ni * 8 + b_rin;
-                const int bc = ks * 16 + b_koff;
-                ldmatrix_x2(bf[slot][ni][0], bf[slot][ni][1],
-                            smem_addr(&Bs[Cfg::ACTIVATION_STAGES == 1 ? 0 : stage]
-                                         [br * BK + w8g32_swz64(br, bc)]));
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int br = wn * WN + ni * 16 + (lane & 15);
+                wmma_load_b_bf16(bf[slot][ni], Bs[Cfg::ACTIVATION_STAGES == 1 ? 0 : stage], br,
+                                 ks * 16, BK, w8g32_swz64);
             }
         };
 
@@ -271,12 +266,13 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
             const int slot = ks & 1;
             if (ks + 1 < KSUB) { load_fragments(slot ^ 1, ks + 1); }
 #pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
+            for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-                for (int ni = 0; ni < NT; ++ni) {
-                    mma_bf16(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
-                             af[slot][mi][0], af[slot][mi][1], af[slot][mi][2], af[slot][mi][3],
-                             bf[slot][ni][0], bf[slot][ni][1]);
+                for (int ni = 0; ni < WNT; ++ni) {
+                    WmmaC8& c = *reinterpret_cast<WmmaC8*>(acc[mi][ni]);
+                    WmmaA16I a = *reinterpret_cast<WmmaA16I*>(af[slot][mi]);
+                    WmmaA16I b = *reinterpret_cast<WmmaA16I*>(bf[slot][ni]);
+                    c = wmma_bf16(a, b, c);
                 }
             }
         }
@@ -296,39 +292,28 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
             constexpr int kGateMt = MT / 2;
 #pragma unroll
             for (int mi = 0; mi < kGateMt; ++mi) {
-                const int r0 = m0 + mi * 16 + gid;
-                const int r1 = r0 + 8;
+                const int r_lo = m0 + mi * 16 + 8 * (lane >= 16);
 #pragma unroll
-                for (int ni = 0; ni < NT; ++ni) {
-                    const int c0          = n0 + wn * WN + ni * 8 + 2 * lid;
-                    const int c1          = c0 + 1;
+                for (int ni = 0; ni < WNT; ++ni) {
+                    const int local_col = ni * 16 + (lane & 15);
+                    const int c0        = n0 + wn * WN + ni * 16 + (lane & 15);
+                    // Skip the overlap columns when kWarpCols is not a multiple of 16.
+                    if (local_col >= WN) { continue; }
                     const float* gate_acc = acc[mi][ni];
                     const float* up_acc   = acc[mi + kGateMt][ni];
                     if constexpr (Full) {
-                        *output_tile.at(r0, c0) =
-                            __float2bfloat16_rn(silu(gate_acc[0]) * up_acc[0]);
-                        *output_tile.at(r0, c1) =
-                            __float2bfloat16_rn(silu(gate_acc[1]) * up_acc[1]);
-                        *output_tile.at(r1, c0) =
-                            __float2bfloat16_rn(silu(gate_acc[2]) * up_acc[2]);
-                        *output_tile.at(r1, c1) =
-                            __float2bfloat16_rn(silu(gate_acc[3]) * up_acc[3]);
+#pragma unroll
+                        for (int r = 0; r < 8; ++r) {
+                            *output_tile.at(r_lo + r, c0) = __float2bfloat16_rn(
+                                silu(gate_acc[r]) * up_acc[r]);
+                        }
                     } else {
-                        if (r0 < m / 2 && c0 < n) {
-                            *output_tile.at(r0, c0) =
-                                __float2bfloat16_rn(silu(gate_acc[0]) * up_acc[0]);
-                        }
-                        if (r0 < m / 2 && c1 < n) {
-                            *output_tile.at(r0, c1) =
-                                __float2bfloat16_rn(silu(gate_acc[1]) * up_acc[1]);
-                        }
-                        if (r1 < m / 2 && c0 < n) {
-                            *output_tile.at(r1, c0) =
-                                __float2bfloat16_rn(silu(gate_acc[2]) * up_acc[2]);
-                        }
-                        if (r1 < m / 2 && c1 < n) {
-                            *output_tile.at(r1, c1) =
-                                __float2bfloat16_rn(silu(gate_acc[3]) * up_acc[3]);
+#pragma unroll
+                        for (int r = 0; r < 8; ++r) {
+                            if (r_lo + r < m / 2 && c0 < n) {
+                                *output_tile.at(r_lo + r, c0) = __float2bfloat16_rn(
+                                    silu(gate_acc[r]) * up_acc[r]);
+                            }
                         }
                     }
                 }
@@ -339,61 +324,52 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
             __syncthreads();
             if (wm == 1) {
 #pragma unroll
-                for (int mi = 0; mi < MT; ++mi) {
-                    const int local_r0 = mi * 16 + gid;
-                    const int local_r1 = local_r0 + 8;
+                for (int mi = 0; mi < WMT; ++mi) {
+                    const int local_r_lo = mi * 16 + 8 * (lane >= 16);
 #pragma unroll
-                    for (int ni = 0; ni < NT; ++ni) {
-                        const int local_c0                  = wn * WN + ni * 8 + 2 * lid;
-                        const int local_c1                  = local_c0 + 1;
-                        const float* up_acc                 = acc[mi][ni];
-                        up_shared[local_r0 * BN + local_c0] = up_acc[0];
-                        up_shared[local_r0 * BN + local_c1] = up_acc[1];
-                        up_shared[local_r1 * BN + local_c0] = up_acc[2];
-                        up_shared[local_r1 * BN + local_c1] = up_acc[3];
+                    for (int ni = 0; ni < WNT; ++ni) {
+                        const int block_col  = wn * WN + ni * 16 + (lane & 15);
+                        const int warp_local = ni * 16 + (lane & 15);
+                        // Skip the overlap columns when kWarpCols is not a multiple of 16.
+                        if (warp_local >= WN) { continue; }
+                        const float* up_acc = acc[mi][ni];
+#pragma unroll
+                        for (int r = 0; r < 8; ++r) {
+                            up_shared[(local_r_lo + r) * BN + block_col] = up_acc[r];
+                        }
                     }
                 }
             }
             __syncthreads();
             if (wm == 0) {
 #pragma unroll
-                for (int mi = 0; mi < MT; ++mi) {
-                    const int local_r0 = mi * 16 + gid;
-                    const int local_r1 = local_r0 + 8;
-                    const int r0       = m0 + local_r0;
-                    const int r1       = m0 + local_r1;
+                for (int mi = 0; mi < WMT; ++mi) {
+                    const int local_r_lo = mi * 16 + 8 * (lane >= 16);
+                    const int r_lo       = m0 + local_r_lo;
 #pragma unroll
-                    for (int ni = 0; ni < NT; ++ni) {
-                        const int local_c0    = wn * WN + ni * 8 + 2 * lid;
-                        const int local_c1    = local_c0 + 1;
-                        const int c0          = n0 + local_c0;
-                        const int c1          = n0 + local_c1;
+                    for (int ni = 0; ni < WNT; ++ni) {
+                        const int block_col  = wn * WN + ni * 16 + (lane & 15);
+                        const int warp_local = ni * 16 + (lane & 15);
+                        const int c0         = n0 + block_col;
+                        // Skip the overlap columns when kWarpCols is not a multiple of 16.
+                        if (warp_local >= WN) { continue; }
                         const float* gate_acc = acc[mi][ni];
-                        const float up00      = up_shared[local_r0 * BN + local_c0];
-                        const float up01      = up_shared[local_r0 * BN + local_c1];
-                        const float up10      = up_shared[local_r1 * BN + local_c0];
-                        const float up11      = up_shared[local_r1 * BN + local_c1];
                         if constexpr (Full) {
-                            *output_tile.at(r0, c0) = __float2bfloat16_rn(silu(gate_acc[0]) * up00);
-                            *output_tile.at(r0, c1) = __float2bfloat16_rn(silu(gate_acc[1]) * up01);
-                            *output_tile.at(r1, c0) = __float2bfloat16_rn(silu(gate_acc[2]) * up10);
-                            *output_tile.at(r1, c1) = __float2bfloat16_rn(silu(gate_acc[3]) * up11);
+#pragma unroll
+                            for (int r = 0; r < 8; ++r) {
+                                const float upv = up_shared[(local_r_lo + r) * BN + block_col];
+                                *output_tile.at(r_lo + r, c0) =
+                                    __float2bfloat16_rn(silu(gate_acc[r]) * upv);
+                            }
                         } else {
-                            if (r0 < m / 2 && c0 < n) {
-                                *output_tile.at(r0, c0) =
-                                    __float2bfloat16_rn(silu(gate_acc[0]) * up00);
-                            }
-                            if (r0 < m / 2 && c1 < n) {
-                                *output_tile.at(r0, c1) =
-                                    __float2bfloat16_rn(silu(gate_acc[1]) * up01);
-                            }
-                            if (r1 < m / 2 && c0 < n) {
-                                *output_tile.at(r1, c0) =
-                                    __float2bfloat16_rn(silu(gate_acc[2]) * up10);
-                            }
-                            if (r1 < m / 2 && c1 < n) {
-                                *output_tile.at(r1, c1) =
-                                    __float2bfloat16_rn(silu(gate_acc[3]) * up11);
+#pragma unroll
+                            for (int r = 0; r < 8; ++r) {
+                                if (r_lo + r < m / 2 && c0 < n) {
+                                    const float upv =
+                                        up_shared[(local_r_lo + r) * BN + block_col];
+                                    *output_tile.at(r_lo + r, c0) =
+                                        __float2bfloat16_rn(silu(gate_acc[r]) * upv);
+                                }
                             }
                         }
                     }
@@ -404,20 +380,22 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
         static_assert(BM <= Cfg::STAGES * BK && (BM % 8) == 0,
                       "W8 residual epilogue reuses the x pipeline as a BF16 output tile");
         __syncthreads();
-        __nv_bfloat16* projected_shared = Bs[0];
+        __hip_bfloat16* projected_shared = Bs[0];
 #pragma unroll
-        for (int mi = 0; mi < MT; ++mi) {
-            const int local_r0 = wm * WM + mi * 16 + gid;
-            const int local_r1 = local_r0 + 8;
+        for (int mi = 0; mi < WMT; ++mi) {
+            const int local_r_lo = wm * WM + mi * 16 + 8 * (lane >= 16);
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int local_c0                         = wn * WN + ni * 8 + 2 * lid;
-                const int local_c1                         = local_c0 + 1;
-                const float* a                             = acc[mi][ni];
-                projected_shared[local_c0 * BM + local_r0] = __float2bfloat16_rn(a[0]);
-                projected_shared[local_c1 * BM + local_r0] = __float2bfloat16_rn(a[1]);
-                projected_shared[local_c0 * BM + local_r1] = __float2bfloat16_rn(a[2]);
-                projected_shared[local_c1 * BM + local_r1] = __float2bfloat16_rn(a[3]);
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int block_col  = wn * WN + ni * 16 + (lane & 15);
+                const int warp_local = ni * 16 + (lane & 15);
+                // Skip the overlap columns when kWarpCols is not a multiple of 16.
+                if (warp_local >= WN) { continue; }
+                const float* a = acc[mi][ni];
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    projected_shared[block_col * BM + local_r_lo + r] =
+                        __float2bfloat16_rn(a[r]);
+                }
             }
         }
         __syncthreads();
@@ -460,7 +438,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
 #pragma unroll
                     for (int i = 0; i < kRowsPerPack; ++i) {
                         if (row + i < m) {
-                            __nv_bfloat16* destination = output_tile.at(row + i, col);
+                            __hip_bfloat16* destination = output_tile.at(row + i, col);
                             *destination               = __float2bfloat16_rn(
                                 __bfloat162float(*destination) +
                                 __bfloat162float(projected_shared[local_col * BM + local_row + i]));
@@ -471,31 +449,27 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
         }
     } else {
 #pragma unroll
-        for (int mi = 0; mi < MT; ++mi) {
-            const int r0 = m0 + wm * WM + mi * 16 + gid;
-            const int r1 = r0 + 8;
+        for (int mi = 0; mi < WMT; ++mi) {
+            const int r_lo = m0 + wm * WM + mi * 16 + 8 * (lane >= 16);
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int c0   = n0 + wn * WN + ni * 8 + 2 * lid;
-                const int c1   = c0 + 1;
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int local_col = ni * 16 + (lane & 15);
+                const int c0        = n0 + wn * WN + ni * 16 + (lane & 15);
+                // Skip the overlap columns when kWarpCols is not a multiple of 16.
+                if (local_col >= WN) { continue; }
                 const float* a = acc[mi][ni];
                 if constexpr (Full) {
-                    *output_tile.at(r0, c0) = __float2bfloat16_rn(a[0]);
-                    *output_tile.at(r0, c1) = __float2bfloat16_rn(a[1]);
-                    *output_tile.at(r1, c0) = __float2bfloat16_rn(a[2]);
-                    *output_tile.at(r1, c1) = __float2bfloat16_rn(a[3]);
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        *output_tile.at(r_lo + r, c0) = __float2bfloat16_rn(a[r]);
+                    }
                 } else {
-                    if (output_tile.valid(r0, m) && c0 < n) {
-                        *output_tile.at(r0, c0) = __float2bfloat16_rn(a[0]);
-                    }
-                    if (output_tile.valid(r0, m) && c1 < n) {
-                        *output_tile.at(r0, c1) = __float2bfloat16_rn(a[1]);
-                    }
-                    if (output_tile.valid(r1, m) && c0 < n) {
-                        *output_tile.at(r1, c0) = __float2bfloat16_rn(a[2]);
-                    }
-                    if (output_tile.valid(r1, m) && c1 < n) {
-                        *output_tile.at(r1, c1) = __float2bfloat16_rn(a[3]);
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        const int row = r_lo + r;
+                        if (output_tile.valid(row, m) && c0 < n) {
+                            *output_tile.at(row, c0) = __float2bfloat16_rn(a[r]);
+                        }
                     }
                 }
             }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear/bf16/bf16_launch.h"
 
 #include "core/device.h"
@@ -5,7 +6,8 @@
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_gemm_mma_config.h"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <stdexcept>
 
@@ -13,31 +15,31 @@ namespace ninfer::ops::detail {
 namespace {
 
 template <class Geometry, class Schedule, bool FullTokens>
-void launch_variant(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_variant(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     static_assert((Geometry::kOutputRows % Schedule::kBlockRows) == 0);
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
 
     constexpr int tiles_m = Geometry::kOutputRows / Schedule::kBlockRows;
     const int tiles_n     = div_up(x.ne[1], Schedule::kBlockCols);
     const int blocks      = tiles_m * tiles_n;
-    const Bf16MmaContiguousOutput output{static_cast<__nv_bfloat16*>(out.data),
+    const Bf16MmaContiguousOutput output{static_cast<__hip_bfloat16*>(out.data),
                                          Geometry::kOutputRows};
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attr = cudaFuncSetAttribute(
-            bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16MmaContiguousOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attr);
+        static const hipError_t attr = hipFuncSetAttribute(reinterpret_cast<const void*>(
+            bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16MmaContiguousOutput>),
+            hipFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
+        HIP_CHECK(attr);
     }
     bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.qdata), output, x.ne[1]);
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.qdata), output, x.ne[1]);
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Geometry>
-void launch_geometry(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_geometry(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     using Schedule = Bf16MmaProductionSchedule<Geometry>;
     if ((x.ne[1] % Schedule::kBlockCols) == 0) {
         launch_variant<Geometry, Schedule, true>(x, weight, out, stream);
@@ -48,7 +50,7 @@ void launch_geometry(const Tensor& x, const Weight& weight, Tensor& out, cudaStr
 
 } // namespace
 
-void launch_bf16_mma(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_bf16_mma(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     if (weight.n == 14336 && weight.k == 5120) {
         launch_geometry<Bf16GemvGeometry<14336, 5120>>(x, weight, out, stream);
         return;

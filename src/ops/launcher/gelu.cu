@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/launcher/gelu.h"
 
 #include "ops/common/math.h"
@@ -10,7 +11,7 @@
 
 namespace ninfer::ops::detail {
 
-void gelu_launch(Tensor& x, GeluMode mode, cudaStream_t stream) {
+void gelu_launch(Tensor& x, GeluMode mode, hipStream_t stream) {
     constexpr int block   = 256;
     constexpr int maxGrid = 16384;
     const std::int64_t n  = x.numel();
@@ -27,7 +28,7 @@ void gelu_launch(Tensor& x, GeluMode mode, cudaStream_t stream) {
             gelu_bf16x8_kernel<false, block>
                 <<<grid, block, 0, stream>>>(static_cast<Bf16x8Pack*>(x.data), packs);
         }
-        CUDA_CHECK(cudaGetLastError());
+        HIP_CHECK(hipGetLastError());
         return;
     }
     const bool paired = (address & 0x3u) == 0;
@@ -36,8 +37,8 @@ void gelu_launch(Tensor& x, GeluMode mode, cudaStream_t stream) {
         const int grid           = static_cast<int>(std::min<std::int64_t>(
             div_up(pairs, static_cast<std::int64_t>(block * kGeluPairsPerThread)),
             std::numeric_limits<int>::max()));
-        auto* x2                 = static_cast<__nv_bfloat162*>(x.data);
-        auto* tail               = static_cast<__nv_bfloat16*>(x.data) + pairs * 2;
+        auto* x2                 = static_cast<__hip_bfloat162*>(x.data);
+        auto* tail               = static_cast<__hip_bfloat16*>(x.data) + pairs * 2;
         if (mode == GeluMode::Tanh) {
             gelu_bf16x2_kernel<true, block>
                 <<<grid, block, 0, stream>>>(x2, pairs, tail, (n & 1) != 0);
@@ -45,18 +46,18 @@ void gelu_launch(Tensor& x, GeluMode mode, cudaStream_t stream) {
             gelu_bf16x2_kernel<false, block>
                 <<<grid, block, 0, stream>>>(x2, pairs, tail, (n & 1) != 0);
         }
-        CUDA_CHECK(cudaGetLastError());
+        HIP_CHECK(hipGetLastError());
         return;
     }
 
     const int grid = static_cast<int>(std::min<std::int64_t>(
         div_up(n, static_cast<std::int64_t>(block)), std::numeric_limits<int>::max()));
     if (mode == GeluMode::Tanh) {
-        gelu_kernel<true><<<grid, block, 0, stream>>>(static_cast<__nv_bfloat16*>(x.data), n);
+        gelu_kernel<true><<<grid, block, 0, stream>>>(static_cast<__hip_bfloat16*>(x.data), n);
     } else {
-        gelu_kernel<false><<<grid, block, 0, stream>>>(static_cast<__nv_bfloat16*>(x.data), n);
+        gelu_kernel<false><<<grid, block, 0, stream>>>(static_cast<__hip_bfloat16*>(x.data), n);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

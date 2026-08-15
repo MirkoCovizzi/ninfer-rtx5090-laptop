@@ -1,14 +1,16 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
 namespace ninfer::ops {
 
-__global__ void vision_pos_embed_add_d1152_warp_kernel(const __nv_bfloat162* table,
+__global__ void vision_pos_embed_add_d1152_warp_kernel(const __hip_bfloat162* table,
                                                        const std::int32_t* indices,
-                                                       const float* weights, __nv_bfloat162* x,
+                                                       const float* weights, __hip_bfloat162* x,
                                                        std::int32_t patches,
                                                        std::int32_t tiles_per_patch) {
     constexpr int pairs = 1152 / 2;
@@ -24,8 +26,8 @@ __global__ void vision_pos_embed_add_d1152_warp_kernel(const __nv_bfloat162* tab
     float corner_weights[4];
 #pragma unroll
     for (int corner = 0; corner < 4; ++corner) {
-        corner_indices[corner] = __shfl_sync(0xffffffffu, lane_index, corner);
-        corner_weights[corner] = __shfl_sync(0xffffffffu, lane_weight, corner);
+        corner_indices[corner] = __shfl_sync(0xffffffffffffffffull, lane_index, corner);
+        corner_weights[corner] = __shfl_sync(0xffffffffffffffffull, lane_weight, corner);
     }
 
     const std::int64_t x_base = static_cast<std::int64_t>(patch) * pairs;
@@ -39,7 +41,7 @@ __global__ void vision_pos_embed_add_d1152_warp_kernel(const __nv_bfloat162* tab
             lo += value.x * corner_weights[corner];
             hi += value.y * corner_weights[corner];
         }
-        const __nv_bfloat162 residual = x[x_base + pair];
+        const __hip_bfloat162 residual = x[x_base + pair];
         x[x_base + pair] =
             __floats2bfloat162_rn(__low2float(residual) + lo, __high2float(residual) + hi);
     }
@@ -47,8 +49,8 @@ __global__ void vision_pos_embed_add_d1152_warp_kernel(const __nv_bfloat162* tab
 
 template <int Block>
 __launch_bounds__(Block) __global__
-    void vision_pos_embed_add_d1152_kernel(const __nv_bfloat162* table, const std::int32_t* indices,
-                                           const float* weights, __nv_bfloat162* x,
+    void vision_pos_embed_add_d1152_kernel(const __hip_bfloat162* table, const std::int32_t* indices,
+                                           const float* weights, __hip_bfloat162* x,
                                            std::int32_t patches) {
     constexpr int d     = 1152;
     constexpr int pairs = d / 2;
@@ -74,14 +76,14 @@ __launch_bounds__(Block) __global__
             lo += value.x * corner_weights[corner];
             hi += value.y * corner_weights[corner];
         }
-        const __nv_bfloat162 residual = x[x_base + pair];
+        const __hip_bfloat162 residual = x[x_base + pair];
         x[x_base + pair] =
             __floats2bfloat162_rn(__low2float(residual) + lo, __high2float(residual) + hi);
     }
 }
 
-__global__ void vision_pos_embed_add_kernel(const __nv_bfloat16* table, const std::int32_t* indices,
-                                            const float* weights, __nv_bfloat16* x, std::int32_t d,
+__global__ void vision_pos_embed_add_kernel(const __hip_bfloat16* table, const std::int32_t* indices,
+                                            const float* weights, __hip_bfloat16* x, std::int32_t d,
                                             std::int32_t patches, std::int32_t table_rows,
                                             std::int64_t n) {
     const std::int64_t start  = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;

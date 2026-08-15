@@ -1,7 +1,7 @@
 #include "core/device.h"
 #include "core/paged_kv_cache.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -36,8 +36,8 @@ int fail(const char* message) {
     return 1;
 }
 
-bool cuda_unavailable(cudaError_t err) {
-    return err == cudaErrorNoDevice || err == cudaErrorInsufficientDriver;
+bool hip_unavailable(hipError_t err) {
+    return err == hipErrorNoDevice || err == hipErrorInsufficientDriver;
 }
 
 int expect_size(std::size_t actual, std::size_t expected, const char* label) {
@@ -72,35 +72,35 @@ int expect_page_ids(std::span<const std::int32_t> actual,
 int expect_device_page_ids(const ninfer::Tensor& row, std::initializer_list<std::int32_t> expected,
                            const char* label) {
     std::vector<std::int32_t> actual(expected.size());
-    const cudaError_t err = cudaMemcpy(
-        actual.data(), row.data, actual.size() * sizeof(std::int32_t), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        std::cerr << label << " copy failed: " << cudaGetErrorString(err) << '\n';
+    const hipError_t err = hipMemcpy(
+        actual.data(), row.data, actual.size() * sizeof(std::int32_t), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        std::cerr << label << " copy failed: " << hipGetErrorString(err) << '\n';
         return 1;
     }
     return expect_page_ids(actual, expected, label);
 }
 
 int expect_zeroed_pages(ninfer::PagedKVPool& pool, ninfer::PagedKVPlaneOrder order,
-                        std::span<const std::int32_t> pages, cudaStream_t stream,
+                        std::span<const std::int32_t> pages, hipStream_t stream,
                         const char* label) {
     const ninfer::Tensor& plane = pool.plane(0);
-    cudaError_t err             = cudaMemsetAsync(plane.data, 0x5a, plane.bytes(), stream);
-    if (err != cudaSuccess) {
-        std::cerr << label << " setup failed: " << cudaGetErrorString(err) << '\n';
+    hipError_t err             = hipMemsetAsync(plane.data, 0x5a, plane.bytes(), stream);
+    if (err != hipSuccess) {
+        std::cerr << label << " setup failed: " << hipGetErrorString(err) << '\n';
         return 1;
     }
     pool.zero_pages(pages, stream);
-    err = cudaStreamSynchronize(stream);
-    if (err != cudaSuccess) {
-        std::cerr << label << " synchronization failed: " << cudaGetErrorString(err) << '\n';
+    err = hipStreamSynchronize(stream);
+    if (err != hipSuccess) {
+        std::cerr << label << " synchronization failed: " << hipGetErrorString(err) << '\n';
         return 1;
     }
 
     std::vector<unsigned char> actual(plane.bytes());
-    err = cudaMemcpy(actual.data(), plane.data, actual.size(), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        std::cerr << label << " copy failed: " << cudaGetErrorString(err) << '\n';
+    err = hipMemcpy(actual.data(), plane.data, actual.size(), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        std::cerr << label << " copy failed: " << hipGetErrorString(err) << '\n';
         return 1;
     }
     std::vector<unsigned char> expected(actual.size(), 0x5a);
@@ -127,13 +127,13 @@ int expect_zeroed_pages(ninfer::PagedKVPool& pool, ninfer::PagedKVPlaneOrder ord
 
 int main() {
     int count                   = 0;
-    const cudaError_t count_err = cudaGetDeviceCount(&count);
-    if (cuda_unavailable(count_err) || (count_err == cudaSuccess && count == 0)) {
+    const hipError_t count_err = hipGetDeviceCount(&count);
+    if (hip_unavailable(count_err) || (count_err == hipSuccess && count == 0)) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
-    if (count_err != cudaSuccess) {
-        std::cerr << "cudaGetDeviceCount failed: " << cudaGetErrorString(count_err) << '\n';
+    if (count_err != hipSuccess) {
+        std::cerr << "hipGetDeviceCount failed: " << hipGetErrorString(count_err) << '\n';
         return 1;
     }
 

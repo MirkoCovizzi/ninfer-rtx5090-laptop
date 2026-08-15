@@ -1,10 +1,11 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/arena.h"
 #include "core/paged_kv_cache.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -55,7 +56,7 @@ void bidirectional_gqa_attention(const Tensor& q, const Tensor& query_k, const T
                                  const Tensor& table_rows, float scale,
                                  const PagedKVBatchLayerView& context,
                                  GqaContextExecutionEnvelope envelope, WorkspaceArena& workspace,
-                                 Tensor& out, cudaStream_t stream);
+                                 Tensor& out, hipStream_t stream);
 
 /**
  * Returns the transient arena capacity required for every T in the inclusive optimized interval.

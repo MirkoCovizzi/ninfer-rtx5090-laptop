@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/bidirectional_gqa_attention.h"
 
 #include "core/arena.h"
@@ -302,7 +303,7 @@ int run_case(int tokens, int context_length, InputProfile profile = InputProfile
     ops::bidirectional_gqa_attention(q_tensor, query_k_tensor, query_v_tensor, length_tensor,
                                      valid_tensor, table_row_tensor, kScale, context, envelope,
                                      workspace, out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     std::string label = "bidirectional_gqa_attention T=" + std::to_string(tokens) +
                         " L=" + std::to_string(context_length) +
@@ -411,24 +412,24 @@ int graph_mapping_replay_case() {
     DeviceArena workspace(
         ops::bidirectional_gqa_attention_workspace_capacity_bytes(envelope, tokens, tokens, 1));
 
-    cudaStream_t stream        = nullptr;
-    cudaGraph_t graph          = nullptr;
-    cudaGraphExec_t executable = nullptr;
-    cuda_check(cudaStreamCreate(&stream), "create bidirectional GQA stream");
-    cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+    hipStream_t stream        = nullptr;
+    hipGraph_t graph          = nullptr;
+    hipGraphExec_t executable = nullptr;
+    hip_check(hipStreamCreate(&stream), "create bidirectional GQA stream");
+    hip_check(hipStreamBeginCapture(stream, hipStreamCaptureModeGlobal),
                "begin bidirectional GQA capture");
     ops::bidirectional_gqa_attention(q_tensor, query_k_tensor, query_v_tensor, length_tensor,
                                      valid_tensor, table_row_tensor, kScale, context, envelope,
                                      workspace, out_tensor, stream);
-    cuda_check(cudaStreamEndCapture(stream, &graph), "end bidirectional GQA capture");
-    cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
+    hip_check(hipStreamEndCapture(stream, &graph), "end bidirectional GQA capture");
+    hip_check(hipGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
                "instantiate bidirectional GQA graph");
 
     int failures = 0;
     for (const auto& replay_mapping : replay_mappings) {
         d_table.copy_from_host(replay_mapping.data(), sizeof(replay_mapping));
-        cuda_check(cudaGraphLaunch(executable, stream), "launch bidirectional GQA graph");
-        cuda_synchronize(stream);
+        hip_check(hipGraphLaunch(executable, stream), "launch bidirectional GQA graph");
+        hip_synchronize(stream);
         const std::vector<std::int32_t> mapping(replay_mapping.begin(), replay_mapping.end());
         const std::string label =
             "bidirectional_gqa_attention graph mapping=" + std::to_string(mapping[0]) + "," +
@@ -439,9 +440,9 @@ int graph_mapping_replay_case() {
                                  from_device<std::int32_t>(d_table, mapping.size()), mapping);
     }
 
-    cudaGraphExecDestroy(executable);
-    cudaGraphDestroy(graph);
-    cudaStreamDestroy(stream);
+    hipGraphExecDestroy(executable);
+    hipGraphDestroy(graph);
+    hipStreamDestroy(stream);
     failures += d_out.verify_guards("bidirectional GQA graph output guards");
     return failures;
 }
@@ -538,7 +539,7 @@ int batch_table_case() {
         ops::bidirectional_gqa_attention(q_row, query_k_row, query_v_row, length_row, valid_row,
                                          table_row, kScale, context, envelope, single_workspace,
                                          single_out_tensor, nullptr);
-        cuda_synchronize();
+        hip_synchronize();
         const auto row = from_device<std::uint16_t>(single_out.data(), row_q_count);
         std::copy(row.begin(), row.end(),
                   expected.begin() + static_cast<std::ptrdiff_t>(b * row_q_count));
@@ -549,7 +550,7 @@ int batch_table_case() {
     ops::bidirectional_gqa_attention(q_tensor, query_k_tensor, query_v_tensor, length_tensor,
                                      valid_tensor, table_row_tensor, kScale, context, envelope,
                                      workspace, out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures =
         verify_exact("bidirectional_gqa_attention B=2 mixed lengths and table rows",
@@ -561,7 +562,7 @@ int batch_table_case() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: CUDA device unavailable\n";
         return 77;
     }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Cold-cache qualification rig for the exact fused BF16 GDN-control projections.
 //
 // Examples:
@@ -9,7 +10,7 @@
 #include "ninfer_bench_common.h"
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -50,7 +51,7 @@ DeviceBuffer make_f32(std::size_t n, std::uint32_t seed) {
         h[i]          = 2.0f * u - 1.0f;
     }
     DeviceBuffer d(n * sizeof(float));
-    cudaMemcpy(d.p, h.data(), d.bytes, cudaMemcpyHostToDevice);
+    hipMemcpy(d.p, h.data(), d.bytes, hipMemcpyHostToDevice);
     return d;
 }
 
@@ -203,7 +204,7 @@ void run(const Options& opt, std::int32_t tokens, std::size_t interval_capacity,
     const auto norm_plan              = ops::detail::bf16_gdn_norm_gating_resolve_plan(problem);
     const std::size_t workspace_bytes = std::max(interval_capacity, plan.workspace_bytes);
     WorkspaceArena ws(std::max<std::size_t>(1, workspace_bytes));
-    const auto launch = [&](cudaStream_t stream) {
+    const auto launch = [&](hipStream_t stream) {
         if (opt.norm_control && opt.composed_norm_control) {
             ops::rmsnorm(tx, tnorm_weight, 1.0e-6F, true, th, stream);
             if (opt.geometry35) {
@@ -269,7 +270,7 @@ void run(const Options& opt, std::int32_t tokens, std::size_t interval_capacity,
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/vision_attention.h"
 
 #include "core/arena.h"
@@ -204,7 +205,7 @@ int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProf
         }
         ops::vision_attention(q_tensor, k_tensor, v_tensor, segment_length, out_tensor, nullptr);
     }
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = "vision_attention P=" + std::to_string(patches) +
                               " S=" + std::to_string(cu_seqlens.size() - 1) + " " +
@@ -242,7 +243,7 @@ int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProf
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: CUDA device unavailable\n";
         return 77;
     }

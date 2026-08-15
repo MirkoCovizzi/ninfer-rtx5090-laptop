@@ -1,7 +1,8 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/layer_norm.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -14,8 +15,8 @@ using namespace ninfer::bench;
 namespace {
 
 template <int Block>
-__global__ void layer_norm_payload_control(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                           const __nv_bfloat162* bias, __nv_bfloat162* out,
+__global__ void layer_norm_payload_control(const __hip_bfloat162* x, const __hip_bfloat162* weight,
+                                           const __hip_bfloat162* bias, __hip_bfloat162* out,
                                            std::int64_t rows) {
     constexpr int d        = 1152;
     constexpr int pairs    = d / 2;
@@ -47,16 +48,16 @@ void run(int patches, bool control) {
     Tensor tout(out.p, DType::BF16, {d, patches});
 
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 constexpr int block = 128;
                 constexpr int warps = block / 32;
                 const unsigned grid = static_cast<unsigned>((patches + warps - 1) / warps);
                 layer_norm_payload_control<block>
-                    <<<grid, block, 0, stream>>>(static_cast<const __nv_bfloat162*>(x.p),
-                                                 static_cast<const __nv_bfloat162*>(weight.p),
-                                                 static_cast<const __nv_bfloat162*>(bias.p),
-                                                 static_cast<__nv_bfloat162*>(out.p), patches);
+                    <<<grid, block, 0, stream>>>(static_cast<const __hip_bfloat162*>(x.p),
+                                                 static_cast<const __hip_bfloat162*>(weight.p),
+                                                 static_cast<const __hip_bfloat162*>(bias.p),
+                                                 static_cast<__hip_bfloat162*>(out.p), patches);
             } else {
                 ops::layer_norm(tx, tw, tb, 1.0e-6f, tout, stream);
             }
@@ -72,7 +73,7 @@ void run(int patches, bool control) {
 
 int main(int argc, char** argv) {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

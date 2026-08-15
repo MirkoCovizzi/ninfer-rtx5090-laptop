@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Host-only support for the product throughput benchmark. The benchmark itself drives only the
@@ -66,7 +67,7 @@ struct BenchOptions {
     std::uint32_t mtp_draft_tokens = 0;
     ProposalHead proposal_head     = ProposalHead::Full;
     int device                     = 0;
-    bool use_cuda_graph            = true;
+    bool use_hip_graph            = true;
     bool profile_measured          = false;
     OutputFormat output            = OutputFormat::Table;
     std::string output_file;
@@ -94,8 +95,8 @@ struct Stats {
 
 struct BenchEnvironment {
     std::string gpu_name;
-    std::string cuda_runtime_version;
-    std::string cuda_driver_version;
+    std::string hip_runtime_version;
+    std::string hip_driver_version;
     int device_id = 0;
 
     std::string artifact_path;
@@ -108,7 +109,7 @@ struct BenchEnvironment {
     KvCacheStorage kv_cache                        = KvCacheStorage::BFloat16;
     std::uint32_t mtp_draft_tokens                 = 0;
     ProposalHead proposal_head                     = ProposalHead::Full;
-    bool use_cuda_graph                            = true;
+    bool use_hip_graph                            = true;
     bool decode_graph_primed                       = false;
     std::uint32_t decode_graph_prime_output_tokens = 0;
     int repetitions                                = 0;
@@ -123,12 +124,12 @@ std::string usage_text(std::string_view program);
 std::vector<BenchTest> expand_tests(const BenchOptions& options);
 std::uint32_t resolve_max_context(const std::vector<BenchTest>& tests,
                                   std::optional<std::uint32_t> override_max_context,
-                                  std::uint32_t mtp_draft_tokens, bool use_cuda_graph);
+                                  std::uint32_t mtp_draft_tokens, bool use_hip_graph);
 void validate_prompt_lengths(const std::vector<BenchTest>& tests, std::size_t corpus_tokens);
 
 std::vector<TokenId> load_corpus_ids(const std::string& path);
 std::vector<TokenId> prompt_slice(const std::vector<TokenId>& corpus, int n_prompt);
-std::string decode_path_name(bool use_cuda_graph, std::uint32_t mtp_draft_tokens);
+std::string decode_path_name(bool use_hip_graph, std::uint32_t mtp_draft_tokens);
 std::uint32_t decode_graph_prime_output_tokens(std::uint32_t mtp_draft_tokens);
 std::uint32_t decode_graph_prime_required_context(std::uint32_t mtp_draft_tokens);
 

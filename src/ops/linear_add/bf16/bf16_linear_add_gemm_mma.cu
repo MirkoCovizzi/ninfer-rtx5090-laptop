@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
 
 #include "core/device.h"
@@ -5,7 +6,8 @@
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_gemm_mma_config.h"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -13,12 +15,12 @@ namespace ninfer::ops::detail {
 namespace {
 
 struct Bf16LinearAddMmaOutputTile {
-    __nv_bfloat16* residual;
+    __hip_bfloat16* residual;
     std::int32_t leading_dim;
 
     __device__ __forceinline__ void store(std::int32_t row, std::int32_t token,
                                           float accumulator) const {
-        __nv_bfloat16* destination =
+        __hip_bfloat16* destination =
             residual + static_cast<std::int64_t>(token) * leading_dim + row;
         const float residual_value = __bfloat162float(*destination);
         *destination               = __float2bfloat16_rn(accumulator + residual_value);
@@ -26,7 +28,7 @@ struct Bf16LinearAddMmaOutputTile {
 };
 
 struct Bf16LinearAddMmaOutput {
-    __nv_bfloat16* residual;
+    __hip_bfloat16* residual;
     std::int32_t leading_dim;
 
     __device__ __forceinline__ Bf16LinearAddMmaOutputTile tile(std::int32_t) const {
@@ -35,7 +37,7 @@ struct Bf16LinearAddMmaOutput {
 };
 
 template <class Schedule, bool FullTokens>
-void launch_variant(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
+void launch_variant(const Tensor& x, const Weight& weight, Tensor& residual, hipStream_t stream) {
     using Geometry = Bf16GemvGeometry<5120, 6144>;
     static_assert((Geometry::kOutputRows % Schedule::kBlockRows) == 0);
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
@@ -43,26 +45,26 @@ void launch_variant(const Tensor& x, const Weight& weight, Tensor& residual, cud
     constexpr int tiles_m = Geometry::kOutputRows / Schedule::kBlockRows;
     const int tiles_n     = div_up(x.ne[1], Schedule::kBlockCols);
     const int blocks      = tiles_m * tiles_n;
-    const Bf16LinearAddMmaOutput output{static_cast<__nv_bfloat16*>(residual.data),
+    const Bf16LinearAddMmaOutput output{static_cast<__hip_bfloat16*>(residual.data),
                                         Geometry::kOutputRows};
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attr = cudaFuncSetAttribute(
-            bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16LinearAddMmaOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attr);
+        static const hipError_t attr = hipFuncSetAttribute(reinterpret_cast<const void*>(
+            bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16LinearAddMmaOutput>),
+            hipFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
+        HIP_CHECK(attr);
     }
     bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.qdata), output, x.ne[1]);
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.qdata), output, x.ne[1]);
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
 
 void bf16_linear_add_aggregate_mma_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                          cudaStream_t stream) {
+                                          hipStream_t stream) {
     using UpTo32 = Bf16MmaSchedule<32, 32, 256, 16, 8, 3, 1, Cache::cg, Cache::cg,
                                    Bf16MmaFragmentPipeline::PingPong, Bf16MmaRaster::TokenFast>;
     using UpTo48 = Bf16MmaSchedule<32, 32, 192, 16, 8, 2, 2, Cache::cg, Cache::ca,
@@ -80,7 +82,7 @@ void bf16_linear_add_aggregate_mma_launch(const Tensor& x, const Weight& weight,
 }
 
 void bf16_linear_add_mma_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     using Geometry = Bf16GemvGeometry<5120, 6144>;
     using Schedule = Bf16MmaProductionSchedule<Geometry>;
     if ((x.ne[1] % Schedule::kBlockCols) == 0) {

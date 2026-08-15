@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -36,6 +37,6 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
                             const Tensor& rope_deltas, Tensor& alignment_ids, Tensor& next_extents,
                             Tensor& ar_positions, Tensor& ar_rope_positions,
                             Tensor& ar_valid_columns, std::int32_t max_context,
-                            cudaStream_t stream);
+                            hipStream_t stream);
 
 } // namespace ninfer::ops

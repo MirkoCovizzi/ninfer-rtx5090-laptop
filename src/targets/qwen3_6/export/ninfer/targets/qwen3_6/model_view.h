@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include <ninfer/targets/qwen3_6/startup_features.h>

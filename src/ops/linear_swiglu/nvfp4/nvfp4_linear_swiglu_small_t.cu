@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 
 #include "core/device.h"
@@ -6,7 +7,8 @@
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_small_t.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <array>
 #include <cstddef>
@@ -22,13 +24,13 @@ template <int ActiveTokens, class Schedule>
 __global__ __launch_bounds__(
     Schedule::kThreads,
     Schedule::
-        kMinBlocksPerSm) void nvfp4_linear_swiglu_small_t_kernel(const __nv_bfloat16* __restrict__ x,
+        kMinBlocksPerSm) void nvfp4_linear_swiglu_small_t_kernel(const __hip_bfloat16* __restrict__ x,
                                                                  const std::
                                                                      uint8_t* __restrict__ codes,
                                                                  const std::
                                                                      uint8_t* __restrict__ scales,
                                                                  float inverse_weight_divisor,
-                                                                 __nv_bfloat16* __restrict__ out) {
+                                                                 __hip_bfloat16* __restrict__ out) {
     static_assert(Schedule::kWarpsPerRow == 1);
     static_assert(Schedule::kRowsPerWarp == 2);
     static_assert(Schedule::kTokenTile == ActiveTokens);
@@ -72,10 +74,10 @@ __global__ __launch_bounds__(
     }
 }
 
-using Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+using Launch = void (*)(const Tensor&, const Weight&, Tensor&, hipStream_t);
 
 template <int ActiveTokens>
-void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     static constexpr auto kActivationAccess = ActiveTokens <= 4
                                                   ? Nvfp4SmallTActivationAccess::SharedPhase
                                                   : Nvfp4SmallTActivationAccess::TokenPacked;
@@ -88,11 +90,11 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream
     const float inverse   = 1.0F / weight.weight_scale_divisor;
     nvfp4_linear_swiglu_small_t_kernel<ActiveTokens, Schedule>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), inverse,
-            static_cast<__nv_bfloat16*>(out.data));
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<__hip_bfloat16*>(out.data));
+    HIP_CHECK(hipGetLastError());
 }
 
 template <std::size_t... Offsets>
@@ -106,7 +108,7 @@ constexpr auto kLaunchers = make_launchers(std::make_index_sequence<16 - kNvfp4F
 } // namespace
 
 void nvfp4_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
-                                        cudaStream_t stream) {
+                                        hipStream_t stream) {
     const std::size_t index = static_cast<std::size_t>(x.ne[1] - kNvfp4FirstSmallT);
     kLaunchers[index](x, weight, out, stream);
 }

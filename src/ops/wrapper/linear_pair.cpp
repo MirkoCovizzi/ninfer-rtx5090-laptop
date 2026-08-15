@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/linear_pair.h"
 
 #include "ops/linear_pair/w8/w8_pair_plan.h"
@@ -89,7 +90,7 @@ void require_nonoverlap(const Tensor& x, const Weight& first_weight, const Weigh
 } // namespace
 
 void linear_pair(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
-                 Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+                 Tensor& first_out, Tensor& second_out, hipStream_t stream) {
     const std::int32_t cols = x.ne[1];
     if (x.ne[0] != 5120 && x.ne[0] != 2048) {
         throw std::invalid_argument("linear_pair: x K must be 5120 or 2048");

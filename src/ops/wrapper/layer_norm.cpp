@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/layer_norm.h"
 
 #include "ops/launcher/layer_norm.h"
@@ -30,7 +31,7 @@ bool vector_of(const Tensor& t, std::int32_t d) {
 } // namespace
 
 void layer_norm(const Tensor& x, const Tensor& weight, const Tensor& bias, float eps, Tensor& out,
-                cudaStream_t stream) {
+                hipStream_t stream) {
     if (x.dtype != DType::BF16 || weight.dtype != DType::BF16 || bias.dtype != DType::BF16 ||
         out.dtype != DType::BF16) {
         throw std::invalid_argument("layer_norm: x/weight/bias/out must be BF16");

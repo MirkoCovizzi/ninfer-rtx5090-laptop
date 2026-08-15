@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Implements: include/ninfer/ops/speculative_round.h
@@ -8,7 +9,8 @@
 
 #include "ops/kernel/sampling_device.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstddef>
 #include <cstdint>
@@ -70,7 +72,7 @@ speculative_workspace_row(SamplingWorkspace workspace, std::size_t row_stride, s
 // threads; only thread 0 performs the sequential accept/commit while the whole
 // block cooperates on the per-column truncated-distribution build.
 __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_drafts_kernel(
-    const std::int32_t* target_tokens, const __nv_bfloat16* logits, const std::int32_t* drafts,
+    const std::int32_t* target_tokens, const __hip_bfloat16* logits, const std::int32_t* drafts,
     const std::int32_t* current_extents, std::int32_t* lengths, std::int32_t* anchors,
     std::int32_t* licensed_tokens, std::int32_t* licensed_counts, std::int32_t* accepted,
     const SamplingConfig* configs, std::int32_t token_domain, std::int32_t physical_rows,
@@ -84,7 +86,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
     const std::int32_t* row_targets = target_tokens + row * cols;
     const std::int32_t* row_drafts  = drafts + row * k;
     std::int32_t* row_tokens        = licensed_tokens + row * cols;
-    const __nv_bfloat16* row_logits =
+    const __hip_bfloat16* row_logits =
         logits + static_cast<std::int64_t>(row) * cols * physical_rows;
 
     if (!(cfg.temperature > 0.0f)) {
@@ -198,7 +200,7 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
 }
 
 __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_topk_kernel(
-    const __nv_bfloat16* logits, const std::int32_t* drafts, const std::int32_t* current_extents,
+    const __hip_bfloat16* logits, const std::int32_t* drafts, const std::int32_t* current_extents,
     const SamplingConfig* configs, std::int32_t token_domain, std::int32_t physical_rows,
     std::int32_t cols, std::int32_t k, SamplingWorkspace workspace,
     std::size_t workspace_row_stride) {
@@ -426,9 +428,9 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
     }
 }
 
-__global__ void speculative_select_accepted_hidden_kernel(const __nv_bfloat16* hidden,
+__global__ void speculative_select_accepted_hidden_kernel(const __hip_bfloat16* hidden,
                                                           const std::int32_t* selectors,
-                                                          __nv_bfloat16* out, std::int32_t rows,
+                                                          __hip_bfloat16* out, std::int32_t rows,
                                                           std::int32_t cols) {
     const int batch = static_cast<int>(blockIdx.y);
     const int row   = blockIdx.x * blockDim.x + threadIdx.x;

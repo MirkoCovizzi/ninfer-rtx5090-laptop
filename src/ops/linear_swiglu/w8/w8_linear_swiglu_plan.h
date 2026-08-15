@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -41,7 +41,7 @@ bool w8_linear_swiglu_admits(const W8LinearSwiGluProblem& problem) noexcept;
 W8LinearSwiGluPlan w8_linear_swiglu_resolve_plan(const W8LinearSwiGluProblem& problem);
 
 void w8_linear_swiglu_execute_plan(const W8LinearSwiGluPlan& plan, const Tensor& x, const Weight& w,
-                                   Tensor& out, cudaStream_t stream);
-void w8_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
+                                   Tensor& out, hipStream_t stream);
+void w8_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

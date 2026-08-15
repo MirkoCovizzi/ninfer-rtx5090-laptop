@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/sparse_moe.h"
 
 #include "core/nvtx.h"
@@ -190,7 +191,7 @@ std::size_t sparse_moe_workspace_capacity_bytes(QType routed_gate_up, QType rout
 }
 
 void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilogue epilogue,
-                Tensor& destination, WorkspaceArena& workspace, cudaStream_t stream) {
+                Tensor& destination, WorkspaceArena& workspace, hipStream_t stream) {
     if (epilogue != SparseMoeEpilogue::AddResidual) {
         throw std::invalid_argument("sparse_moe: unsupported epilogue");
     }

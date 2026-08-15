@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - residual_add wrapper: implements the public api, validates parameters, and
 // dispatches to the launcher. Host-compiled; never includes the kernel header.
 // See docs/op-development.md §2.
@@ -29,7 +30,7 @@ std::int64_t numel_allow_zero(const Tensor& t) {
 
 } // namespace
 
-void residual_add(const Tensor& y, Tensor& x, cudaStream_t stream) {
+void residual_add(const Tensor& y, Tensor& x, hipStream_t stream) {
     if (y.dtype != DType::BF16 || x.dtype != DType::BF16) {
         throw std::invalid_argument("residual_add: y/x must be BF16");
     }

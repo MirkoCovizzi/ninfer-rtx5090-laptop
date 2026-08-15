@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer_bench_support.h"
 
 #include <algorithm>
@@ -274,7 +275,7 @@ std::string usage_text(std::string_view program) {
         << "  --mtp-draft-tokens <0..5>   speculative draft window (default: 0)\n"
         << "  --lm-head-draft             use the optimized proposal head; requires MTP\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
-        << "  --no-cuda-graph             use eager decode\n"
+        << "  --no-hip-graph             use eager decode\n"
         << "  --profile-measured          bracket one measured repetition with CUDA profiler API\n"
         << "  -o, --output <table|json|csv>  output format (default: table)\n"
         << "  --output-file <path>        write report to a file\n"
@@ -333,8 +334,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--device") {
             options.device = parse_nonnegative(value("--device"), "device");
-        } else if (arg == "--no-cuda-graph") {
-            options.use_cuda_graph = false;
+        } else if (arg == "--no-hip-graph") {
+            options.use_hip_graph = false;
         } else if (arg == "--profile-measured") {
             options.profile_measured = true;
         } else if (arg == "-o" || arg == "--output") {
@@ -390,7 +391,7 @@ std::vector<BenchTest> expand_tests(const BenchOptions& options) {
 
 std::uint32_t resolve_max_context(const std::vector<BenchTest>& tests,
                                   std::optional<std::uint32_t> override_max_context,
-                                  std::uint32_t mtp_draft_tokens, bool use_cuda_graph) {
+                                  std::uint32_t mtp_draft_tokens, bool use_hip_graph) {
     if (mtp_draft_tokens > kMaxMtpDraftTokens) {
         throw std::invalid_argument("mtp draft window must be in [0,5]");
     }
@@ -405,7 +406,7 @@ std::uint32_t resolve_max_context(const std::vector<BenchTest>& tests,
         }
         has_decode = has_decode || test.has_decode();
     }
-    if (use_cuda_graph && has_decode) {
+    if (use_hip_graph && has_decode) {
         const std::uint32_t candidate = decode_graph_prime_required_context(mtp_draft_tokens);
         if (candidate > required) {
             required = candidate;
@@ -452,9 +453,9 @@ std::vector<TokenId> prompt_slice(const std::vector<TokenId>& corpus, int n_prom
     return {corpus.begin(), corpus.begin() + n_prompt};
 }
 
-std::string decode_path_name(bool use_cuda_graph, std::uint32_t mtp_draft_tokens) {
-    if (mtp_draft_tokens != 0) { return use_cuda_graph ? "mtp_cuda_graph" : "mtp_eager"; }
-    return use_cuda_graph ? "cuda_graph" : "eager";
+std::string decode_path_name(bool use_hip_graph, std::uint32_t mtp_draft_tokens) {
+    if (mtp_draft_tokens != 0) { return use_hip_graph ? "mtp_hip_graph" : "mtp_eager"; }
+    return use_hip_graph ? "hip_graph" : "eager";
 }
 
 std::uint32_t decode_graph_prime_output_tokens(std::uint32_t mtp_draft_tokens) {
@@ -549,8 +550,8 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << "  target:     " << env.load.target << '\n'
         << "  weights:    " << env.load.weights_id << '\n'
         << "  gpu:        " << env.gpu_name << " (device " << env.device_id << ")\n"
-        << "  cuda:       runtime " << env.cuda_runtime_version << ", driver "
-        << env.cuda_driver_version << '\n'
+        << "  hip:       runtime " << env.hip_runtime_version << ", driver "
+        << env.hip_driver_version << '\n'
         << "  artifact:   " << env.artifact_path << " (" << env.artifact_file_size_bytes
         << " bytes)\n"
         << "  load:       " << env.load.load_seconds << " s, upload " << env.load.upload_seconds
@@ -561,13 +562,13 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << ", sequence " << format_bytes(env.memory.sequence.capacity_bytes) << ", workspace "
         << format_bytes(env.memory.workspace.capacity_bytes) << ", request transient "
         << format_bytes(env.memory.request_transient.capacity_bytes) << ", graph allowance "
-        << format_bytes(env.memory.cuda_graph_allowance_bytes) << ", KV payload "
+        << format_bytes(env.memory.hip_graph_allowance_bytes) << ", KV payload "
         << format_bytes(env.memory.kv_payload_bytes) << '\n'
         << "  corpus:     " << env.corpus_path << " (" << env.corpus_tokens << " tokens)\n"
         << "  config:     max_context=" << env.max_context << " prefill_chunk=" << env.prefill_chunk
         << " kv_cache=" << kv_cache_name(env.kv_cache) << " mtp_k=" << env.mtp_draft_tokens
         << " proposal_head=" << proposal_head_name(env.proposal_head)
-        << " decode_path=" << decode_path_name(env.use_cuda_graph, env.mtp_draft_tokens)
+        << " decode_path=" << decode_path_name(env.use_hip_graph, env.mtp_draft_tokens)
         << " graph_prime="
         << (env.decode_graph_primed
                 ? std::to_string(env.decode_graph_prime_output_tokens) + " outputs"
@@ -622,8 +623,8 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "  \"tool\": \"ninfer_bench\",\n"
         << "  \"command\": \"" << json_escape(command) << "\",\n"
         << "  \"environment\": {\"gpu_name\": \"" << json_escape(env.gpu_name)
-        << "\", \"cuda_runtime_version\": \"" << json_escape(env.cuda_runtime_version)
-        << "\", \"cuda_driver_version\": \"" << json_escape(env.cuda_driver_version)
+        << "\", \"hip_runtime_version\": \"" << json_escape(env.hip_runtime_version)
+        << "\", \"hip_driver_version\": \"" << json_escape(env.hip_driver_version)
         << "\", \"device_id\": " << env.device_id << "},\n"
         << "  \"artifact\": {\"path\": \"" << json_escape(env.artifact_path)
         << "\", \"file_size_bytes\": " << env.artifact_file_size_bytes << "},\n"
@@ -664,8 +665,8 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << ",\n"
         << "    \"kv_capacity_headroom_bytes\": " << env.memory.kv_capacity_headroom_bytes << ",\n"
         << "    \"planned_slack_bytes\": " << env.memory.planned_slack_bytes << ",\n"
-        << "    \"cuda_graph_allowance_bytes\": " << env.memory.cuda_graph_allowance_bytes << ",\n"
-        << "    \"cuda_graph_observed_bytes\": " << env.memory.cuda_graph_observed_bytes << ",\n"
+        << "    \"hip_graph_allowance_bytes\": " << env.memory.hip_graph_allowance_bytes << ",\n"
+        << "    \"hip_graph_observed_bytes\": " << env.memory.hip_graph_observed_bytes << ",\n"
         << "    \"kv_payload_bytes\": " << env.memory.kv_payload_bytes << "\n"
         << "  },\n"
         << "  \"config\": {\n"
@@ -674,8 +675,8 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "    \"kv_cache\": \"" << kv_cache_name(env.kv_cache) << "\",\n"
         << "    \"mtp_draft_tokens\": " << env.mtp_draft_tokens << ",\n"
         << "    \"proposal_head\": \"" << proposal_head_name(env.proposal_head) << "\",\n"
-        << "    \"use_cuda_graph\": " << (env.use_cuda_graph ? "true" : "false") << ",\n"
-        << "    \"decode_path\": \"" << decode_path_name(env.use_cuda_graph, env.mtp_draft_tokens)
+        << "    \"use_hip_graph\": " << (env.use_hip_graph ? "true" : "false") << ",\n"
+        << "    \"decode_path\": \"" << decode_path_name(env.use_hip_graph, env.mtp_draft_tokens)
         << "\",\n"
         << "    \"decode_graph_prime\": {\"primed\": "
         << (env.decode_graph_primed ? "true" : "false")
@@ -740,7 +741,7 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
     out << "label,kind,n_prompt,n_gen,target,weights_id,max_context,prefill_chunk,mtp_draft_tokens,"
            "proposal_head,decode_path,kv_cache,kv_payload_bytes,load_host_to_device_bytes,"
            "weights_capacity_bytes,sequence_capacity_bytes,workspace_capacity_bytes,"
-           "request_transient_capacity_bytes,cuda_graph_allowance_bytes,"
+           "request_transient_capacity_bytes,hip_graph_allowance_bytes,"
            "workspace_peak_bytes,workspace_allocator_peak_bytes,"
            "spec_rounds,spec_fallback_steps,spec_acceptance_rate,"
            "repetitions,prefill_tok_s_mean,prefill_tok_s_stddev,decode_output_tok_s_mean,"
@@ -762,12 +763,12 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
             << result.test.n_prompt << ',' << result.test.n_gen << ',' << env.load.target << ','
             << env.load.weights_id << ',' << env.max_context << ',' << env.prefill_chunk << ','
             << env.mtp_draft_tokens << ',' << proposal_head_name(env.proposal_head) << ','
-            << decode_path_name(env.use_cuda_graph, env.mtp_draft_tokens) << ','
+            << decode_path_name(env.use_hip_graph, env.mtp_draft_tokens) << ','
             << kv_cache_name(env.kv_cache) << ',' << env.memory.kv_payload_bytes << ','
             << env.load.host_to_device_bytes << ',' << env.memory.weights.capacity_bytes << ','
             << env.memory.sequence.capacity_bytes << ',' << env.memory.workspace.capacity_bytes
             << ',' << env.memory.request_transient.capacity_bytes << ','
-            << env.memory.cuda_graph_allowance_bytes << ',' << result.workspace_peak_bytes << ','
+            << env.memory.hip_graph_allowance_bytes << ',' << result.workspace_peak_bytes << ','
             << result.workspace_allocator_peak_bytes << ',' << spec.rounds << ','
             << spec.fallback_steps << ',' << acceptance << ',' << result.reps.size() << ','
             << mean(prefill_tok_s_series(result)) << ',' << stddev(prefill_tok_s_series(result))

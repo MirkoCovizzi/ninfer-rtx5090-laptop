@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Small fixed-capacity request scheduling and batched decode execution for every backend.

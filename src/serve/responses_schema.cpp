@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "serve/responses_schema.h"
 
 #include "serve/generation_service.h"

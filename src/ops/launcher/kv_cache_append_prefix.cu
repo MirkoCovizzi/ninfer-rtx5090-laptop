@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/launcher/kv_cache_append_prefix.h"
 
 #include "core/device.h"
@@ -20,13 +21,13 @@ void validate_plan(const Tensor& k, const KVCacheAppendPrefixPlan& plan) {
 
 void launch_paged(const Tensor& k, const Tensor& v, const Tensor& positions, const Tensor& counts,
                   const Tensor& table_rows, PagedKVBatchLayerView cache,
-                  const KVCacheAppendPrefixPlan& plan, cudaStream_t stream) {
+                  const KVCacheAppendPrefixPlan& plan, hipStream_t stream) {
     validate_plan(k, plan);
     if (plan.max_count == 0) return;
-    auto* cache_k       = static_cast<__nv_bfloat16*>(cache.k_pages.data);
-    auto* cache_v       = static_cast<__nv_bfloat16*>(cache.v_pages.data);
-    const auto* input_k = static_cast<const __nv_bfloat16*>(k.data);
-    const auto* input_v = static_cast<const __nv_bfloat16*>(v.data);
+    auto* cache_k       = static_cast<__hip_bfloat16*>(cache.k_pages.data);
+    auto* cache_v       = static_cast<__hip_bfloat16*>(cache.v_pages.data);
+    const auto* input_k = static_cast<const __hip_bfloat16*>(k.data);
+    const auto* input_v = static_cast<const __hip_bfloat16*>(v.data);
     const auto* pos     = static_cast<const std::int32_t*>(positions.data);
     const auto* count   = static_cast<const std::int32_t*>(counts.data);
     const auto* rows    = static_cast<const std::int32_t*>(table_rows.data);
@@ -36,18 +37,18 @@ void launch_paged(const Tensor& k, const Tensor& v, const Tensor& positions, con
     kv_cache_append_prefix_paged_kernel<<<grid, kBlock, 0, stream>>>(
         input_k, input_v, pos, count, rows, cache_k, cache_v, tables, cache.k_pages.ne[2],
         cache.block_tables.ne[0], plan.min_count, plan.max_count, plan.tokens);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void launch_cyclic(const Tensor& k, const Tensor& v, const Tensor& positions, const Tensor& counts,
                    const Tensor& lanes, CyclicKVCacheLayerView cache,
-                   const KVCacheAppendPrefixPlan& plan, cudaStream_t stream) {
+                   const KVCacheAppendPrefixPlan& plan, hipStream_t stream) {
     validate_plan(k, plan);
     if (plan.max_count == 0) return;
-    auto* cache_k       = static_cast<__nv_bfloat16*>(cache.k.data);
-    auto* cache_v       = static_cast<__nv_bfloat16*>(cache.v.data);
-    const auto* input_k = static_cast<const __nv_bfloat16*>(k.data);
-    const auto* input_v = static_cast<const __nv_bfloat16*>(v.data);
+    auto* cache_k       = static_cast<__hip_bfloat16*>(cache.k.data);
+    auto* cache_v       = static_cast<__hip_bfloat16*>(cache.v.data);
+    const auto* input_k = static_cast<const __hip_bfloat16*>(k.data);
+    const auto* input_v = static_cast<const __hip_bfloat16*>(v.data);
     const auto* pos     = static_cast<const std::int32_t*>(positions.data);
     const auto* count   = static_cast<const std::int32_t*>(counts.data);
     const auto* lane    = static_cast<const std::int32_t*>(lanes.data);
@@ -57,7 +58,7 @@ void launch_cyclic(const Tensor& k, const Tensor& v, const Tensor& positions, co
     kv_cache_append_prefix_cyclic_kernel<<<grid, kBlock, 0, stream>>>(
         input_k, input_v, pos, count, lane, cache_k, cache_v, plan.min_count, plan.max_count,
         plan.tokens, padded);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
@@ -82,14 +83,14 @@ kv_cache_append_prefix_resolve_plan(std::int32_t tokens,
 void kv_cache_append_prefix_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                                    const Tensor& counts, const Tensor& table_rows,
                                    PagedKVBatchLayerView cache, const KVCacheAppendPrefixPlan& plan,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     launch_paged(k, v, positions, counts, table_rows, cache, plan, stream);
 }
 
 void kv_cache_append_prefix_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                                    const Tensor& counts, const Tensor& lanes,
                                    CyclicKVCacheLayerView cache,
-                                   const KVCacheAppendPrefixPlan& plan, cudaStream_t stream) {
+                                   const KVCacheAppendPrefixPlan& plan, hipStream_t stream) {
     launch_cyclic(k, v, positions, counts, lanes, cache, plan, stream);
 }
 

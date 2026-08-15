@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // ninfer::ops - split-KV GQA small-T attention shared scaffolding. The bf16 and
@@ -12,8 +13,9 @@
 #include "ops/kernel/gqa_attention_geometry.cuh"
 #include "ops/kernel/paged_kv_address.cuh"
 
-#include <cuda_bf16.h>
-#include <math_constants.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_math_constants.h>
 
 #include <cstdint>
 
@@ -23,8 +25,8 @@ inline constexpr int kGqaHeadDim = 256;
 
 struct GqaAppendInput {
     static constexpr bool writes_cache = true;
-    const __nv_bfloat16* k;
-    const __nv_bfloat16* v;
+    const __hip_bfloat16* k;
+    const __hip_bfloat16* v;
 };
 
 struct GqaCachedInput {
@@ -144,10 +146,10 @@ __device__ __forceinline__ void gqa_small_t_tc_row_to_qt(int row, int tokens, in
 
 template <typename Geometry, int DChunk, bool Int8, bool MultiBatch, bool Masked, bool Offset>
 __launch_bounds__(256) __global__ void gqa_attention_small_t_reduce_output_kernel(
-    const __nv_bfloat16* partial_acc, const float* partial_m, const float* partial_l,
+    const __hip_bfloat16* partial_acc, const float* partial_m, const float* partial_l,
     const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
     std::int32_t full_width, std::int32_t column_begin, std::int32_t batch_size,
-    std::int32_t split_count, __nv_bfloat16* out) {
+    std::int32_t split_count, __hip_bfloat16* out) {
     static_assert(DChunk > 0 && DChunk <= kGqaHeadDim);
 
     const int q_head      = static_cast<int>(blockIdx.x);
@@ -188,7 +190,7 @@ __launch_bounds__(256) __global__ void gqa_attention_small_t_reduce_output_kerne
 
     __shared__ float reduce[256];
 
-    float local_m = -CUDART_INF_F;
+    float local_m = -HIP_INF_F;
     for (int split = tid; split < active_split_count; split += blockDim.x) {
         local_m = fmaxf(local_m,
                         partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)]);
@@ -203,7 +205,7 @@ __launch_bounds__(256) __global__ void gqa_attention_small_t_reduce_output_kerne
     const float head_m = reduce[0];
     __syncthreads();
 
-    if (head_m == -CUDART_INF_F) {
+    if (head_m == -HIP_INF_F) {
         const int d = d_start + tid;
         if (tid < DChunk && d < kGqaHeadDim) {
             out[gqa_q_index<Geometry>(q_head, d, output_column)] = __float2bfloat16(0.0f);

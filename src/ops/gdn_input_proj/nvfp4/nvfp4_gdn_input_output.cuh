@@ -1,8 +1,10 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/memory.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -12,10 +14,10 @@ struct Nvfp4GdnInputOutput {
     static constexpr std::int32_t kQkvRows = 10240;
     static constexpr std::int32_t kZRows   = 6144;
 
-    __nv_bfloat16* qkv;
-    __nv_bfloat16* z;
+    __hip_bfloat16* qkv;
+    __hip_bfloat16* z;
 
-    __device__ __forceinline__ __nv_bfloat16* destination(std::int32_t parent_row,
+    __device__ __forceinline__ __hip_bfloat16* destination(std::int32_t parent_row,
                                                           std::int32_t token) const {
         if (parent_row < kQkvRows) {
             return qkv + static_cast<std::int64_t>(token) * kQkvRows + parent_row;

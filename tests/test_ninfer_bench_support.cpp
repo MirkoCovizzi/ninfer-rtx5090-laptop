@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer_bench_support.h"
 
 #include <nlohmann/json.hpp>
@@ -86,7 +87,7 @@ int test_cli_contract() {
         "--lm-head-draft",
         "--device",
         "1",
-        "--no-cuda-graph",
+        "--no-hip-graph",
         "--profile-measured",
         "--output",
         "json",
@@ -106,7 +107,7 @@ int test_cli_contract() {
     failures += expect(parsed.mtp_draft_tokens == 5, "MTP window");
     failures +=
         expect(parsed.proposal_head == ninfer::ProposalHead::Optimized, "optimized proposal head");
-    failures += expect(parsed.device == 1 && !parsed.use_cuda_graph, "device and graph settings");
+    failures += expect(parsed.device == 1 && !parsed.use_hip_graph, "device and graph settings");
     failures += expect(parsed.profile_measured, "profile-measured flag");
     failures +=
         expect(parsed.output == qb::OutputFormat::Json && parsed.output_file == "report.json",
@@ -219,8 +220,8 @@ std::vector<qb::TestResult> sample_results() {
 qb::BenchEnvironment sample_environment() {
     qb::BenchEnvironment env;
     env.gpu_name                          = "RTX 5090";
-    env.cuda_runtime_version              = "13.1";
-    env.cuda_driver_version               = "590.1";
+    env.hip_runtime_version              = "13.1";
+    env.hip_driver_version               = "590.1";
     env.device_id                         = 0;
     env.artifact_path                     = "model.ninfer";
     env.artifact_file_size_bytes          = 17500000000ULL;
@@ -241,14 +242,14 @@ qb::BenchEnvironment sample_environment() {
     env.memory.sequence                   = {2000000000ULL, 1900000000ULL, 1900000000ULL};
     env.memory.workspace                  = {100000000ULL, 0, 0};
     env.memory.request_transient          = {50000000ULL, 0, 40000000ULL};
-    env.memory.cuda_graph_allowance_bytes = 150000000ULL;
+    env.memory.hip_graph_allowance_bytes = 150000000ULL;
     env.memory.kv_payload_bytes           = 123456ULL;
     env.max_context                       = 4096;
     env.prefill_chunk                     = 1024;
     env.kv_cache                          = ninfer::KvCacheStorage::Int8Group64;
     env.mtp_draft_tokens                  = 5;
     env.proposal_head                     = ninfer::ProposalHead::Optimized;
-    env.use_cuda_graph                    = true;
+    env.use_hip_graph                    = true;
     env.decode_graph_primed               = true;
     env.decode_graph_prime_output_tokens  = 13;
     env.repetitions                       = 2;
@@ -284,7 +285,7 @@ int test_report_contract() {
     failures +=
         expect(report.at("memory").at("request_transient").at("capacity_bytes") == 50000000ULL,
                "request transient capacity");
-    failures += expect(report.at("memory").at("cuda_graph_allowance_bytes") == 150000000ULL,
+    failures += expect(report.at("memory").at("hip_graph_allowance_bytes") == 150000000ULL,
                        "CUDA Graph allowance");
     failures += expect(report.at("memory").at("kv_payload_bytes") == 123456ULL, "KV payload");
     failures += expect(report.at("config").at("proposal_head") == "optimized", "proposal head");
@@ -343,7 +344,7 @@ int test_human_and_csv_reports() {
                        "CSV identity columns");
     for (const std::string_view field :
          {"proposal_head", "kv_payload_bytes", "load_host_to_device_bytes",
-          "request_transient_capacity_bytes", "cuda_graph_allowance_bytes", "workspace_peak_bytes",
+          "request_transient_capacity_bytes", "hip_graph_allowance_bytes", "workspace_peak_bytes",
           "workspace_allocator_peak_bytes", "spec_acceptance_rate", "decode_output_tok_s_mean",
           "decode_engine_tok_s_mean", "total_seconds_mean"}) {
         failures += expect(csv.find(field) != std::string::npos,

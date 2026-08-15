@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/linear/nvfp4/nvfp4_config.h"
@@ -7,8 +8,9 @@
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -108,7 +110,7 @@ load_staged_scale_word(const Nvfp4GemvSharedStorage<Geometry, Schedule>& shared,
         word = *reinterpret_cast<const std::uint32_t*>(
             shared.raw_scales + local_row * Geometry::kGroupsPerRow + group_base);
     }
-    return __shfl_sync(0xffffffffU, word, 0, kSubgroupWidth);
+    return __shfl_sync(0xffffffffffffffffull, word, 0, kSubgroupWidth);
 }
 
 template <class Geometry, class Schedule>
@@ -147,7 +149,7 @@ __device__ __forceinline__ void load_nvfp4_coefficients(
 
 template <class Geometry, class Schedule>
 __device__ __forceinline__ void
-compute_nvfp4_rows(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+compute_nvfp4_rows(const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
                    const std::uint8_t* __restrict__ scales,
                    const Nvfp4GemvSharedStorage<Geometry, Schedule>& shared,
                    float inverse_weight_divisor, const int (&parent_rows)[Schedule::kRowsPerWarp],
@@ -202,7 +204,7 @@ compute_nvfp4_rows(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __re
 
 template <class Geometry, class Schedule, class Epilogue, class Output>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_gemv_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales, float inverse_weight_divisor, Epilogue epilogue,
     Output output) {
     static_assert((Geometry::kOutputRows % 128) == 0);

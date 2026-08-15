@@ -4,10 +4,10 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops::detail {
 
-void l2norm_launch(const Tensor& x, float eps, Tensor& out, cudaStream_t stream);
+void l2norm_launch(const Tensor& x, float eps, Tensor& out, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

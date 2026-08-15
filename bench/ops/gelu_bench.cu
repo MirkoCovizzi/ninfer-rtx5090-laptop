@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gelu.h"
 #include "ninfer_bench_common.h"
 #include "ops/common/bf16_vector.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -29,7 +30,7 @@ __global__ void gelu_payload_control(uint4* x, std::int64_t packs) {
     }
 }
 
-__global__ void gelu_pair_payload_control(__nv_bfloat162* x, std::int64_t pairs) {
+__global__ void gelu_pair_payload_control(__hip_bfloat162* x, std::int64_t pairs) {
     constexpr int pairsPerThread = 4;
     const std::int64_t first =
         (blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x) * pairsPerThread;
@@ -49,7 +50,7 @@ void run(ops::GeluMode mode, int d, int columns, bool control) {
     Tensor tx(x.p, DType::BF16, {d, columns});
 
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 constexpr int block   = 256;
                 constexpr int maxGrid = 16384;
@@ -65,7 +66,7 @@ void run(ops::GeluMode mode, int d, int columns, bool control) {
                     const int grid = static_cast<int>((pairs + block * pairsPerThread - 1) /
                                                       (block * pairsPerThread));
                     gelu_pair_payload_control<<<grid, block, 0, stream>>>(
-                        static_cast<__nv_bfloat162*>(x.p), pairs);
+                        static_cast<__hip_bfloat162*>(x.p), pairs);
                 }
             } else {
                 ops::gelu(tx, mode, stream);
@@ -83,7 +84,7 @@ void run(ops::GeluMode mode, int d, int columns, bool control) {
 
 int main(int argc, char** argv) {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

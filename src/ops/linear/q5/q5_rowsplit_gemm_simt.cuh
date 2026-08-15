@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Warp-per-row small-T row-split low-bit GEMM: out[N,T] = W[N,K] . x[K,T].
@@ -42,8 +43,9 @@
 #include "ops/common/warp.cuh"
 #include "ops/linear/q5/q5_rowsplit_storage.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 #include <type_traits>
@@ -121,7 +123,7 @@ q5_simt_issue_slab(uint4* __restrict__ s_nib, uint4* __restrict__ s_hi,
 // K-value. Requires k % 8 == 0 and 16-byte aligned x.
 template <class SC, int kTt>
 __device__ __forceinline__ void
-q5_simt_consume_slab(const __nv_bfloat16* __restrict__ x0, std::int64_t xslab, std::int32_t k,
+q5_simt_consume_slab(const __hip_bfloat16* __restrict__ x0, std::int64_t xslab, std::int32_t k,
                      int ncols, const uint4* __restrict__ s_nib, const uint4* __restrict__ s_hi,
                      const std::uint32_t* __restrict__ s_sc, int lane, float (&acc)[kTt]) {
 #pragma unroll
@@ -153,11 +155,11 @@ q5_simt_consume_slab(const __nv_bfloat16* __restrict__ x0, std::int64_t xslab, s
 template <class SC, int kTt, int kFullSlabs, int kStride, bool SplitOutput = false,
           int SplitRow = 0, bool AddResidual = false>
 __launch_bounds__(64, 16) __global__
-    void q5_rowsplit_gemm_simt_split2_kernel(const __nv_bfloat16* __restrict__ x,
+    void q5_rowsplit_gemm_simt_split2_kernel(const __hip_bfloat16* __restrict__ x,
                                              const std::uint8_t* __restrict__ codes,
                                              const std::uint8_t* __restrict__ high,
                                              const std::uint8_t* __restrict__ scales,
-                                             __nv_bfloat16* __restrict__ out, std::int32_t n,
+                                             __hip_bfloat16* __restrict__ out, std::int32_t n,
                                              std::int32_t k, std::int32_t t, std::int32_t padded_k,
                                              std::int32_t full_slabs) {
     static_assert(std::is_same_v<SC, Q5RowSplitSimtSchedule>,
@@ -200,7 +202,7 @@ __launch_bounds__(64, 16) __global__
                 scale_bits = *reinterpret_cast<const std::uint16_t*>(
                     scale_row + (static_cast<std::int64_t>(s) * 16 + group_in_slab) * 2);
             }
-            scale_bits = __shfl_sync(0xffffffffu, scale_bits, lane & ~7);
+            scale_bits = __shfl_sync(0xffffffffffffffffull, scale_bits, lane & ~7);
 
             const std::uint32_t word = *reinterpret_cast<const std::uint32_t*>(code_phase);
             const std::uint32_t hc   = static_cast<std::uint32_t>(*high_phase) ^ 0xffu;
@@ -258,7 +260,7 @@ __launch_bounds__(64, 16) __global__
 struct Q5Split4StoreEpilogue {
     template <bool SplitOutput, int SplitRow, int Tokens>
     __device__ __forceinline__ void
-    operator()(__nv_bfloat16* out, __nv_bfloat16* out_tail, std::int32_t n, std::int32_t out_ld,
+    operator()(__hip_bfloat16* out, __hip_bfloat16* out_tail, std::int32_t n, std::int32_t out_ld,
                std::int32_t row, const float (&values)[Tokens]) const {
 #pragma unroll
         for (int token = 0; token < Tokens; ++token) {
@@ -282,9 +284,9 @@ template <class SC, int kTt, int kFullSlabs, int kStride, bool SplitOutput = fal
           int SplitRow = 0, class Epilogue = Q5Split4StoreEpilogue, bool TriggerPdl = false,
           bool JoinPdl = false>
 __launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ high, const std::uint8_t* __restrict__ scales,
-    __nv_bfloat16* __restrict__ out, __nv_bfloat16* __restrict__ out_tail, std::int32_t n,
+    __hip_bfloat16* __restrict__ out, __hip_bfloat16* __restrict__ out_tail, std::int32_t n,
     std::int32_t out_ld, std::int32_t k, std::int32_t t, std::int32_t padded_k,
     std::int32_t full_slabs, Epilogue epilogue = {}) {
     static_assert(std::is_same_v<SC, Q5RowSplitSimtSchedule>,
@@ -329,7 +331,7 @@ __launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
             scale_bits = *reinterpret_cast<const std::uint16_t*>(
                 scale_row + (static_cast<std::int64_t>(s) * 16 + group_in_slab) * 2);
         }
-        scale_bits = __shfl_sync(0xffffffffu, scale_bits, lane & ~7);
+        scale_bits = __shfl_sync(0xffffffffffffffffull, scale_bits, lane & ~7);
 
         const std::uint32_t word = *reinterpret_cast<const std::uint32_t*>(code_phase);
         const std::uint32_t hc   = static_cast<std::uint32_t>(*high_phase) ^ 0xffu;
@@ -410,12 +412,12 @@ __launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
 // aligned, else 0 (everything runs through the scalar tail).
 template <class SC, int kTt, int kRowsPerBlock, int kStages, bool SplitOutput = false,
           int SplitRow = 0>
-__global__ void q5_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x,
+__global__ void q5_rowsplit_gemm_simt_kernel(const __hip_bfloat16* __restrict__ x,
                                              const std::uint8_t* __restrict__ codes,
                                              const std::uint8_t* __restrict__ high,
                                              const std::uint8_t* __restrict__ scales,
-                                             __nv_bfloat16* __restrict__ out,
-                                             __nv_bfloat16* __restrict__ out_tail, std::int32_t n,
+                                             __hip_bfloat16* __restrict__ out,
+                                             __hip_bfloat16* __restrict__ out_tail, std::int32_t n,
                                              std::int32_t out_ld, std::int32_t k, std::int32_t t,
                                              std::int32_t padded_k, std::int32_t full_slabs) {
     using Codec                = typename SC::Codec;
@@ -442,7 +444,7 @@ __global__ void q5_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x
             ? high + static_cast<std::int64_t>(row) * kg_padded * SC::kHighBytesPerGroup
             : nullptr;
     const std::uint8_t* scale_row = scales + static_cast<std::int64_t>(row) * kg_padded * 2;
-    const __nv_bfloat16* x0       = x + static_cast<std::int64_t>(col0) * k;
+    const __hip_bfloat16* x0       = x + static_cast<std::int64_t>(col0) * k;
 
     float acc[kTt];
 #pragma unroll

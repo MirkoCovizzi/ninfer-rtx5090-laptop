@@ -3,7 +3,7 @@
 #include "core/layout.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime_api.h>
+#include <hip/hip_runtime_api.h>
 
 #include <cstdint>
 #include <vector>
@@ -61,8 +61,8 @@ struct LinearAttentionStatePool {
     [[nodiscard]] Tensor conv_slot(std::uint32_t layer, std::int32_t slot) const;
     [[nodiscard]] Tensor recurrent_slot(std::uint32_t layer, std::int32_t slot) const;
 
-    void copy_slot(std::int32_t src, std::int32_t dst, cudaStream_t stream = nullptr);
-    void zero_slot(std::int32_t slot, cudaStream_t stream = nullptr);
+    void copy_slot(std::int32_t src, std::int32_t dst, hipStream_t stream = nullptr);
+    void zero_slot(std::int32_t slot, hipStream_t stream = nullptr);
 };
 
 } // namespace ninfer

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Human-readable request summaries and the optional full-precision JSONL event log used for
@@ -44,9 +45,9 @@ struct ServerLogEnvironment {
     std::uint64_t total_device_memory_bytes = 0;
     int compute_capability_major            = 0;
     int compute_capability_minor            = 0;
-    std::string cuda_compile_version;
-    std::string cuda_runtime_version;
-    std::string cuda_driver_version;
+    std::string hip_compile_version;
+    std::string hip_runtime_version;
+    std::string hip_driver_version;
 };
 
 struct ThroughputReport {

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/causal_conv1d_silu.h"
 #include "ops/op_tester.h"
 
@@ -197,7 +198,7 @@ int ordinary_case(std::int32_t C, std::int32_t T, StateCall call, std::uint32_t 
     } else {
         ops::causal_conv1d_silu(tx, tw, ts_in, ts_in, tout, nullptr);
     }
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string tag = "causal_conv1d_silu C=" + std::to_string(C) +
                             " T=" + std::to_string(T) + " " + call_name(call);
@@ -266,7 +267,7 @@ int continuation_slot_case(std::int32_t C, std::int32_t T, std::int32_t slots,
     Tensor ts_out(state.data(), DType::BF16, {C, 3});
     Tensor tout(output.data(), DType::BF16, {C, T});
     ops::causal_conv1d_silu(tx, tw, ts_in, ts_out, tout, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string tag = "causal_conv1d_silu continuation C=" + std::to_string(C) +
                             " T=" + std::to_string(T) + " read_slot=" + std::to_string(read_slot);
@@ -333,7 +334,7 @@ int snapshot_case(std::int32_t C, std::int32_t T, std::int32_t slots, std::int32
     Tensor tout(output.data(), DType::BF16, {C, T});
     ops::causal_conv1d_silu_snapshot(tx, tw, tstate, Tensor{}, tslot, tsnapshot_base, tout,
                                      nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string tag = "causal_conv1d_silu snapshot C=" + std::to_string(C) +
                             " T=" + std::to_string(T) + " slots=" + std::to_string(slots) +
@@ -432,7 +433,7 @@ int batched_snapshot_case(std::int32_t C, std::int32_t width,
     Tensor tbases(bases.data(), DType::I32, {batch});
     Tensor tout(output.data(), DType::BF16, {C, width, batch});
     ops::causal_conv1d_silu_snapshot(tx, tw, tstate, tvalid, tinitial, tbases, tout, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string tag = "causal_conv1d_silu batched snapshot C=" + std::to_string(C) +
                             " W=" + std::to_string(width) + " B=" + std::to_string(batch) +
@@ -467,7 +468,7 @@ int batched_snapshot_case(std::int32_t C, std::int32_t width,
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

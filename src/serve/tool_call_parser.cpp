@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "serve/tool_call_parser.h"
 
 #include <nlohmann/json.hpp>

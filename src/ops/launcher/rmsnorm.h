@@ -4,11 +4,11 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops::detail {
 
 void rmsnorm_launch(const Tensor& x, const Tensor& weight, float eps, bool unit_offset,
-                    const Tensor* z, Tensor& out, cudaStream_t stream);
+                    const Tensor* z, Tensor& out, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

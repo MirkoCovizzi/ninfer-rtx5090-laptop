@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -15,13 +15,13 @@ inline constexpr std::int32_t kBf16AttnInputSmallTMaxTokens   = 32;
 inline constexpr std::int32_t kBf16AttnInputSmallTDispatchEnd = 22;
 
 void bf16_attn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                   Tensor& k, Tensor& v, cudaStream_t stream);
+                                   Tensor& k, Tensor& v, hipStream_t stream);
 void bf16_attn_input_small_t_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                    Tensor& k, Tensor& v, cudaStream_t stream);
+                                    Tensor& k, Tensor& v, hipStream_t stream);
 void bf16_attn_input_mma_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                Tensor& k, Tensor& v, cudaStream_t stream);
+                                Tensor& k, Tensor& v, hipStream_t stream);
 
 void bf16_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                              Tensor& k, Tensor& v, cudaStream_t stream);
+                              Tensor& k, Tensor& v, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

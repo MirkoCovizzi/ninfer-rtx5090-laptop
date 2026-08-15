@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Cold-cache benchmark for the public SparseMoe contract.
 //
 // The benchmark deliberately knows nothing about decode, small-T, prefill,
@@ -10,7 +11,7 @@
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -201,8 +202,8 @@ double logical_flops(std::int32_t tokens) {
 double theoretical_memory_gbps(int device) {
     int memory_clock_khz = 0;
     int memory_bus_bits  = 0;
-    CUDA_CHECK(cudaDeviceGetAttribute(&memory_clock_khz, cudaDevAttrMemoryClockRate, device));
-    CUDA_CHECK(cudaDeviceGetAttribute(&memory_bus_bits, cudaDevAttrGlobalMemoryBusWidth, device));
+    HIP_CHECK(hipDeviceGetAttribute(&memory_clock_khz, hipDeviceAttributeMemoryClockRate, device));
+    HIP_CHECK(hipDeviceGetAttribute(&memory_bus_bits, hipDeviceAttributeMemoryBusWidth, device));
     return 2.0 * static_cast<double>(memory_clock_khz) * 1.0e3 *
            (static_cast<double>(memory_bus_bits) / 8.0) / 1.0e9;
 }
@@ -522,7 +523,7 @@ public:
         }
         router[static_cast<std::size_t>(kExperts) * kHidden + kExperts] = bench::f32_to_bf16(4.0F);
         router_.copy_from_host(router.data(), router_.bytes);
-        CUDA_CHECK(cudaMemset(flush_.p, 0xa5, flush_.bytes));
+        HIP_CHECK(hipMemset(flush_.p, 0xa5, flush_.bytes));
 
         weights_ = {
             dense_weight(router_.p, kRouterRows, kHidden),
@@ -531,13 +532,13 @@ public:
             shared_gate_.weight,
             shared_down_.weight,
         };
-        CUDA_CHECK(cudaDeviceSynchronize());
+        HIP_CHECK(hipDeviceSynchronize());
     }
 
     [[nodiscard]] const ops::SparseMoeWeights& weights() const noexcept { return weights_; }
 
-    void flush(cudaStream_t stream) {
-        CUDA_CHECK(cudaMemsetAsync(flush_.p, 0xa5, flush_.bytes, stream));
+    void flush(hipStream_t stream) {
+        HIP_CHECK(hipMemsetAsync(flush_.p, 0xa5, flush_.bytes, stream));
     }
 
 private:
@@ -585,25 +586,25 @@ public:
         }
         input_.copy_from_host(input.data(), input_.bytes);
         residual_.copy_from_host(residual.data(), residual_.bytes);
-        CUDA_CHECK(
-            cudaMemcpy(destination_.p, residual_.p, destination_.bytes, cudaMemcpyDeviceToDevice));
+        HIP_CHECK(
+            hipMemcpy(destination_.p, residual_.p, destination_.bytes, hipMemcpyDeviceToDevice));
 
         x_                  = Tensor(input_.p, DType::BF16, {kHidden, tokens});
         destination_tensor_ = Tensor(destination_.p, DType::BF16, {kHidden, tokens});
-        CUDA_CHECK(cudaDeviceSynchronize());
+        HIP_CHECK(hipDeviceSynchronize());
     }
 
     [[nodiscard]] const RoutePattern& route_pattern() const noexcept { return route_pattern_; }
 
     [[nodiscard]] std::size_t workspace_bytes() const noexcept { return workspace_bytes_; }
 
-    void prepare(CacheState cache, cudaStream_t stream) {
+    void prepare(CacheState cache, hipStream_t stream) {
         if (cache == CacheState::Cold) { fixture_.flush(stream); }
-        CUDA_CHECK(cudaMemcpyAsync(destination_.p, residual_.p, destination_.bytes,
-                                   cudaMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(destination_.p, residual_.p, destination_.bytes,
+                                   hipMemcpyDeviceToDevice, stream));
     }
 
-    void launch(cudaStream_t stream) {
+    void launch(hipStream_t stream) {
         ops::sparse_moe(x_, fixture_.weights(), ops::SparseMoeEpilogue::AddResidual,
                         destination_tensor_, workspace_, stream);
     }
@@ -623,52 +624,52 @@ private:
 class BodyTimedGraph {
 public:
     BodyTimedGraph() {
-        CUDA_CHECK(cudaEventCreate(&body_start_));
-        CUDA_CHECK(cudaEventCreate(&body_stop_));
-        CUDA_CHECK(cudaEventCreateWithFlags(&completion_, cudaEventDisableTiming));
+        HIP_CHECK(hipEventCreate(&body_start_));
+        HIP_CHECK(hipEventCreate(&body_stop_));
+        HIP_CHECK(hipEventCreateWithFlags(&completion_, hipEventDisableTiming));
     }
 
     ~BodyTimedGraph() {
-        if (exec_ != nullptr) { cudaGraphExecDestroy(exec_); }
-        if (graph_ != nullptr) { cudaGraphDestroy(graph_); }
-        if (body_start_ != nullptr) { cudaEventDestroy(body_start_); }
-        if (body_stop_ != nullptr) { cudaEventDestroy(body_stop_); }
-        if (completion_ != nullptr) { cudaEventDestroy(completion_); }
+        if (exec_ != nullptr) { hipGraphExecDestroy(exec_); }
+        if (graph_ != nullptr) { hipGraphDestroy(graph_); }
+        if (body_start_ != nullptr) { hipEventDestroy(body_start_); }
+        if (body_stop_ != nullptr) { hipEventDestroy(body_stop_); }
+        if (completion_ != nullptr) { hipEventDestroy(completion_); }
     }
 
     BodyTimedGraph(const BodyTimedGraph&)            = delete;
     BodyTimedGraph& operator=(const BodyTimedGraph&) = delete;
 
     template <class Launch>
-    void capture(cudaStream_t stream, Launch&& launch) {
-        CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
-        CUDA_CHECK(cudaEventRecordWithFlags(body_start_, stream, cudaEventRecordExternal));
+    void capture(hipStream_t stream, Launch&& launch) {
+        HIP_CHECK(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal));
+        HIP_CHECK(hipEventRecordWithFlags(body_start_, stream, hipEventRecordExternal));
         launch(stream);
-        CUDA_CHECK(cudaEventRecordWithFlags(body_stop_, stream, cudaEventRecordExternal));
-        CUDA_CHECK(cudaStreamEndCapture(stream, &graph_));
-        CUDA_CHECK(cudaGraphInstantiate(&exec_, graph_, 0));
+        HIP_CHECK(hipEventRecordWithFlags(body_stop_, stream, hipEventRecordExternal));
+        HIP_CHECK(hipStreamEndCapture(stream, &graph_));
+        HIP_CHECK(hipGraphInstantiate(&exec_, graph_, 0));
         std::size_t nodes = 0;
-        CUDA_CHECK(cudaGraphGetNodes(graph_, nullptr, &nodes));
+        HIP_CHECK(hipGraphGetNodes(graph_, nullptr, &nodes));
         if (nodes < 3) { throw std::runtime_error("SparseMoe capture produced an empty graph"); }
     }
 
-    void launch(cudaStream_t stream) const { CUDA_CHECK(cudaGraphLaunch(exec_, stream)); }
+    void launch(hipStream_t stream) const { HIP_CHECK(hipGraphLaunch(exec_, stream)); }
 
-    double launch_body_timed(cudaStream_t stream) const {
+    double launch_body_timed(hipStream_t stream) const {
         launch(stream);
-        CUDA_CHECK(cudaEventRecord(completion_, stream));
-        CUDA_CHECK(cudaEventSynchronize(completion_));
+        HIP_CHECK(hipEventRecord(completion_, stream));
+        HIP_CHECK(hipEventSynchronize(completion_));
         float milliseconds = 0.0F;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, body_start_, body_stop_));
+        HIP_CHECK(hipEventElapsedTime(&milliseconds, body_start_, body_stop_));
         return static_cast<double>(milliseconds) * 1000.0;
     }
 
 private:
-    cudaGraph_t graph_      = nullptr;
-    cudaGraphExec_t exec_   = nullptr;
-    cudaEvent_t body_start_ = nullptr;
-    cudaEvent_t body_stop_  = nullptr;
-    cudaEvent_t completion_ = nullptr;
+    hipGraph_t graph_      = nullptr;
+    hipGraphExec_t exec_   = nullptr;
+    hipEvent_t body_start_ = nullptr;
+    hipEvent_t body_stop_  = nullptr;
+    hipEvent_t completion_ = nullptr;
 };
 
 Stats summarize(std::vector<double> samples) {
@@ -683,42 +684,42 @@ Stats summarize(std::vector<double> samples) {
     return {percentile(0.50), samples.front(), percentile(0.95)};
 }
 
-Stats measure_eager(BenchmarkState& state, CacheState cache, cudaStream_t stream, int warmup,
+Stats measure_eager(BenchmarkState& state, CacheState cache, hipStream_t stream, int warmup,
                     int repeat) {
-    cudaEvent_t start = nullptr;
-    cudaEvent_t stop  = nullptr;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
+    hipEvent_t start = nullptr;
+    hipEvent_t stop  = nullptr;
+    HIP_CHECK(hipEventCreate(&start));
+    HIP_CHECK(hipEventCreate(&stop));
     for (int index = 0; index < warmup; ++index) {
         state.prepare(cache, stream);
         state.launch(stream);
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
     for (int index = 0; index < repeat; ++index) {
         state.prepare(cache, stream);
-        CUDA_CHECK(cudaEventRecord(start, stream));
+        HIP_CHECK(hipEventRecord(start, stream));
         state.launch(stream);
-        CUDA_CHECK(cudaEventRecord(stop, stream));
-        CUDA_CHECK(cudaEventSynchronize(stop));
+        HIP_CHECK(hipEventRecord(stop, stream));
+        HIP_CHECK(hipEventSynchronize(stop));
         float milliseconds = 0.0F;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+        HIP_CHECK(hipEventElapsedTime(&milliseconds, start, stop));
         samples.push_back(static_cast<double>(milliseconds) * 1000.0);
     }
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
+    HIP_CHECK(hipEventDestroy(start));
+    HIP_CHECK(hipEventDestroy(stop));
     return summarize(std::move(samples));
 }
 
 Stats measure_graph(BenchmarkState& state, const BodyTimedGraph& graph, CacheState cache,
-                    cudaStream_t stream, int warmup, int repeat) {
+                    hipStream_t stream, int warmup, int repeat) {
     for (int index = 0; index < warmup; ++index) {
         state.prepare(cache, stream);
         graph.launch(stream);
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
@@ -730,23 +731,23 @@ Stats measure_graph(BenchmarkState& state, const BodyTimedGraph& graph, CacheSta
 }
 
 std::vector<Result> run_point(BenchmarkWeights& fixture, CodecProfile profile, std::int32_t tokens,
-                              const Options& options, cudaStream_t stream) {
+                              const Options& options, hipStream_t stream) {
     BenchmarkState state(fixture, profile, tokens, options.distribution, options.seed);
 
     // Match the production graph lifecycle: materialize eagerly, capture from a
     // reset state, instantiate, then prime one replay before configured warmup.
     state.prepare(CacheState::Warm, stream);
     state.launch(stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     BodyTimedGraph graph;
     if (options.execution != Execution::Eager) {
         state.prepare(CacheState::Warm, stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        graph.capture(stream, [&](cudaStream_t launch_stream) { state.launch(launch_stream); });
+        HIP_CHECK(hipStreamSynchronize(stream));
+        graph.capture(stream, [&](hipStream_t launch_stream) { state.launch(launch_stream); });
         state.prepare(CacheState::Warm, stream);
         graph.launch(stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
     }
 
     std::vector<Result> results;
@@ -790,12 +791,12 @@ void write_csv(const std::string& path, const std::vector<Result>& results, cons
     std::ofstream stream(output);
     if (!stream) { throw std::runtime_error("failed to open CSV output"); }
     int runtime = 0;
-    CUDA_CHECK(cudaRuntimeGetVersion(&runtime));
+    HIP_CHECK(hipRuntimeGetVersion(&runtime));
     const double peak_memory_gbps = theoretical_memory_gbps(context.device);
     stream << "codec,tokens,distribution,seed,unique_experts,adjacent_overlap,execution,"
               "timed_scope,cache,median_us,min_us,p95_us,unique_weight_gbps,"
               "unique_weight_peak_percent,logical_tflops,workspace_bytes,warmup,repeat,"
-              "flush_bytes,build_type,gpu,cuda_runtime\n";
+              "flush_bytes,build_type,gpu,hip_runtime\n";
     for (const Result& result : results) {
         const double seconds            = result.stats.median_us * 1.0e-6;
         const double useful_weight_gbps = unique_weight_bytes(result) / seconds / 1.0e9;

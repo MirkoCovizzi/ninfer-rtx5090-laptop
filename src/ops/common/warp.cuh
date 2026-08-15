@@ -1,14 +1,15 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
 inline constexpr int kWarpSize          = 32;
-inline constexpr unsigned kFullWarpMask = 0xffffffffu;
+inline constexpr unsigned long long kFullWarpMask = 0xffffffffull;
 
 template <int Width = kWarpSize, class T>
-__device__ __forceinline__ T warp_sum(T x, unsigned mask = kFullWarpMask) {
+__device__ __forceinline__ T warp_sum(T x, unsigned long long mask = kFullWarpMask) {
     static_assert(Width > 0 && Width <= kWarpSize && (Width & (Width - 1)) == 0);
 #pragma unroll
     for (int offset = Width / 2; offset > 0; offset >>= 1) {
@@ -18,7 +19,7 @@ __device__ __forceinline__ T warp_sum(T x, unsigned mask = kFullWarpMask) {
 }
 
 template <int Width = kWarpSize, class T>
-__device__ __forceinline__ T warp_reduce_sum(T x, unsigned mask = kFullWarpMask) {
+__device__ __forceinline__ T warp_reduce_sum(T x, unsigned long long mask = kFullWarpMask) {
     static_assert(Width > 0 && Width <= kWarpSize && (Width & (Width - 1)) == 0);
 #pragma unroll
     for (int offset = Width / 2; offset > 0; offset >>= 1) {
@@ -28,7 +29,7 @@ __device__ __forceinline__ T warp_reduce_sum(T x, unsigned mask = kFullWarpMask)
 }
 
 template <int Width = kWarpSize>
-__device__ __forceinline__ float warp_max(float x, unsigned mask = kFullWarpMask) {
+__device__ __forceinline__ float warp_max(float x, unsigned long long mask = kFullWarpMask) {
     static_assert(Width > 0 && Width <= kWarpSize && (Width & (Width - 1)) == 0);
 #pragma unroll
     for (int offset = Width / 2; offset > 0; offset >>= 1) {

@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -28,6 +29,6 @@ namespace ninfer::ops {
  */
 void prepare_masked_block(const Tensor& anchors, const Tensor& lengths, const Tensor& valid_columns,
                           std::int32_t mask_id, Tensor& ids, Tensor& positions,
-                          cudaStream_t stream);
+                          hipStream_t stream);
 
 } // namespace ninfer::ops

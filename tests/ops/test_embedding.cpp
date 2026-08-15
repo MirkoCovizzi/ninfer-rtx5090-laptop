@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/embedding.h"
 #include "ops/op_tester.h"
 
@@ -404,7 +405,7 @@ int run_quantized_case(const char* label, Table& table, const std::vector<std::i
     Tensor result(output.data(), DType::BF16, {d, static_cast<std::int32_t>(ids.size())});
     Weight weight = table.weight();
     ops::embedding(input, weight, result, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_quantized(label, output, table.oracle(ids));
     failures += output.verify_guards(label);
@@ -476,7 +477,7 @@ int test_dense() {
     Tensor input(device_ids.data(), DType::I32, {static_cast<std::int32_t>(ids.size())});
     Tensor result(output.data(), DType::BF16, {kDenseD, static_cast<std::int32_t>(ids.size())});
     ops::embedding(input, weight, result, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_exact("embedding BF16 [2304,1152]",
                                 guarded_to_host<std::uint16_t>(output, expected.size()), expected);
@@ -491,7 +492,7 @@ int test_dense() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

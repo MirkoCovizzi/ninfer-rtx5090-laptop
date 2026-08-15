@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/rope.h"
 #include "ops/op_tester.h"
 
@@ -264,7 +265,7 @@ int run_pair_case(const Geometry& geometry, int q_heads, int k_heads, int first_
     k_tensor.nb[2] = static_cast<std::int64_t>(k_stride) * sizeof(std::uint16_t);
 
     ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, q_tensor, k_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const auto q_got        = from_device<std::uint16_t>(q_device.data(), q_storage.size());
     const auto k_got        = from_device<std::uint16_t>(k_device.data(), k_storage.size());
@@ -313,7 +314,7 @@ int run_single_case(const Geometry& geometry, int heads, int first_position, int
     Tensor tensor(device.data(), DType::BF16, {geometry.head_dim, heads, geometry.tokens});
     tensor.nb[2] = static_cast<std::int64_t>(token_stride) * sizeof(std::uint16_t);
     ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const auto got          = from_device<std::uint16_t>(device.data(), storage.size());
     const std::string label = std::string(geometry.label) + " single";
@@ -374,7 +375,7 @@ int run_vision_packed_case() {
     q_tensor.nb[2] = static_cast<std::int64_t>(kStride) * sizeof(std::uint16_t);
     k_tensor.nb[2] = static_cast<std::int64_t>(kStride) * sizeof(std::uint16_t);
     ops::rope(position_tensor, kHeadDim, kVisionTheta, q_tensor, k_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const auto got = from_device<std::uint16_t>(packed_device.data(), packed.size());
     std::vector<std::uint16_t> q_storage(static_cast<std::size_t>(kStride) * kTokens);
@@ -413,7 +414,7 @@ int run_vision_packed_case() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

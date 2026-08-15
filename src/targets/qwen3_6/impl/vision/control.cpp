@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include <ninfer/targets/qwen3_6/vision_control.h>
 
 #include <algorithm>

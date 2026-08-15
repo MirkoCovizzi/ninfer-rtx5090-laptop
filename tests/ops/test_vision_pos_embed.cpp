@@ -91,7 +91,7 @@ int run_case(std::int32_t patches, std::uint32_t seed) {
     Tensor weights_tensor(device_weights.data(), DType::FP32, {4, patches});
     Tensor x_tensor(device_x.data(), DType::BF16, {kDimensions, patches});
     ops::vision_pos_embed_add(table_tensor, indices_tensor, weights_tensor, x_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = "vision_pos_embed D=1152 R=2304 P=" + std::to_string(patches);
     int failures = verify_pointwise(label.c_str(), from_device_bf16(device_x.data(), x_bits.size()),
@@ -114,7 +114,7 @@ int run_case(std::int32_t patches, std::uint32_t seed) {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

@@ -11,7 +11,7 @@ using namespace ninfer;
 using namespace ninfer::test;
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
@@ -48,7 +48,7 @@ int main() {
             work.alloc(DType::I32, {static_cast<std::int32_t>(overlap.size())});
         targets::qwen3_6::detail::scatter_shifted_visual_embeddings(input, visual, overlap,
                                                                     destination_indices, nullptr);
-        cudaDeviceSynchronize();
+        hipDeviceSynchronize();
 
         std::vector<double> reference(token_embeddings.begin(), token_embeddings.end());
         for (int row = 0; row < d; ++row) {

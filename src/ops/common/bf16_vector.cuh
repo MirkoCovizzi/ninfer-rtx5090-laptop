@@ -1,19 +1,21 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Narrow private BF16 vector storage shared by elementwise kernels. Arithmetic
 // remains Op-specific so each contract keeps its exact FP32 operation order and
 // BF16 rounding boundary.
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
 namespace ninfer::ops {
 
 template <int Pairs>
-struct alignas(Pairs* static_cast<int>(sizeof(__nv_bfloat162))) Bf16PairPack {
+struct alignas(Pairs* static_cast<int>(sizeof(__hip_bfloat162))) Bf16PairPack {
     static_assert(Pairs == 1 || Pairs == 2 || Pairs == 4);
-    __nv_bfloat162 pair[Pairs];
+    __hip_bfloat162 pair[Pairs];
 };
 
 using Bf16x4Pack = Bf16PairPack<2>;

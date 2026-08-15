@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear/bf16/bf16_launch.h"
 
 #include "core/device.h"
@@ -14,18 +15,18 @@ namespace ninfer::ops::detail {
 namespace {
 
 template <class Geometry, int ActiveTokens>
-void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     using Schedule = typename Bf16LinearSmallTProductionSchedule<Geometry, ActiveTokens>::Type;
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
 
-    const Bf16SmallTContiguousOutput output{static_cast<__nv_bfloat16*>(out.data),
+    const Bf16SmallTContiguousOutput output{static_cast<__hip_bfloat16*>(out.data),
                                             Geometry::kOutputRows};
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
     bf16_small_t_inner_kernel<Geometry, ActiveTokens, Schedule>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.qdata), output);
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.qdata), output);
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Geometry, std::size_t... Offsets>
@@ -44,7 +45,7 @@ constexpr auto kOutputLaunchers = make_launchers<OutputGeometry>(
 
 } // namespace
 
-void launch_bf16_small_t(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_bf16_small_t(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     const std::size_t index = static_cast<std::size_t>(x.ne[1] - kBf16SmallTMinTokens);
     if (weight.n == ControlGeometry::kOutputRows && weight.k == ControlGeometry::kInputRows) {
         kControlLaunchers[index](x, weight, out, stream);

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "core/cyclic_kv_cache.h"
 
 #include "core/device.h"
@@ -101,7 +102,7 @@ CyclicKVCacheLayerView CyclicKVCache::layer_view(std::uint32_t layer) const {
 }
 
 void CyclicKVCache::copy_lane_from(const CyclicKVCache& source, std::int32_t lane,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     if (source.layer_count() != layer_count() || source.capacity_ != capacity_ ||
         source.padded_capacity_ != padded_capacity_ || source.num_kv_heads_ != num_kv_heads_ ||
         source.head_dim_ != head_dim_ || source.lane_capacity_ != lane_capacity_) {
@@ -115,10 +116,10 @@ void CyclicKVCache::copy_lane_from(const CyclicKVCache& source, std::int32_t lan
         Tensor destination_v = v_[layer].slice(3, lane, 1);
         Tensor source_k      = source.k_[layer].slice(3, lane, 1);
         Tensor source_v      = source.v_[layer].slice(3, lane, 1);
-        CUDA_CHECK(cudaMemcpyAsync(destination_k.data, source_k.data, destination_k.bytes(),
-                                   cudaMemcpyDeviceToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(destination_v.data, source_v.data, destination_v.bytes(),
-                                   cudaMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(destination_k.data, source_k.data, destination_k.bytes(),
+                                   hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(destination_v.data, source_v.data, destination_v.bytes(),
+                                   hipMemcpyDeviceToDevice, stream));
     }
 }
 

@@ -5,7 +5,7 @@
 #include "ninfer/ops/scatter.h"
 #include "ninfer/ops/scalar.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <stdexcept>
 
@@ -34,8 +34,8 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
     Tensor logits             = state.execution.io.logits.slice(1, 0, 1);
     Tensor draft0             = state.execution.io.mtp->draft_tokens.slice(0, 0, 1);
     Tensor rope_position_view = state.execution.work.alloc(DType::I32, {1, 3});
-    CUDA_CHECK(cudaMemcpyAsync(rope_position_view.data, rope_position.data(),
-                               rope_position.size_bytes(), cudaMemcpyHostToDevice,
+    HIP_CHECK(hipMemcpyAsync(rope_position_view.data, rope_position.data(),
+                               rope_position.size_bytes(), hipMemcpyHostToDevice,
                                state.execution.device.stream));
     const auto bridge_visible = static_cast<std::uint32_t>(position + 1);
     const ops::GqaExecutionEnvelope bridge_envelope{bridge_visible, bridge_visible};
@@ -60,9 +60,9 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
         const ops::GqaExecutionEnvelope envelope{visible, visible};
         card.mtp_forward_ar_step(previous_token, state.execution.io.mtp->ar_hidden, ar_position,
                                  envelope, next_hidden, logits, next_draft);
-        CUDA_CHECK(cudaMemcpyAsync(state.execution.io.mtp->ar_hidden.data, next_hidden.data,
+        HIP_CHECK(hipMemcpyAsync(state.execution.io.mtp->ar_hidden.data, next_hidden.data,
                                    state.execution.io.mtp->ar_hidden.bytes(),
-                                   cudaMemcpyDeviceToDevice, state.execution.device.stream));
+                                   hipMemcpyDeviceToDevice, state.execution.device.stream));
         ops::increment_i32_scalar(ar_position, state.execution.device.stream);
     }
 }
@@ -77,8 +77,8 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
 
         qwen3_6::MtpDecodeState& frame = state.frame;
         const std::int32_t width       = static_cast<std::int32_t>(k) + 1;
-        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &state.host_ingress,
-                                   sizeof(qwen3_6::MtpDecodeIngress), cudaMemcpyHostToDevice,
+        HIP_CHECK(hipMemcpyAsync(frame.ingress.data, &state.host_ingress,
+                                   sizeof(qwen3_6::MtpDecodeIngress), hipMemcpyHostToDevice,
                                    state.execution.device.stream));
 
         TextContext card(state.execution.device, state.execution.model, state.execution.work, {},
@@ -172,12 +172,12 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
             card.mtp_forward_decode_batch(previous_batch, hidden_batch, position, rope, valid,
                                           mtp_rows, envelopes.ar[step], next_hidden_batch);
             card.mtp_propose_batch(next_hidden, proposal_logits, next);
-            CUDA_CHECK(cudaMemcpyAsync(ar_hidden.data, next_hidden.data, ar_hidden.bytes(),
-                                       cudaMemcpyDeviceToDevice, state.execution.device.stream));
+            HIP_CHECK(hipMemcpyAsync(ar_hidden.data, next_hidden.data, ar_hidden.bytes(),
+                                       hipMemcpyDeviceToDevice, state.execution.device.stream));
         }
 
-        CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, frame.egress.data,
-                                   sizeof(qwen3_6::MtpDecodeEgress), cudaMemcpyDeviceToHost,
+        HIP_CHECK(hipMemcpyAsync(&state.host_egress, frame.egress.data,
+                                   sizeof(qwen3_6::MtpDecodeEgress), hipMemcpyDeviceToHost,
                                    state.execution.device.stream));
     };
 }

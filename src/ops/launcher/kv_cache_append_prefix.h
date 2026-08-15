@@ -17,10 +17,10 @@ kv_cache_append_prefix_resolve_plan(std::int32_t tokens,
 void kv_cache_append_prefix_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                                    const Tensor& counts, const Tensor& table_rows,
                                    PagedKVBatchLayerView cache, const KVCacheAppendPrefixPlan& plan,
-                                   cudaStream_t stream);
+                                   hipStream_t stream);
 void kv_cache_append_prefix_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                                    const Tensor& counts, const Tensor& lanes,
                                    CyclicKVCacheLayerView cache,
-                                   const KVCacheAppendPrefixPlan& plan, cudaStream_t stream);
+                                   const KVCacheAppendPrefixPlan& plan, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/paged_kv_cache.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h> // cudaStream_t
+#include <hip/hip_runtime.h> // hipStream_t
 
 #include <cstddef>
 #include <cstdint>
@@ -90,7 +91,7 @@ gqa_attention_workspace_capacity_bytes(std::int32_t q_heads, DType cache_dtype,
 void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& positions,
                    const Tensor& valid_columns, const Tensor& kv_table_rows, float scale,
                    PagedKVBatchLayerView cache, GqaExecutionEnvelope envelope,
-                   WorkspaceArena& workspace, Tensor& out, cudaStream_t stream);
+                   WorkspaceArena& workspace, Tensor& out, hipStream_t stream);
 
 /**
  * A2: perform only the cache-write part of A1. k/v are contiguous BF16 `[256,4|2,T]`, positions is
@@ -98,7 +99,7 @@ void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tens
  * no unrelated cache row, receives no execution envelope, and owns no persistent frontier.
  */
 void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
-                   PagedKVLayerView cache, cudaStream_t stream);
+                   PagedKVLayerView cache, hipStream_t stream);
 
 /**
  * A3: compute causal attention from an already populated cache without accepting new K/V or
@@ -108,6 +109,6 @@ void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
  */
 void gqa_attention_cached(const Tensor& q, const Tensor& positions, float scale,
                           const PagedKVLayerView& cache, GqaExecutionEnvelope envelope,
-                          WorkspaceArena& workspace, Tensor& out, cudaStream_t stream);
+                          WorkspaceArena& workspace, Tensor& out, hipStream_t stream);
 
 } // namespace ninfer::ops

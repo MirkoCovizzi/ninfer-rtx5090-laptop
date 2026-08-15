@@ -41,47 +41,47 @@ struct Variant {
                                      const FullAttentionProjectionWeights& weights, Tensor& query,
                                      Tensor& gate, Tensor& key, Tensor& value,
                                      qwen3_6::TextPhase phase, WorkspaceArena& workspace,
-                                     cudaStream_t stream);
+                                     hipStream_t stream);
     static void attention_output_projection(const Tensor& attention, const Weight& weight,
                                             Tensor& residual, qwen3_6::TextPhase phase,
-                                            WorkspaceArena& workspace, cudaStream_t stream);
+                                            WorkspaceArena& workspace, hipStream_t stream);
     static void mtp_attention_projection(const Tensor& hidden,
                                          const MtpAttentionProjectionWeights& weights,
                                          Tensor& query, Tensor& gate, Tensor& key, Tensor& value,
-                                         WorkspaceArena& workspace, cudaStream_t stream);
+                                         WorkspaceArena& workspace, hipStream_t stream);
     static void mtp_kv_projection(const Tensor& hidden,
                                   const MtpAttentionProjectionWeights& weights, Tensor& key,
-                                  Tensor& value, WorkspaceArena& workspace, cudaStream_t stream);
+                                  Tensor& value, WorkspaceArena& workspace, hipStream_t stream);
     static void mtp_q_gate_projection(const Tensor& hidden,
                                       const MtpAttentionProjectionWeights& weights, Tensor& query,
-                                      Tensor& gate, WorkspaceArena& workspace, cudaStream_t stream);
+                                      Tensor& gate, WorkspaceArena& workspace, hipStream_t stream);
     static void gdn_input_projection(const Tensor& hidden, const GdnProjectionWeights& weights,
                                      Tensor& qkv, Tensor& output_gate, qwen3_6::TextPhase phase,
-                                     WorkspaceArena& workspace, cudaStream_t stream);
+                                     WorkspaceArena& workspace, hipStream_t stream);
     static void
     gdn_input_projection_snapshot(const Tensor& hidden, const GdnProjectionWeights& weights,
                                   const Tensor& conv_weight, Tensor& conv_states,
                                   const Tensor& valid_columns, const Tensor& initial_slot,
                                   const Tensor& snapshot_base_slot, Tensor& query, Tensor& key,
                                   Tensor& value, Tensor& output_gate, qwen3_6::TextPhase phase,
-                                  WorkspaceArena& workspace, cudaStream_t stream);
+                                  WorkspaceArena& workspace, hipStream_t stream);
     static void gdn_input_projection_record(
         const Tensor& hidden, const GdnProjectionWeights& weights, const Tensor& conv_weight,
         const Tensor& conv_states, const Tensor& valid_columns, const Tensor& initial_slots,
         Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value, Tensor& output_gate,
-        qwen3_6::TextPhase phase, WorkspaceArena& workspace, cudaStream_t stream);
+        qwen3_6::TextPhase phase, WorkspaceArena& workspace, hipStream_t stream);
     static void gdn_output_projection(const Tensor& hidden, const Weight& weight, Tensor& residual,
                                       qwen3_6::TextPhase phase, WorkspaceArena& workspace,
-                                      cudaStream_t stream);
+                                      hipStream_t stream);
     static void gdn_norm_control_projection(const Tensor& residual, const Tensor& norm_weight,
                                             float eps, const GdnProjectionWeights& weights,
                                             Tensor& hidden, Tensor& g, Tensor& beta,
-                                            WorkspaceArena& workspace, cudaStream_t stream);
+                                            WorkspaceArena& workspace, hipStream_t stream);
     static void post_mixer(const Tensor& hidden, const PostMixerWeights& weights, Tensor& residual,
                            qwen3_6::TextPhase phase, WorkspaceArena& workspace,
-                           cudaStream_t stream);
+                           hipStream_t stream);
     static void mtp_post_mixer(const Tensor& hidden, const MtpPostMixerWeights& weights,
-                               Tensor& residual, WorkspaceArena& workspace, cudaStream_t stream);
+                               Tensor& residual, WorkspaceArena& workspace, hipStream_t stream);
     [[nodiscard]] static std::size_t
     mtp_attention_projection_workspace_capacity_bytes(std::int32_t first, std::int32_t last);
     [[nodiscard]] static std::size_t mtp_kv_projection_workspace_capacity_bytes(std::int32_t first,

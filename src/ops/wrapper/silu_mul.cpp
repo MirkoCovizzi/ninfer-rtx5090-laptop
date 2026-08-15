@@ -9,7 +9,7 @@
 
 namespace ninfer::ops {
 
-void silu_mul(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stream) {
+void silu_mul(const Tensor& gate, const Tensor& up, Tensor& out, hipStream_t stream) {
     if (gate.dtype != DType::BF16 || up.dtype != DType::BF16 || out.dtype != DType::BF16) {
         throw std::invalid_argument("silu_mul: gate/up/out must be BF16");
     }

@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ninfer_bench_common.h"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -24,7 +25,7 @@ struct DirectBf16Weight {
 
 namespace detail {
 
-static __global__ void fill_direct_bf16_weight_kernel(__nv_bfloat16* values, std::uint64_t count,
+static __global__ void fill_direct_bf16_weight_kernel(__hip_bfloat16* values, std::uint64_t count,
                                                       std::uint32_t seed) {
     const std::uint64_t begin  = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::uint64_t stride = static_cast<std::uint64_t>(gridDim.x) * blockDim.x;
@@ -57,9 +58,9 @@ inline DirectBf16Weight make_direct_bf16_weight(std::int32_t n, std::int32_t k,
     const int blocks             = static_cast<int>(
         std::min<std::uint64_t>(65535, std::max<std::uint64_t>(1, (elements + 255) / 256)));
     detail::fill_direct_bf16_weight_kernel<<<blocks, 256>>>(
-        static_cast<__nv_bfloat16*>(result.storage.p), elements, seed);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+        static_cast<__hip_bfloat16*>(result.storage.p), elements, seed);
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
 
     Weight& weight         = result.weight;
     weight.payload         = result.storage.p;

@@ -3,7 +3,7 @@
 #include "core/gdn_replay_records.h"
 #include "core/linear_attention_state.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <span>
@@ -35,6 +35,6 @@ struct GdnReplayFoldRow {
  * read-only, disjoint, and do not overlap either state region.
  */
 void gdn_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
-                     std::span<const GdnReplayFoldRow> rows, cudaStream_t stream);
+                     std::span<const GdnReplayFoldRow> rows, hipStream_t stream);
 
 } // namespace ninfer::ops

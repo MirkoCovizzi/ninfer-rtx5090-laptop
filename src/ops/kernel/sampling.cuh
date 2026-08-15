@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Implements: include/ninfer/ops/sampling.h
@@ -12,7 +13,7 @@
 namespace ninfer::ops {
 
 __launch_bounds__(kSamplerBlock) __global__
-    void sample_row_kernel(const __nv_bfloat16* logits, std::int32_t* out,
+    void sample_row_kernel(const __hip_bfloat16* logits, std::int32_t* out,
                            const SamplingConfig* configs, const std::int32_t* logical_positions,
                            std::int32_t purpose, std::int32_t token_domain,
                            std::int32_t physical_rows) {
@@ -26,7 +27,7 @@ __launch_bounds__(kSamplerBlock) __global__
 
     // Greedy: exact argmax over raw logits. Bit-identical to argmax().
     if (!(cfg.temperature > 0.0f)) {
-        float bv = -CUDART_INF_F;
+        float bv = -HIP_INF_F;
         int bi   = INT_MAX;
         for (int v = tid; v < token_domain; v += blockDim.x) {
             const float x = __bfloat162float(logits[base + v]);
@@ -90,7 +91,7 @@ __launch_bounds__(kSamplerBlock) __global__
 }
 
 __launch_bounds__(kSamplerBlock) __global__
-    void sampling_partial_topk_kernel(const __nv_bfloat16* logits, const SamplingConfig* cfg_ptr,
+    void sampling_partial_topk_kernel(const __hip_bfloat16* logits, const SamplingConfig* cfg_ptr,
                                       std::int32_t token_domain, std::int32_t physical_rows,
                                       SamplingWorkspace workspace) {
     const int col            = static_cast<int>(blockIdx.y);

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Cold-cache benchmark and candidate tuner for the Qwen3.6-35B-A3B W8 LinearSwiGLU Op.
 
 #include "ninfer/ops/linear.h"
@@ -10,7 +11,7 @@
 #include "ops/linear_swiglu/w8/w8_linear_swiglu_kernels.h"
 #include "ops/linear_swiglu/w8/w8_linear_swiglu_plan.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -140,8 +141,8 @@ int main(int argc, char** argv) {
         const std::int32_t max_t =
             *std::max_element(options.t_sweep.begin(), options.t_sweep.end());
 
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         ninfer::DeviceBuffer flush(kFlushBytes);
         ninfer::DeviceBuffer input = bench::make_bf16(static_cast<std::size_t>(kHidden) * max_t);
         ninfer::DeviceBuffer output(static_cast<std::size_t>(kOutputRows) * max_t * 2);
@@ -160,7 +161,7 @@ int main(int argc, char** argv) {
 
             if (options.profile) {
                 ops::linear_swiglu(x, packed.weight, out, workspace, stream);
-                CUDA_CHECK(cudaStreamSynchronize(stream));
+                HIP_CHECK(hipStreamSynchronize(stream));
                 std::printf("profile T=%d route=%s\n", t,
                             ops::detail::w8_linear_swiglu_schedule_name(plan.schedule));
                 continue;
@@ -173,97 +174,97 @@ int main(int argc, char** argv) {
                        packed.storage.bytes);
             };
             run(ops::detail::w8_linear_swiglu_schedule_name(plan.schedule),
-                [&](cudaStream_t candidate_stream) {
+                [&](hipStream_t candidate_stream) {
                     ops::linear_swiglu(x, packed.weight, out, workspace, candidate_stream);
                 });
             if (options.production_only) { continue; }
 
-            run("composed.linear+silu", [&](cudaStream_t candidate_stream) {
+            run("composed.linear+silu", [&](hipStream_t candidate_stream) {
                 ops::linear(x, packed.weight, parent, candidate_stream);
                 ops::silu_mul(parent.slice(0, 0, kOutputRows),
                               parent.slice(0, kOutputRows, kOutputRows), out, candidate_stream);
             });
             if (t == 1) {
-                run("decode_pair_r4", [&](cudaStream_t candidate_stream) {
+                run("decode_pair_r4", [&](hipStream_t candidate_stream) {
                     ops::detail::w8_linear_swiglu_decode_pair_r4_launch(x, packed.weight, out,
                                                                         candidate_stream);
                 });
-                run("decode_pair_r8", [&](cudaStream_t candidate_stream) {
+                run("decode_pair_r8", [&](hipStream_t candidate_stream) {
                     ops::detail::w8_linear_swiglu_decode_pair_launch(x, packed.weight, out,
                                                                      candidate_stream);
                 });
-                run("decode_pair_r16", [&](cudaStream_t candidate_stream) {
+                run("decode_pair_r16", [&](hipStream_t candidate_stream) {
                     ops::detail::w8_linear_swiglu_decode_pair_r16_launch(x, packed.weight, out,
                                                                          candidate_stream);
                 });
             }
             if (t >= 2 && t <= 48) {
-                run("splitk_mma_exact_t", [&](cudaStream_t candidate_stream) {
+                run("splitk_mma_exact_t", [&](hipStream_t candidate_stream) {
                     ops::detail::w8_linear_swiglu_splitk_exact_t_launch(x, packed.weight, out,
                                                                         candidate_stream);
                 });
             }
-            run("mma_r32_c32", [&](cudaStream_t candidate_stream) {
+            run("mma_r32_c32", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r32_c32_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r32_c48", [&](cudaStream_t candidate_stream) {
+            run("mma_r32_c48", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r32_c48_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r32_c64", [&](cudaStream_t candidate_stream) {
+            run("mma_r32_c64", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r32_c64_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r32_c80", [&](cudaStream_t candidate_stream) {
+            run("mma_r32_c80", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r32_c80_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r32_c96", [&](cudaStream_t candidate_stream) {
+            run("mma_r32_c96", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r32_c96_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r32_c128", [&](cudaStream_t candidate_stream) {
+            run("mma_r32_c128", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r32_c128_launch(x, packed.weight, out,
                                                                   candidate_stream);
             });
-            run("mma_r64_c32", [&](cudaStream_t candidate_stream) {
+            run("mma_r64_c32", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r64_c32_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r64_c48", [&](cudaStream_t candidate_stream) {
+            run("mma_r64_c48", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r64_c48_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r64_c64", [&](cudaStream_t candidate_stream) {
+            run("mma_r64_c64", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r64_c64_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r64_c80", [&](cudaStream_t candidate_stream) {
+            run("mma_r64_c80", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r64_c80_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r64_c96", [&](cudaStream_t candidate_stream) {
+            run("mma_r64_c96", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r64_c96_launch(x, packed.weight, out,
                                                                  candidate_stream);
             });
-            run("mma_r64_c128", [&](cudaStream_t candidate_stream) {
+            run("mma_r64_c128", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r64_c128_launch(x, packed.weight, out,
                                                                   candidate_stream);
             });
-            run("mma_r128_c64", [&](cudaStream_t candidate_stream) {
+            run("mma_r128_c64", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r128_c64_launch(x, packed.weight, out,
                                                                   candidate_stream);
             });
-            run("mma_r128_c80", [&](cudaStream_t candidate_stream) {
+            run("mma_r128_c80", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_swiglu_mma_r128_c80_launch(x, packed.weight, out,
                                                                   candidate_stream);
             });
         }
 
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         write_csv(options, results);
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_w8_linear_swiglu_bench: %s\n", error.what());

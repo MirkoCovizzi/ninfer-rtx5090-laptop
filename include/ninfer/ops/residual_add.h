@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h> // cudaStream_t
+#include <hip/hip_runtime.h> // hipStream_t
 
 namespace ninfer::ops {
 
@@ -17,6 +17,6 @@ namespace ninfer::ops {
  * rounding belongs to the Op's numerical criterion, not the oracle. Private kernel arithmetic is
  * implementation-defined. The Op uses no workspace or other persistent state.
  */
-void residual_add(const Tensor& y, Tensor& x, cudaStream_t stream);
+void residual_add(const Tensor& y, Tensor& x, hipStream_t stream);
 
 } // namespace ninfer::ops

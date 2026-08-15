@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_pair/w8/w8_pair_plan.h"
 
 #include "ops/linear_pair/w8/w8_pair_kernels.h"
@@ -460,7 +461,7 @@ bool tiled_use_full(W8PairScheduleId schedule, const W8PairProblem& problem) {
 
 void launch_tiled(W8PairScheduleId schedule, bool full, const Tensor& x, const Weight& first_weight,
                   const Weight& second_weight, Tensor& first_out, Tensor& second_out,
-                  cudaStream_t stream) {
+                  hipStream_t stream) {
     const std::int32_t tile_cols = schedule_cols(schedule);
     for_each_token_slice(x.ne[1], tile_cols, [&](std::int32_t offset, std::int32_t count) {
         const Tensor x_slice = x.slice(1, offset, count);
@@ -508,7 +509,7 @@ void launch_tiled(W8PairScheduleId schedule, bool full, const Tensor& x, const W
 
 void launch_exact_tail(W8PairScheduleId exact_schedule, const W8PairProblem& problem,
                        const Tensor& x, const Weight& first_weight, const Weight& second_weight,
-                       Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+                       Tensor& first_out, Tensor& second_out, hipStream_t stream) {
     const W8PairScheduleId prefix_schedule = homogeneous_schedule(exact_schedule);
     const std::int32_t tile_cols           = schedule_cols(prefix_schedule);
     const std::int32_t full_cols           = (problem.cols / tile_cols) * tile_cols;
@@ -546,7 +547,7 @@ void launch_exact_tail(W8PairScheduleId exact_schedule, const W8PairProblem& pro
 
 void w8_pair_execute_plan(W8PairPlan plan, const Tensor& x, const Weight& first_weight,
                           const Weight& second_weight, Tensor& first_out, Tensor& second_out,
-                          cudaStream_t stream) {
+                          hipStream_t stream) {
     const W8PairProblem problem = w8_pair_problem(x, first_weight, first_out);
     const W8PairPlan resolved   = w8_pair_resolve_plan(problem);
     if (resolved.schedule != plan.schedule) {
@@ -601,7 +602,7 @@ void w8_pair_execute_plan(W8PairPlan plan, const Tensor& x, const Weight& first_
 }
 
 void w8_pair_dispatch(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
-                      Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+                      Tensor& first_out, Tensor& second_out, hipStream_t stream) {
     const W8PairPlan plan = w8_pair_resolve_plan(w8_pair_problem(x, first_weight, first_out));
     w8_pair_execute_plan(plan, x, first_weight, second_weight, first_out, second_out, stream);
 }

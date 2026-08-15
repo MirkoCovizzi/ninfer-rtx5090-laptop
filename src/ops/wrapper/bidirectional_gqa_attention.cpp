@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/bidirectional_gqa_attention.h"
 
 #include "core/layout.h"
@@ -116,7 +117,7 @@ void bidirectional_gqa_attention(const Tensor& q, const Tensor& query_k, const T
                                  const Tensor& table_rows, float scale,
                                  const PagedKVBatchLayerView& context,
                                  GqaContextExecutionEnvelope envelope, WorkspaceArena& workspace,
-                                 Tensor& out, cudaStream_t stream) {
+                                 Tensor& out, hipStream_t stream) {
     constexpr const char* op = "bidirectional_gqa_attention";
     if (q.dtype != DType::BF16 || query_k.dtype != DType::BF16 || query_v.dtype != DType::BF16 ||
         out.dtype != DType::BF16) {

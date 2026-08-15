@@ -79,7 +79,7 @@ struct EngineOptions {
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     bool enable_vision  = false;
-    bool use_cuda_graph = true;
+    bool use_hip_graph = true;
     LoadProgress load_progress;
 };
 
@@ -390,8 +390,8 @@ struct MemorySummary {
     std::size_t kv_capacity_headroom_bytes        = 0;
     std::size_t planned_slack_bytes               = 0;
     std::size_t workspace_logical_peak_bytes      = 0;
-    std::size_t cuda_graph_allowance_bytes        = 0;
-    std::size_t cuda_graph_observed_bytes         = 0;
+    std::size_t hip_graph_allowance_bytes        = 0;
+    std::size_t hip_graph_observed_bytes         = 0;
     std::size_t kv_payload_bytes                  = 0;
 };
 

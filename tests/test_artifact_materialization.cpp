@@ -4,7 +4,7 @@
 #include "artifact_fixture.h"
 #include "core/device.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -61,8 +61,8 @@ ninfer::test::artifact_fixture::TemporaryArtifact write_fixture() {
         "materialization");
 }
 
-bool cuda_unavailable(cudaError_t error) {
-    return error == cudaErrorNoDevice || error == cudaErrorInsufficientDriver;
+bool hip_unavailable(hipError_t error) {
+    return error == hipErrorNoDevice || error == hipErrorInsufficientDriver;
 }
 
 void require(bool condition, const char* message) {
@@ -96,12 +96,12 @@ int main() {
                 "validate-only tensor was included in the materialization plan");
 
         int device_count              = 0;
-        const cudaError_t count_error = cudaGetDeviceCount(&device_count);
-        if (cuda_unavailable(count_error)) {
+        const hipError_t count_error = hipGetDeviceCount(&device_count);
+        if (hip_unavailable(count_error)) {
             std::cout << "SKIP: no usable CUDA device\n";
             return 77;
         }
-        CUDA_CHECK(count_error);
+        HIP_CHECK(count_error);
         if (device_count == 0) {
             std::cout << "SKIP: no CUDA devices\n";
             return 77;
@@ -135,12 +135,12 @@ int main() {
         auto materialized = ninfer::artifact::materialize(reader, plan, device);
 
         std::array<std::byte, kTensor.size()> copied{};
-        CUDA_CHECK(cudaMemcpy(copied.data(), materialized.device_data(tensor), copied.size(),
-                              cudaMemcpyDeviceToHost));
+        HIP_CHECK(hipMemcpy(copied.data(), materialized.device_data(tensor), copied.size(),
+                              hipMemcpyDeviceToHost));
         require(copied == kTensor, "device tensor payload differs from the artifact");
         std::array<std::byte, kSecondTensor.size()> second_copied{};
-        CUDA_CHECK(cudaMemcpy(second_copied.data(), materialized.device_data(second),
-                              second_copied.size(), cudaMemcpyDeviceToHost));
+        HIP_CHECK(hipMemcpy(second_copied.data(), materialized.device_data(second),
+                              second_copied.size(), hipMemcpyDeviceToHost));
         require(second_copied == kSecondTensor,
                 "second device tensor payload differs from the artifact");
 

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gelu.h"
 #include "ops/op_tester.h"
 
@@ -49,7 +50,7 @@ int run_case(const char* label, ops::GeluMode mode, std::int32_t rows, std::int3
 
     Tensor input_tensor(device_input.data(), DType::BF16, {rows, columns});
     ops::gelu(input_tensor, mode, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_input.data(), count), expected,
                                     gelu_bf16_criterion());
@@ -71,7 +72,7 @@ int run_edge_case(ops::GeluMode mode, const char* label) {
     Tensor input_tensor(device_input.data(), DType::BF16,
                         {static_cast<std::int32_t>(input.size())});
     ops::gelu(input_tensor, mode, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_input.data(), input.size()),
                                     expected, gelu_bf16_criterion());
@@ -82,7 +83,7 @@ int run_edge_case(ops::GeluMode mode, const char* label) {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

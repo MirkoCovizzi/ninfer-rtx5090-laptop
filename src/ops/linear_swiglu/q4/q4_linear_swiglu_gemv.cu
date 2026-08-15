@@ -1,13 +1,15 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_kernels.h"
 
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
-#include "core/device.h" // CUDA_CHECK
+#include "core/device.h" // HIP_CHECK
 #include "ops/linear/q4/q4_small_t_mma.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 #include <stdexcept>
@@ -50,36 +52,40 @@ struct Q4SwiGluSmallTRows {
 };
 
 struct Q4SwiGluSmallTEpilogue {
-    __nv_bfloat16* out;
+    __hip_bfloat16* out;
 
+    // WMMA C layout: low lanes hold the gate rows (row_lo..row_lo+7), high lanes the
+    // up rows (row_lo+8..row_lo+15) of the same column; `partner` is the up row-half value,
+    // exchanged converged across the warp by the kernel before any per-column guard.
     template <int ActiveCols>
-    __device__ __forceinline__ void store(int row, int col0, float4 projected) const {
-        if (col0 < ActiveCols) {
-            out[static_cast<std::int64_t>(col0) * kIntermediate + row] =
-                __float2bfloat16_rn(silu(projected.x) * projected.z);
-        }
-        if (col0 + 1 < ActiveCols) {
-            out[static_cast<std::int64_t>(col0 + 1) * kIntermediate + row] =
-                __float2bfloat16_rn(silu(projected.y) * projected.w);
+    __device__ __forceinline__ void store_wmma(int row_lo, int col, const float (&sum)[8],
+                                               const float (&partner)[8]) const {
+        const int lane = static_cast<int>(threadIdx.x) & 31;
+        if (col < ActiveCols && lane < 16) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                out[static_cast<std::int64_t>(col) * kIntermediate + (row_lo + r)] =
+                    __float2bfloat16_rn(silu(sum[r]) * partner[r]);
+            }
         }
     }
 };
 
-using SmallTLauncher = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+using SmallTLauncher = void (*)(const Tensor&, const Weight&, Tensor&, hipStream_t);
 
 template <int ActiveCols>
-void launch_small_t_active(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_small_t_active(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     constexpr int TileCols =
         ActiveCols <= 8 ? 8 : (ActiveCols <= 16 ? 16 : (ActiveCols <= 24 ? 24 : 32));
     constexpr int kBlocks = kIntermediate / Q4SwiGluSmallTRows::kOutputRowsPerCta;
-    const Q4SwiGluSmallTEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data)};
+    const Q4SwiGluSmallTEpilogue epilogue{static_cast<__hip_bfloat16*>(out.data)};
     q4_small_t_mma_kernel<Q4SwiGluSmallTGeometry, TileCols, ActiveCols, Q4SwiGluSmallTEpilogue,
                           Q4SwiGluSmallTRows>
         <<<kBlocks, Q4DraftSmallTSchedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-            static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data),
+            static_cast<const __hip_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const std::uint8_t*>(w.scales), static_cast<__hip_bfloat16*>(out.data),
             epilogue, Q4SwiGluSmallTRows{});
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <std::size_t... Offsets>
@@ -111,13 +117,13 @@ __device__ __forceinline__ void q4_issue_pair_tile(uint4 (*__restrict__ s_code)[
     pipe_commit();
 }
 
-__global__ void q4_linear_swiglu_gemv_pair_kernel(const __nv_bfloat16* __restrict__ x,
+__global__ void q4_linear_swiglu_gemv_pair_kernel(const __hip_bfloat16* __restrict__ x,
                                                   const std::uint8_t* __restrict__ codes,
                                                   const std::uint8_t* __restrict__ scales,
-                                                  __nv_bfloat16* __restrict__ out) {
+                                                  __hip_bfloat16* __restrict__ out) {
     constexpr int kStages   = 3;
     constexpr int kPrefetch = kStages - 1;
-    __shared__ __align__(16) __nv_bfloat16 x_sh[kK];
+    __shared__ __align__(16) __hip_bfloat16 x_sh[kK];
     __shared__ uint4 code_tile[kWarpsPerBlock][kStages][2][kVecsPerWarpTile];
     __shared__ uint4 scale_tile[kWarpsPerBlock][kStages][2][2];
 
@@ -139,7 +145,7 @@ __global__ void q4_linear_swiglu_gemv_pair_kernel(const __nv_bfloat16* __restric
         codes + static_cast<std::int64_t>(out_row + kIntermediate) * kGroups * kBytesPerGroup;
     const std::uint8_t* up_scale_row =
         scales + static_cast<std::int64_t>(out_row + kIntermediate) * kGroups * 2;
-    const auto* x2 = reinterpret_cast<const __nv_bfloat162*>(x_sh);
+    const auto* x2 = reinterpret_cast<const __hip_bfloat162*>(x_sh);
 
     float gate_acc = 0.0f;
     float up_acc   = 0.0f;
@@ -203,19 +209,19 @@ __global__ void q4_linear_swiglu_gemv_pair_kernel(const __nv_bfloat16* __restric
 } // namespace
 
 void q4_linear_swiglu_gemv_pair_launch(const Tensor& x, const Weight& w, Tensor& out,
-                                       cudaStream_t stream) {
+                                       hipStream_t stream) {
     if (w.n != kN || w.k != kK || w.padded_shape[1] != kK) {
         throw std::invalid_argument("q4 linear_swiglu GEMV requires weight [34816,5120]");
     }
     const int grid = kIntermediate / kPairsPerBlock;
     q4_linear_swiglu_gemv_pair_kernel<<<grid, kBlockThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data));
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.scales), static_cast<__hip_bfloat16*>(out.data));
+    HIP_CHECK(hipGetLastError());
 }
 
 void q4_linear_swiglu_small_t_exact_launch(const Tensor& x, const Weight& w, Tensor& out,
-                                           cudaStream_t stream) {
+                                           hipStream_t stream) {
     if (x.ne[1] < 2 || x.ne[1] > 32) {
         throw std::invalid_argument("Q4 LinearSwiGLU exact small-T requires T=2..32");
     }

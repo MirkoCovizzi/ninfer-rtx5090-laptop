@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h> // cudaStream_t
+#include <hip/hip_runtime.h> // hipStream_t
 
 namespace ninfer::ops {
 
@@ -19,6 +20,6 @@ namespace ninfer::ops {
  * effect.
  */
 void gdn_gating(const Tensor& a, const Tensor& b, const Tensor& A_log, const Tensor& dt_bias,
-                Tensor& g, Tensor& beta, cudaStream_t stream);
+                Tensor& g, Tensor& beta, hipStream_t stream);
 
 } // namespace ninfer::ops

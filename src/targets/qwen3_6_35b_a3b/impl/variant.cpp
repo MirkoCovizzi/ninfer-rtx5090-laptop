@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "targets/qwen3_6_35b_a3b/impl/variant.h"
 
 #include "ninfer/ops/attn_input_proj.h"
@@ -64,7 +65,7 @@ bool dflash_target_uses_chunked_small_t(std::uint32_t draft_window, std::uint32_
 }
 
 void run_sparse_moe(const Tensor& hidden, const ops::SparseMoeWeights& weights, Tensor& residual,
-                    WorkspaceArena& workspace, cudaStream_t stream) {
+                    WorkspaceArena& workspace, hipStream_t stream) {
     auto scope               = workspace.scope();
     const DeviceSpan storage = workspace.alloc_bytes(ops::sparse_moe_workspace_capacity_bytes(
         weights.routed_gate_up.qtype, weights.routed_down.qtype, hidden.ne[1], hidden.ne[1]));
@@ -127,26 +128,26 @@ std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t 
 void Variant::attention_projection(const Tensor& hidden,
                                    const FullAttentionProjectionWeights& weights, Tensor& query,
                                    Tensor& gate, Tensor& key, Tensor& value, qwen3_6::TextPhase,
-                                   WorkspaceArena&, cudaStream_t stream) {
+                                   WorkspaceArena&, hipStream_t stream) {
     ops::attn_input_proj(hidden, weights.query_key_gate_value, query, gate, key, value, stream);
 }
 
 void Variant::attention_output_projection(const Tensor& attention, const Weight& weight,
                                           Tensor& residual, qwen3_6::TextPhase,
-                                          WorkspaceArena& workspace, cudaStream_t stream) {
+                                          WorkspaceArena& workspace, hipStream_t stream) {
     ops::linear_add(attention, weight, residual, workspace, stream);
 }
 
 void Variant::mtp_attention_projection(const Tensor& hidden,
                                        const MtpAttentionProjectionWeights& weights, Tensor& query,
                                        Tensor& gate, Tensor& key, Tensor& value,
-                                       WorkspaceArena& workspace, cudaStream_t stream) {
+                                       WorkspaceArena& workspace, hipStream_t stream) {
     ops::attn_input_proj(hidden, weights.query_key_gate_value, query, gate, key, value, stream);
 }
 
 void Variant::mtp_kv_projection(const Tensor& hidden, const MtpAttentionProjectionWeights& weights,
                                 Tensor& key, Tensor& value, WorkspaceArena& workspace,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     auto scope     = workspace.scope();
     const int cols = hidden.ne[1];
     Tensor query   = workspace.alloc(DType::BF16, {TextConfig::query_size, cols});
@@ -156,7 +157,7 @@ void Variant::mtp_kv_projection(const Tensor& hidden, const MtpAttentionProjecti
 
 void Variant::mtp_q_gate_projection(const Tensor& hidden,
                                     const MtpAttentionProjectionWeights& weights, Tensor& query,
-                                    Tensor& gate, WorkspaceArena& workspace, cudaStream_t stream) {
+                                    Tensor& gate, WorkspaceArena& workspace, hipStream_t stream) {
     auto scope     = workspace.scope();
     const int cols = hidden.ne[1];
     Tensor key     = workspace.alloc(DType::BF16, {TextConfig::kv_size, cols});
@@ -166,7 +167,7 @@ void Variant::mtp_q_gate_projection(const Tensor& hidden,
 
 void Variant::gdn_input_projection(const Tensor& hidden, const GdnProjectionWeights& weights,
                                    Tensor& qkv, Tensor& output_gate, qwen3_6::TextPhase,
-                                   WorkspaceArena&, cudaStream_t stream) {
+                                   WorkspaceArena&, hipStream_t stream) {
     Tensor output_gate_flat =
         output_gate.view({TextConfig::value_dim, static_cast<int>(hidden.ne[1] * hidden.ne[2])});
     ops::gdn_input_proj(hidden, weights.query_key_value_z, qkv, output_gate_flat, stream);
@@ -176,7 +177,7 @@ void Variant::gdn_input_projection_snapshot(
     const Tensor& hidden, const GdnProjectionWeights& weights, const Tensor& conv_weight,
     Tensor& conv_states, const Tensor& valid_columns, const Tensor& initial_slot,
     const Tensor& snapshot_base_slot, Tensor& query, Tensor& key, Tensor& value,
-    Tensor& output_gate, qwen3_6::TextPhase, WorkspaceArena& workspace, cudaStream_t stream) {
+    Tensor& output_gate, qwen3_6::TextPhase, WorkspaceArena& workspace, hipStream_t stream) {
     Tensor output_gate_view = output_gate.view({TextConfig::value_dim, hidden.ne[1], hidden.ne[2]});
     ops::gdn_input_proj_conv_snapshot(hidden, weights.query_key_value_z, conv_weight, conv_states,
                                       valid_columns, initial_slot, snapshot_base_slot, query, key,
@@ -188,7 +189,7 @@ void Variant::gdn_input_projection_record(const Tensor& hidden, const GdnProject
                                           const Tensor& valid_columns, const Tensor& initial_slots,
                                           Tensor& conv_record, Tensor& query, Tensor& key,
                                           Tensor& value, Tensor& output_gate, qwen3_6::TextPhase,
-                                          WorkspaceArena& workspace, cudaStream_t stream) {
+                                          WorkspaceArena& workspace, hipStream_t stream) {
     auto workspace_scope     = workspace.scope();
     const DeviceSpan storage = workspace.alloc_bytes(gdn_record_workspace_bytes(hidden));
     WorkspaceArena leaf_workspace(storage);
@@ -200,25 +201,25 @@ void Variant::gdn_input_projection_record(const Tensor& hidden, const GdnProject
 
 void Variant::gdn_output_projection(const Tensor& hidden, const Weight& weight, Tensor& residual,
                                     qwen3_6::TextPhase, WorkspaceArena& workspace,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     ops::linear_add(hidden, weight, residual, workspace, stream);
 }
 
 void Variant::gdn_norm_control_projection(const Tensor& residual, const Tensor& norm_weight,
                                           float eps, const GdnProjectionWeights& weights,
                                           Tensor& hidden, Tensor& g, Tensor& beta,
-                                          WorkspaceArena& workspace, cudaStream_t stream) {
+                                          WorkspaceArena& workspace, hipStream_t stream) {
     ops::gdn_norm_gating_proj(residual, norm_weight, eps, weights.a_b_projection, weights.a_log,
                               weights.dt_bias, workspace, hidden, g, beta, stream);
 }
 
 void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, Tensor& residual,
-                         qwen3_6::TextPhase, WorkspaceArena& workspace, cudaStream_t stream) {
+                         qwen3_6::TextPhase, WorkspaceArena& workspace, hipStream_t stream) {
     run_sparse_moe(hidden, weights.op, residual, workspace, stream);
 }
 
 void Variant::mtp_post_mixer(const Tensor& hidden, const MtpPostMixerWeights& weights,
-                             Tensor& residual, WorkspaceArena& workspace, cudaStream_t stream) {
+                             Tensor& residual, WorkspaceArena& workspace, hipStream_t stream) {
     run_sparse_moe(hidden, weights.op, residual, workspace, stream);
 }
 

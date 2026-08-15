@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // ninfer::ops - gdn_gating kernel: elementwise GDN gate prep over [48,T].
@@ -5,14 +6,15 @@
 
 #include "ops/common/math.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cmath>
 #include <cstdint>
 
 namespace ninfer::ops {
 
-__global__ void gdn_gating_kernel(const __nv_bfloat16* a, const __nv_bfloat16* b,
+__global__ void gdn_gating_kernel(const __hip_bfloat16* a, const __hip_bfloat16* b,
                                   const float* A_log, const float* dt_bias, float* g, float* beta,
                                   std::int64_t n) {
     const std::int64_t start  = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;

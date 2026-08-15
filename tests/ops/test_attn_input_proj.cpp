@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/attn_input_proj.h"
 
 #include "ops/direct_bf16_weight.h"
 #include "ops/input_projection_test_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -61,7 +62,7 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& gate_value
     Tensor k = key.tensor();
     Tensor v = value.tensor();
     ops::attn_input_proj(x, query_key.view(), gate_value.view(), q, g, k, v, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string suffix = " Q4/Q5 A16 T=" + std::to_string(tokens);
     int failures             = 0;
@@ -185,7 +186,7 @@ int run_bf16_target_case(DeviceWeight& parent, std::int32_t tokens) {
     Tensor k = key.tensor();
     Tensor v = value.tensor();
     ops::attn_input_proj(x, parent.view(), q, g, k, v, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     constexpr std::int32_t kKeyBegin   = kQRows;
     constexpr std::int32_t kGateBegin  = kKeyBegin + kKvRows;
@@ -262,7 +263,7 @@ int run_nvfp4_target_case(DevicePackedWeight& parent, std::int32_t tokens,
         QType::NVFP4, 14336, kHidden, policy, tokens, tokens);
     DeviceArena workspace(std::max<std::size_t>(capacity, 256));
     ops::attn_input_proj(x, parent.view(), q, g, k, v, policy, workspace, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     constexpr std::int32_t kKeyBegin   = kQRows;
     constexpr std::int32_t kGateBegin  = kKeyBegin + kKvRows;
@@ -324,7 +325,7 @@ int run_w8_target_case(DevicePackedWeight& parent, std::int32_t tokens) {
     Tensor k = key.tensor();
     Tensor v = value.tensor();
     ops::attn_input_proj(x, parent.view(), q, g, k, v, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string suffix = " W8 target A16 T=" + std::to_string(tokens);
     int failures             = 0;
@@ -368,7 +369,7 @@ int run_w8_companion_case(DevicePackedWeight& parent, std::int32_t tokens) {
     Tensor k = key.tensor();
     Tensor v = value.tensor();
     ops::attn_input_proj(x, parent.view(), q, k, v, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string suffix = " W8 companion A16 T=" + std::to_string(tokens);
     int failures             = 0;
@@ -398,7 +399,7 @@ int run_w8_companion() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

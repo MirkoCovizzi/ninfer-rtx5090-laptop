@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <functional>
 
@@ -16,13 +16,13 @@ public:
     DecodeGraphDefinition(DecodeGraphDefinition&& other) noexcept;
     DecodeGraphDefinition& operator=(DecodeGraphDefinition&& other) noexcept;
 
-    void capture(cudaStream_t stream, const std::function<void()>& body);
+    void capture(hipStream_t stream, const std::function<void()>& body);
     [[nodiscard]] bool ready() const noexcept;
     void reset() noexcept;
 
 private:
     friend class DecodeGraphExecutable;
-    cudaGraph_t graph_ = nullptr;
+    hipGraph_t graph_ = nullptr;
 };
 
 class DecodeGraphExecutable {
@@ -37,13 +37,13 @@ public:
 
     void instantiate(const DecodeGraphDefinition& definition);
     void update(const DecodeGraphDefinition& definition);
-    void upload(cudaStream_t stream);
-    void launch(cudaStream_t stream);
+    void upload(hipStream_t stream);
+    void launch(hipStream_t stream);
     [[nodiscard]] bool ready() const noexcept;
     void reset() noexcept;
 
 private:
-    cudaGraphExec_t exec_ = nullptr;
+    hipGraphExec_t exec_ = nullptr;
 };
 
 } // namespace ninfer

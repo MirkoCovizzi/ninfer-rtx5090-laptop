@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/layer_norm.h"
 #include "ops/norm_test_common.h"
 
@@ -82,7 +83,7 @@ int run_case(const char* label, std::int32_t rows, std::uint32_t seed, bool near
     Tensor tb(device_bias.data, DType::BF16, {kVisionWidth});
     Tensor tout(output_data, DType::BF16, {kVisionWidth, rows});
     ops::layer_norm(tx, tw, tb, kEps, tout, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_reduction(label, from_device_bf16(output_data, n), reference,
                                     layer_norm_bf16_criterion());
@@ -97,7 +98,7 @@ int run_case(const char* label, std::int32_t rows, std::uint32_t seed, bool near
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

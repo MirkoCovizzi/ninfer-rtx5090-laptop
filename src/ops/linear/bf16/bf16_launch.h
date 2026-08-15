@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -14,10 +14,10 @@ inline constexpr std::int32_t kBf16SmallTMinTokens         = 2;
 inline constexpr std::int32_t kBf16SmallTMaxTokens         = 32;
 inline constexpr std::int32_t kBf16LinearSmallTDispatchEnd = 27;
 
-using Bf16Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+using Bf16Launch = void (*)(const Tensor&, const Weight&, Tensor&, hipStream_t);
 
-void launch_bf16_decode(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream);
-void launch_bf16_small_t(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream);
-void launch_bf16_mma(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream);
+void launch_bf16_decode(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream);
+void launch_bf16_small_t(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream);
+void launch_bf16_mma(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

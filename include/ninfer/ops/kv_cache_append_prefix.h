@@ -4,7 +4,7 @@
 #include "core/paged_kv_cache.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -38,7 +38,7 @@ struct KVCacheAppendPrefixExecutionEnvelope {
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
                             const Tensor& counts, const Tensor& table_rows,
                             KVCacheAppendPrefixExecutionEnvelope envelope,
-                            PagedKVBatchLayerView cache, cudaStream_t stream);
+                            PagedKVBatchLayerView cache, hipStream_t stream);
 
 /**
  * Op: append device-selected exact K/V prefixes to lane-owned cyclic cache storage.
@@ -52,6 +52,6 @@ void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& posi
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
                             const Tensor& counts, const Tensor& lanes,
                             KVCacheAppendPrefixExecutionEnvelope envelope,
-                            CyclicKVCacheLayerView cache, cudaStream_t stream);
+                            CyclicKVCacheLayerView cache, hipStream_t stream);
 
 } // namespace ninfer::ops

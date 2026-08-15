@@ -11,30 +11,30 @@ constexpr std::int64_t kCtasPerSm      = 4;
 constexpr std::int64_t kTargetCtas     = kRtx5090SmCount * kCtasPerSm;
 
 template <bool MULTI_JOB>
-cudaError_t launch_fixed(const chunk_output_config& cfg, dim3 grid, head_map qk_map, int chunks) {
+hipError_t launch_fixed(const chunk_output_config& cfg, dim3 grid, head_map qk_map, int chunks) {
     constexpr int smem_bytes = kernel::kernel_dims::SMEM_BYTES;
 
-    cudaError_t err = cudaFuncSetAttribute(kernel::output_kernel<MULTI_JOB>,
-                                           cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    if (err != cudaSuccess) { return err; }
+    hipError_t err = hipFuncSetAttribute(reinterpret_cast<const void*>(kernel::output_kernel<MULTI_JOB>),
+                                           hipFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+    if (err != hipSuccess) { return err; }
 
     const dim3 block(kernel::THREADS, 1, 1);
 
     kernel::output_kernel<MULTI_JOB><<<grid, block, smem_bytes, cfg.stream>>>(
         cfg.q, cfg.k, cfg.v_new, cfg.g_cumsum, cfg.h_chunk, cfg.attn_out, qk_map, cfg.scale,
         chunks);
-    return cudaGetLastError();
+    return hipGetLastError();
 }
 
 } // namespace
 
-cudaError_t launch_output(const chunk_output_config& cfg) {
+hipError_t launch_output(const chunk_output_config& cfg) {
     stage_validator v{"launch_output", cfg.H_qk, cfg.H_v, cfg.L};
     NINFER_GATED_DELTA_NET_PROPAGATE(v.check_shape());
     NINFER_GATED_DELTA_NET_PROPAGATE(v.check_full_chunks());
     if (cfg.q == nullptr || cfg.k == nullptr || cfg.v_new == nullptr || cfg.g_cumsum == nullptr ||
         cfg.h_chunk == nullptr || cfg.attn_out == nullptr) {
-        return cudaErrorInvalidValue;
+        return hipErrorInvalidValue;
     }
 
     const auto qk_map     = head_map::of((int)cfg.H_qk, (int)cfg.H_v);

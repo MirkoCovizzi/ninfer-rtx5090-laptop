@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "artifact/binder.h"
 
 #include <algorithm>

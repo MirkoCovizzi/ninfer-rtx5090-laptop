@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gdn_input_proj.h"
 
 #include "core/layout.h"
@@ -226,7 +227,7 @@ void validate_policy(LinearPolicy policy) {
 }
 
 void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                            LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
+                            LinearPolicy policy, WorkspaceArena* workspace, hipStream_t stream) {
     validate_policy(policy);
     const std::int32_t cols = x.ne[1];
     if (cols <= 0) { throw std::invalid_argument("gdn_input_proj: T must be positive"); }
@@ -302,7 +303,7 @@ void compose_batched_snapshot(const Tensor& x, const Tensor& conv_weight, Tensor
                               const Tensor& snapshot_base_slots, Tensor& query, Tensor& key,
                               Tensor& value, Tensor& z, std::int32_t query_rows,
                               std::int32_t key_rows, std::int32_t value_rows, ConvGeometry geometry,
-                              WorkspaceArena& workspace, cudaStream_t stream, Project&& project) {
+                              WorkspaceArena& workspace, hipStream_t stream, Project&& project) {
     const std::int32_t channels = query_rows + key_rows + value_rows;
     auto scope                  = workspace.scope();
     ProjectedWorkspace scratch =
@@ -323,7 +324,7 @@ template <class Project>
 void compose_record(const Tensor& x, const Tensor& conv_weight, const Tensor& conv_states,
                     const Tensor& valid_columns, const Tensor& initial_state_slots,
                     Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value, Tensor& z,
-                    ConvGeometry geometry, WorkspaceArena& workspace, cudaStream_t stream,
+                    ConvGeometry geometry, WorkspaceArena& workspace, hipStream_t stream,
                     Project&& project) {
     auto scope         = workspace.scope();
     Tensor x_flat      = flatten_columns(x, x.ne[0], geometry);
@@ -339,7 +340,7 @@ void dispatch_single_parent_snapshot(const Tensor& x, const Weight& weight,
                                      const Tensor& valid_columns, const Tensor& initial_state_slots,
                                      const Tensor& snapshot_base_slots, Tensor& query, Tensor& key,
                                      Tensor& value, Tensor& z, LinearPolicy policy,
-                                     WorkspaceArena& workspace, cudaStream_t stream) {
+                                     WorkspaceArena& workspace, hipStream_t stream) {
     validate_policy(policy);
 
     if (weight.qtype == QType::NVFP4) {
@@ -445,7 +446,7 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
                                    const Tensor& initial_state_slots, Tensor& conv_record,
                                    Tensor& query, Tensor& key, Tensor& value, Tensor& z,
                                    LinearPolicy policy, WorkspaceArena& workspace,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     validate_policy(policy);
 
     if (weight.qtype == QType::NVFP4) {
@@ -551,7 +552,7 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
 } // namespace
 
 void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
-                    Tensor& qkv, Tensor& z, cudaStream_t stream) {
+                    Tensor& qkv, Tensor& z, hipStream_t stream) {
     constexpr std::int32_t kHidden     = 5120;
     constexpr std::int32_t kQkRows     = 4096;
     constexpr std::int32_t kValueRows  = 6144;
@@ -597,12 +598,12 @@ std::size_t gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int
 }
 
 void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Tensor& qkv, Tensor& z,
-                    LinearPolicy policy, WorkspaceArena& workspace, cudaStream_t stream) {
+                    LinearPolicy policy, WorkspaceArena& workspace, hipStream_t stream) {
     dispatch_single_parent(x, query_key_value_z_weight, qkv, z, policy, &workspace, stream);
 }
 
 void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Tensor& qkv, Tensor& z,
-                    cudaStream_t stream) {
+                    hipStream_t stream) {
     dispatch_single_parent(x, query_key_value_z_weight, qkv, z, LinearPolicy::A16Only, nullptr,
                            stream);
 }
@@ -724,7 +725,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
                                   const Tensor& initial_state_slots,
                                   const Tensor& snapshot_base_slots, Tensor& query, Tensor& key,
                                   Tensor& value, Tensor& z, WorkspaceArena& ws,
-                                  cudaStream_t stream) {
+                                  hipStream_t stream) {
     constexpr std::int32_t kHidden     = 5120;
     constexpr std::int32_t kQueryRows  = 2048;
     constexpr std::int32_t kKeyRows    = 2048;
@@ -778,7 +779,7 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
                                 const Tensor& conv_states, const Tensor& valid_columns,
                                 const Tensor& initial_state_slots, Tensor& conv_record,
                                 Tensor& query, Tensor& key, Tensor& value, Tensor& z,
-                                WorkspaceArena& workspace, cudaStream_t stream) {
+                                WorkspaceArena& workspace, hipStream_t stream) {
     constexpr std::int32_t kHidden     = 5120;
     constexpr std::int32_t kQueryRows  = 2048;
     constexpr std::int32_t kKeyRows    = 2048;
@@ -825,7 +826,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
                                   const Tensor& valid_columns, const Tensor& initial_state_slots,
                                   const Tensor& snapshot_base_slots, Tensor& query, Tensor& key,
                                   Tensor& value, Tensor& z, LinearPolicy policy, WorkspaceArena& ws,
-                                  cudaStream_t stream) {
+                                  hipStream_t stream) {
     dispatch_single_parent_snapshot(x, query_key_value_z_weight, conv_weight, conv_states,
                                     valid_columns, initial_state_slots, snapshot_base_slots, query,
                                     key, value, z, policy, ws, stream);
@@ -836,7 +837,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
                                   const Tensor& valid_columns, const Tensor& initial_state_slots,
                                   const Tensor& snapshot_base_slots, Tensor& query, Tensor& key,
                                   Tensor& value, Tensor& z, WorkspaceArena& ws,
-                                  cudaStream_t stream) {
+                                  hipStream_t stream) {
     dispatch_single_parent_snapshot(x, query_key_value_z_weight, conv_weight, conv_states,
                                     valid_columns, initial_state_slots, snapshot_base_slots, query,
                                     key, value, z, LinearPolicy::A16Only, ws, stream);
@@ -847,7 +848,7 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& query_key_value_z
                                 const Tensor& valid_columns, const Tensor& initial_state_slots,
                                 Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value,
                                 Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     dispatch_single_parent_record(x, query_key_value_z_weight, conv_weight, conv_states,
                                   valid_columns, initial_state_slots, conv_record, query, key,
                                   value, z, policy, workspace, stream);
@@ -857,7 +858,7 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& query_key_value_z
                                 const Tensor& conv_weight, const Tensor& conv_states,
                                 const Tensor& valid_columns, const Tensor& initial_state_slots,
                                 Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value,
-                                Tensor& z, WorkspaceArena& workspace, cudaStream_t stream) {
+                                Tensor& z, WorkspaceArena& workspace, hipStream_t stream) {
     dispatch_single_parent_record(x, query_key_value_z_weight, conv_weight, conv_states,
                                   valid_columns, initial_state_slots, conv_record, query, key,
                                   value, z, LinearPolicy::A16Only, workspace, stream);

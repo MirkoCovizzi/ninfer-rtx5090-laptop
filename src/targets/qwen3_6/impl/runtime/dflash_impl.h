@@ -20,7 +20,7 @@
 #include "ninfer/ops/speculative_round.h"
 #include "ninfer/ops/swa.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <stdexcept>
@@ -276,8 +276,8 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_6::DFlashDecodeState& f
             static_cast<std::size_t>(Config::hidden) * width * element_bytes;
         const auto* source = static_cast<const std::byte*>(residual.data) +
                              static_cast<std::size_t>(Config::hidden) * element_bytes;
-        CUDA_CHECK(cudaMemcpy2DAsync(packed.data, row_bytes, source, source_pitch, row_bytes,
-                                     static_cast<std::size_t>(batch_size), cudaMemcpyDeviceToDevice,
+        HIP_CHECK(hipMemcpy2DAsync(packed.data, row_bytes, source, source_pitch, row_bytes,
+                                     static_cast<std::size_t>(batch_size), hipMemcpyDeviceToDevice,
                                      state.execution.device.stream));
         Tensor proposal_hidden = state.execution.work.alloc(
             DType::BF16, {Config::hidden, static_cast<std::int32_t>(k) * batch_size});
@@ -318,8 +318,8 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
         }
         qwen3_6::DFlashDecodeState& frame = state.frame;
         const std::int32_t width          = static_cast<std::int32_t>(k) + 1;
-        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &state.host_ingress,
-                                   sizeof(qwen3_6::DFlashDecodeIngress), cudaMemcpyHostToDevice,
+        HIP_CHECK(hipMemcpyAsync(frame.ingress.data, &state.host_ingress,
+                                   sizeof(qwen3_6::DFlashDecodeIngress), hipMemcpyHostToDevice,
                                    state.execution.device.stream));
 
         Tensor anchors          = frame.anchors.slice(0, 0, batch_size);
@@ -386,8 +386,8 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                                  .feature_sink    = &sink,
                              },
                              target_envelope);
-        CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, frame.egress.data,
-                                   sizeof(qwen3_6::DFlashDecodeEgress), cudaMemcpyDeviceToHost,
+        HIP_CHECK(hipMemcpyAsync(&state.host_egress, frame.egress.data,
+                                   sizeof(qwen3_6::DFlashDecodeEgress), hipMemcpyDeviceToHost,
                                    state.execution.device.stream));
     };
 }

@@ -62,7 +62,7 @@ artifact::LoadProgress artifact_progress(const LoadProgress& progress) {
 std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes) {
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    HIP_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
     if (weight_bytes > free_bytes) {
         throw std::invalid_argument("model weights require " + std::to_string(weight_bytes) +
                                     " bytes of device memory, but only " +
@@ -75,7 +75,7 @@ std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes) {
 std::size_t current_free_device_bytes() {
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    HIP_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
     return free_bytes;
 }
 

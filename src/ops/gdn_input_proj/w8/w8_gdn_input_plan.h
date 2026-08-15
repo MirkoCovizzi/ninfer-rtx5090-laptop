@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -46,6 +46,6 @@ W8GdnInputConvPlan w8_gdn_input_conv_resolve_plan(const W8GdnInputProblem& probl
                                                   std::int32_t batch_size);
 
 void w8_gdn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                           cudaStream_t stream);
+                           hipStream_t stream);
 
 } // namespace ninfer::ops::detail

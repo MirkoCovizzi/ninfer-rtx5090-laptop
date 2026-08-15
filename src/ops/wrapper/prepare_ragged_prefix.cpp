@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
 
 #include "ops/launcher/prepare_ragged_prefix.h"
@@ -9,7 +10,7 @@ namespace ninfer::ops {
 
 void prepare_ragged_prefix(const Tensor& source, const Tensor& lanes, const Tensor& starts,
                            const Tensor& ends, Tensor& destination, Tensor& positions,
-                           Tensor& counts, cudaStream_t stream) {
+                           Tensor& counts, hipStream_t stream) {
     const std::int32_t width = source.ne[1];
     const std::int32_t batch = destination.ne[2];
     const auto vector_shape  = [batch](const Tensor& tensor) {

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/launcher/cast.h"
 
 #include "core/device.h"
@@ -21,7 +22,7 @@ int cast_grid(std::int64_t work_items) {
 
 } // namespace
 
-void cast_fp32_to_bf16_launch(const Tensor& source, Tensor& destination, cudaStream_t stream) {
+void cast_fp32_to_bf16_launch(const Tensor& source, Tensor& destination, hipStream_t stream) {
     const std::int64_t count = source.numel();
     const auto source_addr   = reinterpret_cast<std::uintptr_t>(source.data);
     const auto dest_addr     = reinterpret_cast<std::uintptr_t>(destination.data);
@@ -33,14 +34,14 @@ void cast_fp32_to_bf16_launch(const Tensor& source, Tensor& destination, cudaStr
     } else if ((count % 2) == 0 && (source_addr & 0x7u) == 0 && (dest_addr & 0x3u) == 0) {
         const std::int64_t pairs = count / 2;
         cast_fp32_to_bf16_x2_kernel<<<cast_grid(pairs), kBlock, 0, stream>>>(
-            static_cast<const float2*>(source.data), static_cast<__nv_bfloat162*>(destination.data),
+            static_cast<const float2*>(source.data), static_cast<__hip_bfloat162*>(destination.data),
             pairs);
     } else {
         cast_fp32_to_bf16_scalar_kernel<<<cast_grid(count), kBlock, 0, stream>>>(
-            static_cast<const float*>(source.data), static_cast<__nv_bfloat16*>(destination.data),
+            static_cast<const float*>(source.data), static_cast<__hip_bfloat16*>(destination.data),
             count);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

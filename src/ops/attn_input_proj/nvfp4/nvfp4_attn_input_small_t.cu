@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/attn_input_proj/nvfp4/nvfp4_attn_input_plan.h"
 
 #include "core/device.h"
@@ -13,13 +14,13 @@ namespace ninfer::ops::detail {
 namespace {
 
 using Launch = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, Tensor&, Tensor&,
-                        cudaStream_t);
+                        hipStream_t);
 
 struct Nvfp4AttentionInputSmallTOutput {
-    __nv_bfloat16* query;
-    __nv_bfloat16* key;
-    __nv_bfloat16* gate;
-    __nv_bfloat16* value;
+    __hip_bfloat16* query;
+    __hip_bfloat16* key;
+    __hip_bfloat16* gate;
+    __hip_bfloat16* value;
 
     __device__ __forceinline__ void store(std::int32_t parent_row, std::int32_t token,
                                           float result) const {
@@ -29,7 +30,7 @@ struct Nvfp4AttentionInputSmallTOutput {
         constexpr std::int32_t kKeyBegin   = kQueryRows;
         constexpr std::int32_t kGateBegin  = kKeyBegin + kKeyRows;
         constexpr std::int32_t kValueBegin = kGateBegin + kGateRows;
-        const __nv_bfloat16 result_bf16    = __float2bfloat16_rn(result);
+        const __hip_bfloat16 result_bf16    = __float2bfloat16_rn(result);
 
         if (parent_row < kKeyBegin) {
             query[static_cast<std::int64_t>(token) * kQueryRows + parent_row] = result_bf16;
@@ -64,26 +65,26 @@ struct Nvfp4AttentionSmallTProductionSchedule {
 
 template <int ActiveTokens>
 void launch_exact(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tensor& k,
-                  Tensor& v, cudaStream_t stream) {
+                  Tensor& v, hipStream_t stream) {
     using Geometry            = Nvfp4AttnInputGeometry;
     using Schedule            = typename Nvfp4AttentionSmallTProductionSchedule<ActiveTokens>::Type;
     constexpr int kTokenTiles = (ActiveTokens + Schedule::kTokenTile - 1) / Schedule::kTokenTile;
     constexpr int kBlocks     = (Geometry::kOutputRows / Schedule::kRowsPerCta) * kTokenTiles;
 
     const Nvfp4AttentionInputSmallTOutput output{
-        static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data),
-        static_cast<__nv_bfloat16*>(gate.data),
-        static_cast<__nv_bfloat16*>(v.data),
+        static_cast<__hip_bfloat16*>(q.data),
+        static_cast<__hip_bfloat16*>(k.data),
+        static_cast<__hip_bfloat16*>(gate.data),
+        static_cast<__hip_bfloat16*>(v.data),
     };
     const float inverse_weight_divisor = 1.0F / weight.weight_scale_divisor;
     nvfp4_small_t_kernel<Geometry, ActiveTokens, Schedule>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), inverse_weight_divisor,
             Nvfp4IdentityEpilogue{}, output);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <std::size_t... Offsets>
@@ -98,7 +99,7 @@ constexpr auto kLaunchers =
 } // namespace
 
 void nvfp4_attn_input_small_t_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                     Tensor& k, Tensor& v, cudaStream_t stream) {
+                                     Tensor& k, Tensor& v, hipStream_t stream) {
     kLaunchers[x.ne[1] - kNvfp4FirstSmallT](x, weight, q, gate, k, v, stream);
 }
 

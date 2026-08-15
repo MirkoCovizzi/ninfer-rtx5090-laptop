@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/arena.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -50,7 +51,7 @@ namespace ninfer::ops {
  */
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                      const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
-                     Tensor& ssm_state, Tensor& out, cudaStream_t stream);
+                     Tensor& ssm_state, Tensor& out, hipStream_t stream);
 
 /**
  * Distinct-state form of the same recurrence. `ssm_state_out` receives the final state;
@@ -60,7 +61,7 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                      const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
                      const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
-                     cudaStream_t stream);
+                     hipStream_t stream);
 
 /**
  * Snapshot form for B independent recurrences. q/k are contiguous BF16 [128,Hqk,W,B], v/out are
@@ -79,7 +80,7 @@ void gated_delta_net_snapshot(const Tensor& q, const Tensor& k, const Tensor& v,
                               const Tensor& beta, float scale, bool normalize_qk,
                               Tensor& ssm_states, const Tensor& valid_columns,
                               const Tensor& initial_state_slots, const Tensor& snapshot_base_slots,
-                              Tensor& out, cudaStream_t stream);
+                              Tensor& out, hipStream_t stream);
 
 /**
  * Op: gated_delta_net_replay_record
@@ -101,6 +102,6 @@ void gated_delta_net_replay_record(const Tensor& q, const Tensor& k, const Tenso
                                    const Tensor& ssm_states, const Tensor& valid_columns,
                                    const Tensor& initial_state_slots, Tensor& key_record,
                                    Tensor& value_record, Tensor& gate_record, Tensor& out,
-                                   cudaStream_t stream);
+                                   hipStream_t stream);
 
 } // namespace ninfer::ops

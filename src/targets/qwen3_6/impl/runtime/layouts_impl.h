@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/layouts.h"
 #include "targets/qwen3_6/impl/runtime/linear_state_slots.h"
@@ -596,9 +597,11 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         break;
     }
+#if !defined(__HIP_PLATFORM_AMD__)
     if (device.sm() != 120) {
         throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0");
     }
+#endif
 }
 
 std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlanningInputs& inputs,
@@ -619,7 +622,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
-    impl->use_cuda_graph      = inputs.use_cuda_graph;
+    impl->use_hip_graph      = inputs.use_hip_graph;
     impl->device              = inputs.device;
     impl->kv_dtype            = inputs.kv_dtype;
     impl->kv_quant_group      = inputs.kv_quant_group;
@@ -631,7 +634,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         impl->request_transient_capacity_bytes =
             schedule::VisionContext::output_transient_bytes(merged);
     }
-    if (impl->use_cuda_graph) {
+    if (impl->use_hip_graph) {
         // Definitions remain per execution profile, but only one executable is instantiated for
         // each reachable node-topology class. These bounds cover the largest profile installed in
         // each class and the driver/module state materialized while qualifying all definitions.
@@ -699,7 +702,7 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .kv_quant_group = options.kv_cache == KvCacheStorage::BFloat16 ? 0 : qwen3_6::kKvQuantGroup,
         .proposal_head  = options.speculative.proposal_head,
         .features       = qwen3_6::startup_features(options),
-        .use_cuda_graph = options.use_cuda_graph,
+        .use_hip_graph = options.use_hip_graph,
         .device         = options.device,
     };
     const std::uint32_t logical_pages = page_count(inputs.capacity);

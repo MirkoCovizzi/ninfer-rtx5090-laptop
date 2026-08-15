@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Folded gate/up GEMM.  A logical BM=64 weight tile is laid out as 32 gate
@@ -9,7 +10,8 @@
 #include "ops/common/rowsplit_mma.cuh"
 #include "ops/linear/q4/q4_rowsplit_storage.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -18,8 +20,8 @@ namespace ninfer::ops::detail {
 template <class Cfg, bool FullTiles>
 __global__
 __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split_half_pair_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
-    const std::uint8_t* __restrict__ scales, __nv_bfloat16* __restrict__ out,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const std::uint8_t* __restrict__ scales, __hip_bfloat16* __restrict__ out,
     std::int32_t intermediate, std::int32_t k, std::int32_t t, std::int32_t padded_k) {
     constexpr int BM   = Cfg::BM;
     constexpr int BN   = Cfg::BN;
@@ -35,9 +37,15 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
     static_assert(BK == 64, "folded gate/up Q4 kernel requires one group per K tile");
     static_assert(BM == 64 && WM == 64 && MT == 4,
                   "folded gate/up mapping requires one 64-row warp tile");
+    // gfx1151 WMMA atoms are 16x16 (not 16x8). Each warp covers WMT x WNT 16x16
+    // atoms; when kWarpCols is not a multiple of 16 the final atom overlaps the
+    // neighbouring warp's columns (duplicate compute, correct results) and the
+    // store below emits only the warp's own columns.
+    constexpr int WMT = MT;
+    constexpr int WNT = (Cfg::WN + 15) / 16;
 
-    __shared__ __align__(16) __nv_bfloat16 As[BM * BK];
-    __shared__ __align__(16) __nv_bfloat16 Bs[S][BN * BK];
+    __shared__ __align__(16) __hip_bfloat16 As[BM * BK];
+    __shared__ __align__(16) __hip_bfloat16 Bs[S][BN * BK];
     __shared__ __align__(16) std::uint8_t Cr[S][BM * 32];
     __shared__ __align__(16) std::uint8_t Sr[S][BM * SB];
 
@@ -46,28 +54,20 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
     const int warp = tid >> 5;
     const int lane = tid & 31;
     const int wn   = warp;
-    const int gid  = lane >> 2;
-    const int lid  = lane & 3;
     const int m0   = static_cast<int>(blockIdx.x) * PM;
     const int t0   = static_cast<int>(blockIdx.y) * BN;
 
-    float acc[MT][NT][4];
+    float acc[WMT][WNT][8];
 #pragma unroll
-    for (int mi = 0; mi < MT; ++mi) {
+    for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni) {
+        for (int ni = 0; ni < WNT; ++ni) {
 #pragma unroll
-            for (int c = 0; c < 4; ++c) { acc[mi][ni][c] = 0.0f; }
+            for (int r = 0; r < 8; ++r) { acc[mi][ni][r] = 0.0f; }
         }
     }
 
     const int NKT      = padded_k / BK;
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int b_rin    = lane & 7;
-    const int b_koff   = ((lane >> 3) & 1) << 3;
 
     auto stage_load_x = [&](int stage, int kt) {
         const int k0 = kt * BK;
@@ -78,7 +78,7 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
             const int kl       = kg8 * 8;
             const int col      = t0 + tl;
             const int kk       = k0 + kl;
-            __nv_bfloat16* dst = &Bs[stage][tl * BK + gemm_swz64(tl, kl)];
+            __hip_bfloat16* dst = &Bs[stage][tl * BK + gemm_swz64(tl, kl)];
             if constexpr (FullTiles) {
                 gemm_cp_async<16, Cfg>(dst, &x[static_cast<std::int64_t>(col) * k + kk]);
             } else if (col < t && kk + 8 <= k) {
@@ -149,7 +149,7 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
     auto dequant_to_As = [&](int stage, int kt) {
         const int scale_off = ((kt * BK >> 6) & 1) * 2;
         for (int row = warp; row < BM; row += Cfg::WARPS) {
-            const __nv_bfloat162 w = Q4MmaDecodeAtom::decode_pair(
+            const __hip_bfloat162 w = Q4MmaDecodeAtom::decode_pair(
                 Cr[stage], &Sr[stage][row * SB + scale_off], row, lane);
             const int sc = gemm_swz64(row, 2 * lane);
             store_vec(&As[row * BK + sc], w);
@@ -169,29 +169,31 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
         dequant_to_As(stage, it);
         __syncthreads();
 
-        unsigned af[MT][4];
-        unsigned bf[NT][2];
+        unsigned af[WMT][8];
+        unsigned bf[WNT][8];
 #pragma unroll
         for (int ki = 0; ki < KSUB; ++ki) {
             const int ks = ki * 16;
 #pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
-                const int arow = mi * 16 + a_rowoff;
-                ldmatrix_x4(af[mi][0], af[mi][1], af[mi][2], af[mi][3],
-                            smem_addr(&As[arow * BK + gemm_swz64(arow, ks + a_coloff)]));
+            for (int mi = 0; mi < WMT; ++mi) {
+                const int arow = mi * 16 + (lane >> 1);
+                if (wmma_a_lane_active(lane)) {
+                    wmma_load_a_bf16(af[mi], As, arow, ks, BK, gemm_swz64);
+                }
             }
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int brow = wn * WN + ni * 8 + b_rin;
-                ldmatrix_x2(bf[ni][0], bf[ni][1],
-                            smem_addr(&Bs[stage][brow * BK + gemm_swz64(brow, ks + b_koff)]));
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int brow = wn * WN + ni * 16 + (lane & 15);
+                wmma_load_b_bf16(bf[ni], Bs[stage], brow, ks, BK, gemm_swz64);
             }
 #pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
+            for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-                for (int ni = 0; ni < NT; ++ni) {
-                    mma_bf16(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
-                             af[mi][0], af[mi][1], af[mi][2], af[mi][3], bf[ni][0], bf[ni][1]);
+                for (int ni = 0; ni < WNT; ++ni) {
+                    WmmaC8& c = *reinterpret_cast<WmmaC8*>(acc[mi][ni]);
+                    WmmaA16I a = *reinterpret_cast<WmmaA16I*>(af[mi]);
+                    WmmaA16I b = *reinterpret_cast<WmmaA16I*>(bf[ni]);
+                    c = wmma_bf16(a, b, c);
                 }
             }
         }
@@ -203,30 +205,30 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
     }
 
 #pragma unroll
-    for (int mi = 0; mi < MT / 2; ++mi) {
-        const int r0 = m0 + mi * 16 + gid;
-        const int r1 = r0 + 8;
+    for (int mi = 0; mi < WMT / 2; ++mi) {
+        const int row_lo = m0 + mi * 16 + 8 * (lane >= 16);
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni) {
-            const int cc0 = t0 + wn * WN + ni * 8 + 2 * lid;
-            const int cc1 = cc0 + 1;
-            auto store    = [&](int col, int row, float gv, float uv) {
-                out[static_cast<std::int64_t>(col) * intermediate + row] =
+        for (int ni = 0; ni < WNT; ++ni) {
+            const int local_col = ni * 16 + (lane & 15);
+            const int col       = t0 + wn * WN + ni * 16 + (lane & 15);
+            // Skip the overlap columns when kWarpCols is not a multiple of 16.
+            if (local_col >= Cfg::WN) { continue; }
+            auto store = [&](int col_idx, int row, float gv, float uv) {
+                out[static_cast<std::int64_t>(col_idx) * intermediate + row] =
                     __float2bfloat16_rn(silu(gv) * uv);
             };
             if constexpr (FullTiles) {
-                store(cc0, r0, acc[mi][ni][0], acc[mi + MT / 2][ni][0]);
-                store(cc1, r0, acc[mi][ni][1], acc[mi + MT / 2][ni][1]);
-                store(cc0, r1, acc[mi][ni][2], acc[mi + MT / 2][ni][2]);
-                store(cc1, r1, acc[mi][ni][3], acc[mi + MT / 2][ni][3]);
-            } else {
-                if (r0 < intermediate) {
-                    if (cc0 < t) { store(cc0, r0, acc[mi][ni][0], acc[mi + MT / 2][ni][0]); }
-                    if (cc1 < t) { store(cc1, r0, acc[mi][ni][1], acc[mi + MT / 2][ni][1]); }
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    store(col, row_lo + r, acc[mi][ni][r], acc[mi + WMT / 2][ni][r]);
                 }
-                if (r1 < intermediate) {
-                    if (cc0 < t) { store(cc0, r1, acc[mi][ni][2], acc[mi + MT / 2][ni][2]); }
-                    if (cc1 < t) { store(cc1, r1, acc[mi][ni][3], acc[mi + MT / 2][ni][3]); }
+            } else {
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    const int row = row_lo + r;
+                    if (row < intermediate && col < t) {
+                        store(col, row, acc[mi][ni][r], acc[mi + WMT / 2][ni][r]);
+                    }
                 }
             }
         }

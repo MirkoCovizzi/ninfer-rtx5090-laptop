@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Qualification benchmark for Qwen3.6-35B G2 sampling and G3 MTP accept.
 //
 //   ./ninfer_sampling_select_bench --sample --batch 8 --mode stochastic
@@ -9,7 +10,7 @@
 #include "ninfer/ops/speculative_round.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -129,13 +130,13 @@ DeviceBuffer make_logits(int cols) {
         }
     }
     DeviceBuffer device(host.size() * sizeof(std::uint16_t));
-    CUDA_CHECK(cudaMemcpy(device.p, host.data(), device.bytes, cudaMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(device.p, host.data(), device.bytes, hipMemcpyHostToDevice));
     return device;
 }
 
 DeviceBuffer make_i32(const std::vector<std::int32_t>& host) {
     DeviceBuffer device(host.size() * sizeof(std::int32_t));
-    CUDA_CHECK(cudaMemcpy(device.p, host.data(), device.bytes, cudaMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(device.p, host.data(), device.bytes, hipMemcpyHostToDevice));
     return device;
 }
 
@@ -150,7 +151,7 @@ DeviceBuffer make_config(DeviceBuffer& counts, Mode mode, bool counts_active, in
         mode == Mode::Stochastic && counts_active ? static_cast<std::int32_t*>(counts.p) : nullptr;
 
     DeviceBuffer device(sizeof(ops::SamplingConfig));
-    CUDA_CHECK(cudaMemcpy(device.p, &config, sizeof(config), cudaMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(device.p, &config, sizeof(config), hipMemcpyHostToDevice));
     return device;
 }
 
@@ -170,7 +171,7 @@ DeviceBuffer make_batch_configs(DeviceBuffer& counts, int batch, Mode mode, bool
                                           : nullptr;
     }
     DeviceBuffer device(configs.size() * sizeof(ops::SamplingConfig));
-    CUDA_CHECK(cudaMemcpy(device.p, configs.data(), device.bytes, cudaMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(device.p, configs.data(), device.bytes, hipMemcpyHostToDevice));
     return device;
 }
 
@@ -182,7 +183,7 @@ double stochastic_payload_bytes(int cols, bool counts_active) {
 
 void run_sample(DeviceBuffer& logits, DeviceBuffer& counts, int batch, Mode mode,
                 bool counts_active, int top_k) {
-    CUDA_CHECK(cudaMemset(counts.p, 0, counts.bytes));
+    HIP_CHECK(hipMemset(counts.p, 0, counts.bytes));
     DeviceBuffer configs = make_batch_configs(counts, batch, mode, counts_active, top_k);
     DeviceBuffer out(static_cast<std::size_t>(batch) * sizeof(std::int32_t));
     std::vector<std::int32_t> positions(static_cast<std::size_t>(batch));
@@ -197,7 +198,7 @@ void run_sample(DeviceBuffer& logits, DeviceBuffer& counts, int batch, Mode mode
     const double bytes  = mode == Mode::Greedy ? static_cast<double>(kTokenDomain) * 2.0 * batch
                                                : stochastic_payload_bytes(batch, counts_active);
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             ops::sample(tlogits, tout, kTokenDomain, config_ptr, tpositions,
                         ops::kSamplePurposeDecode, workspace, stream);
         },
@@ -211,7 +212,7 @@ void run_sample(DeviceBuffer& logits, DeviceBuffer& counts, int batch, Mode mode
 
 void run_mtp(DeviceBuffer& logits, DeviceBuffer& counts, int k, Mode mode, bool counts_active,
              int top_k) {
-    CUDA_CHECK(cudaMemset(counts.p, 0, counts.bytes));
+    HIP_CHECK(hipMemset(counts.p, 0, counts.bytes));
     DeviceBuffer config = make_config(counts, mode, counts_active, top_k);
     std::vector<std::int32_t> target_host(static_cast<std::size_t>(k + 1));
     std::vector<std::int32_t> draft_host(static_cast<std::size_t>(k));
@@ -246,7 +247,7 @@ void run_mtp(DeviceBuffer& logits, DeviceBuffer& counts, int k, Mode mode, bool 
     const double bytes  = mode == Mode::Greedy ? static_cast<double>((k + 1) * 4 + k * 4)
                                                : stochastic_payload_bytes(k + 1, counts_active);
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             ops::speculative_accept_greedy_drafts(ttargets, tlogits, tdrafts, textent, tlength,
                                                   ttoken, tsampled, tnum, taccepted, kTokenDomain,
                                                   config_ptr, workspace, stream);
@@ -263,7 +264,7 @@ void run_mtp(DeviceBuffer& logits, DeviceBuffer& counts, int k, Mode mode, bool 
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }
@@ -277,7 +278,7 @@ int main(int argc, char** argv) {
         const int count_rows  = options.matrix ? 8 : (options.sample ? options.batch : 1);
         DeviceBuffer counts(static_cast<std::size_t>(kTokenDomain) * count_rows *
                             sizeof(std::int32_t));
-        CUDA_CHECK(cudaMemset(counts.p, 0, counts.bytes));
+        HIP_CHECK(hipMemset(counts.p, 0, counts.bytes));
 
         std::printf("payload: physical_rows=%d token_domain=%d logits=%.3f MiB/row "
                     "counts=%.3f MiB/row\n",

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Implements: include/ninfer/ops/sigmoid_mul.h
@@ -9,7 +10,8 @@
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -17,14 +19,14 @@ namespace ninfer::ops {
 
 inline constexpr int kSigmoidGateMulPairsPerThread = 4;
 
-__device__ __forceinline__ __nv_bfloat162 sigmoid_gate_mul_pair(__nv_bfloat162 gate,
-                                                                __nv_bfloat162 x) {
+__device__ __forceinline__ __hip_bfloat162 sigmoid_gate_mul_pair(__hip_bfloat162 gate,
+                                                                __hip_bfloat162 x) {
     const float r0 = __low2float(x) * sigmoid(__low2float(gate));
     const float r1 = __high2float(x) * sigmoid(__high2float(gate));
     return __floats2bfloat162_rn(r0, r1);
 }
 
-__global__ void sigmoid_gate_mul_scalar_kernel(const __nv_bfloat16* gate, __nv_bfloat16* x,
+__global__ void sigmoid_gate_mul_scalar_kernel(const __hip_bfloat16* gate, __hip_bfloat16* x,
                                                std::int64_t n) {
     const std::int64_t start  = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
@@ -49,25 +51,25 @@ __launch_bounds__(256) __global__
 }
 
 __launch_bounds__(256) __global__
-    void sigmoid_gate_mul_bf16x2_kernel(const __nv_bfloat16* gate, __nv_bfloat16* x,
+    void sigmoid_gate_mul_bf16x2_kernel(const __hip_bfloat16* gate, __hip_bfloat16* x,
                                         std::int64_t n) {
     const std::int64_t tid = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
     const std::int64_t stride =
         static_cast<std::int64_t>(gridDim.x) * blockDim.x * kSigmoidGateMulPairsPerThread;
     const std::int64_t n2 = n / 2;
 
-    const auto* gate2 = reinterpret_cast<const __nv_bfloat162*>(gate);
-    auto* x2          = reinterpret_cast<__nv_bfloat162*>(x);
+    const auto* gate2 = reinterpret_cast<const __hip_bfloat162*>(gate);
+    auto* x2          = reinterpret_cast<__hip_bfloat162*>(x);
     for (std::int64_t j = tid * kSigmoidGateMulPairsPerThread; j < n2; j += stride) {
-        const __nv_bfloat162 g0 = gate2[j];
-        const __nv_bfloat162 x0 = x2[j];
+        const __hip_bfloat162 g0 = gate2[j];
+        const __hip_bfloat162 x0 = x2[j];
         if (j + 3 < n2) {
-            const __nv_bfloat162 g1  = gate2[j + 1];
-            const __nv_bfloat162 x1  = x2[j + 1];
-            const __nv_bfloat162 g2  = gate2[j + 2];
-            const __nv_bfloat162 x2v = x2[j + 2];
-            const __nv_bfloat162 g3  = gate2[j + 3];
-            const __nv_bfloat162 x3  = x2[j + 3];
+            const __hip_bfloat162 g1  = gate2[j + 1];
+            const __hip_bfloat162 x1  = x2[j + 1];
+            const __hip_bfloat162 g2  = gate2[j + 2];
+            const __hip_bfloat162 x2v = x2[j + 2];
+            const __hip_bfloat162 g3  = gate2[j + 3];
+            const __hip_bfloat162 x3  = x2[j + 3];
             x2[j]                    = sigmoid_gate_mul_pair(g0, x0);
             x2[j + 1]                = sigmoid_gate_mul_pair(g1, x1);
             x2[j + 2]                = sigmoid_gate_mul_pair(g2, x2v);

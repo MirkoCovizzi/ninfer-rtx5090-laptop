@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Public-Op benchmark for full and device-count-prefix KV cache append contracts.
 // Cache encoding, launch geometry, and route selection remain private to the public wrappers.
 
@@ -9,8 +10,8 @@
 #include "core/paged_kv_cache.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -298,13 +299,13 @@ public:
         for (std::int32_t page = 0; page < static_cast<std::int32_t>(host_table.size()); ++page) {
             host_table[static_cast<std::size_t>(page)] = page;
         }
-        CUDA_CHECK(cudaMemcpy(positions_.p, host_positions.data(), positions_.bytes,
-                              cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(block_table_.p, host_table.data(), block_table_.bytes,
-                              cudaMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(positions_.p, host_positions.data(), positions_.bytes,
+                              hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(block_table_.p, host_table.data(), block_table_.bytes,
+                              hipMemcpyHostToDevice));
     }
 
-    void launch(cudaStream_t stream) {
+    void launch(hipStream_t stream) {
         ops::gqa_kv_append(k_tensor_, v_tensor_, positions_tensor_, cache_view_, stream);
     }
 
@@ -384,21 +385,21 @@ public:
         for (std::int32_t token = 0; token < tokens; ++token) {
             host_positions[static_cast<std::size_t>(token)] = start + token;
         }
-        CUDA_CHECK(cudaMemcpy(positions_.p, host_positions.data(), positions_.bytes,
-                              cudaMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(positions_.p, host_positions.data(), positions_.bytes,
+                              hipMemcpyHostToDevice));
         std::vector<std::int32_t> host_table(kRingCapacity / kPagedKVPageSize);
         for (std::int32_t page = 0; page < static_cast<std::int32_t>(host_table.size()); ++page) {
             host_table[static_cast<std::size_t>(page)] = page;
         }
-        CUDA_CHECK(cudaMemcpy(block_table_.p, host_table.data(), block_table_.bytes,
-                              cudaMemcpyHostToDevice));
-        CUDA_CHECK(
-            cudaMemcpy(commit_count_.p, &committed_, sizeof(committed_), cudaMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(block_table_.p, host_table.data(), block_table_.bytes,
+                              hipMemcpyHostToDevice));
+        HIP_CHECK(
+            hipMemcpy(commit_count_.p, &committed_, sizeof(committed_), hipMemcpyHostToDevice));
         const std::int32_t selector = 0;
-        CUDA_CHECK(cudaMemcpy(selector_.p, &selector, sizeof(selector), cudaMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(selector_.p, &selector, sizeof(selector), hipMemcpyHostToDevice));
     }
 
-    void launch(cudaStream_t stream) {
+    void launch(hipStream_t stream) {
         if (cyclic_) {
             ops::kv_cache_append_prefix(k_tensor_, v_tensor_, positions_tensor_, count_tensor_,
                                         selector_tensor_, envelope_, cyclic_view_, stream);
@@ -459,10 +460,10 @@ double prefix_useful_bytes(std::int32_t committed) {
 
 template <class Case>
 bench::ColdTiming measure(Case& data, Execution execution, CacheState cache,
-                          bench::TimedGraph* graph, DeviceBuffer& flush, cudaStream_t stream,
+                          bench::TimedGraph* graph, DeviceBuffer& flush, hipStream_t stream,
                           int warmup, int repeat) {
     if (execution == Execution::Eager) {
-        const auto launch = [&](cudaStream_t launch_stream) { data.launch(launch_stream); };
+        const auto launch = [&](hipStream_t launch_stream) { data.launch(launch_stream); };
         return cache == CacheState::Cold
                    ? bench::measure_cold_launch(launch, flush, stream, warmup, repeat)
                    : bench::measure_launch(launch, stream, warmup, repeat);
@@ -504,33 +505,33 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
 
 template <class Case>
 void profile_case(Case& data, const char* label, const Options& options, DeviceBuffer& flush,
-                  cudaStream_t stream) {
+                  hipStream_t stream) {
     const Execution execution = options.execution;
     const CacheState cache = options.cache == CacheMode::Cold ? CacheState::Cold : CacheState::Warm;
     bench::TimedGraph graph;
     if (execution == Execution::Graph) {
         data.launch(stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        graph.capture(stream, [&](cudaStream_t launch_stream) { data.launch(launch_stream); });
+        HIP_CHECK(hipStreamSynchronize(stream));
+        graph.capture(stream, [&](hipStream_t launch_stream) { data.launch(launch_stream); });
         for (int index = 0; index < options.warmup; ++index) { graph.launch(stream); }
     } else {
         for (int index = 0; index < options.warmup; ++index) { data.launch(stream); }
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
     if (cache == CacheState::Cold) {
         bench::flush_l2(flush, stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
     }
     std::printf("PROFILE %s dispatch=public execution=%s cache=%s\n", label,
                 execution_name(execution), cache_name(cache));
     std::fflush(stdout);
-    CUDA_CHECK(cudaProfilerStart());
+    HIP_CHECK(hipProfilerStart());
     if (execution == Execution::Graph)
         graph.launch(stream);
     else
         data.launch(stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaProfilerStop());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipProfilerStop());
 }
 
 std::vector<FullGeometry> selected_geometries(FullGeometryChoice choice) {
@@ -548,12 +549,12 @@ std::vector<DType> selected_dtypes(KvChoice choice) {
 template <class Case>
 void collect_case(Case& data, Mode mode, const char* geometry, DType dtype, const char* layout,
                   std::int32_t tokens, std::int32_t committed, double bytes, const Options& options,
-                  DeviceBuffer& flush, cudaStream_t stream, std::vector<Result>& results) {
+                  DeviceBuffer& flush, hipStream_t stream, std::vector<Result>& results) {
     bench::TimedGraph graph;
     if (options.execution != Execution::Eager) {
         data.launch(stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        graph.capture(stream, [&](cudaStream_t launch_stream) { data.launch(launch_stream); });
+        HIP_CHECK(hipStreamSynchronize(stream));
+        graph.capture(stream, [&](hipStream_t launch_stream) { data.launch(launch_stream); });
     }
     for (const Execution execution : {Execution::Eager, Execution::Graph}) {
         if ((options.execution == Execution::Eager && execution != Execution::Eager) ||
@@ -587,13 +588,13 @@ void collect_case(Case& data, Mode mode, const char* geometry, DType dtype, cons
 int main(int argc, char** argv) {
     try {
         int devices = 0;
-        if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+        if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
             std::printf("SKIP: no usable CUDA device\n");
             return 0;
         }
         const Options options = parse_options(argc, argv);
-        cudaStream_t stream   = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream   = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(kFlushBytes);
         const std::vector<FullGeometry> geometries = selected_geometries(options.full_geometry);
         const std::vector<DType> dtypes            = selected_dtypes(options.kv);
@@ -616,7 +617,7 @@ int main(int argc, char** argv) {
                     std::string("mode=prefix layout=") + (cyclic ? "cyclic" : "paged");
                 profile_case(data, label.c_str(), options, flush, stream);
             }
-            CUDA_CHECK(cudaStreamDestroy(stream));
+            HIP_CHECK(hipStreamDestroy(stream));
             return 0;
         }
 
@@ -652,7 +653,7 @@ int main(int argc, char** argv) {
             }
         }
         write_csv(options, results);
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_kv_cache_append_bench: %s\n", error.what());

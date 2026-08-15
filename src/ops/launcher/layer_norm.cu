@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/launcher/layer_norm.h"
 
 #include "ops/kernel/layer_norm.cuh"
@@ -10,7 +11,7 @@
 namespace ninfer::ops::detail {
 
 void layer_norm_launch(const Tensor& x, const Tensor& weight, const Tensor& bias, float eps,
-                       Tensor& out, cudaStream_t stream) {
+                       Tensor& out, hipStream_t stream) {
     constexpr int block        = 256;
     constexpr int vision_block = 128;
     const std::int64_t rows    = x.numel() / x.ne[0];
@@ -26,18 +27,18 @@ void layer_norm_launch(const Tensor& x, const Tensor& weight, const Tensor& bias
         constexpr int warps = vision_block / 32;
         const unsigned grid = static_cast<unsigned>((rows + warps - 1) / warps);
         layer_norm_d1152_warp_kernel<vision_block>
-            <<<grid, vision_block, 0, stream>>>(static_cast<const __nv_bfloat162*>(x.data),
-                                                static_cast<const __nv_bfloat162*>(weight.data),
-                                                static_cast<const __nv_bfloat162*>(bias.data),
-                                                static_cast<__nv_bfloat162*>(out.data), rows, eps);
-        CUDA_CHECK(cudaGetLastError());
+            <<<grid, vision_block, 0, stream>>>(static_cast<const __hip_bfloat162*>(x.data),
+                                                static_cast<const __hip_bfloat162*>(weight.data),
+                                                static_cast<const __hip_bfloat162*>(bias.data),
+                                                static_cast<__hip_bfloat162*>(out.data), rows, eps);
+        HIP_CHECK(hipGetLastError());
         return;
     }
     layer_norm_kernel<block><<<static_cast<unsigned>(rows), block, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const __nv_bfloat16*>(weight.data),
-        static_cast<const __nv_bfloat16*>(bias.data), static_cast<__nv_bfloat16*>(out.data),
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const __hip_bfloat16*>(weight.data),
+        static_cast<const __hip_bfloat16*>(bias.data), static_cast<__hip_bfloat16*>(out.data),
         x.ne[0], rows, eps);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

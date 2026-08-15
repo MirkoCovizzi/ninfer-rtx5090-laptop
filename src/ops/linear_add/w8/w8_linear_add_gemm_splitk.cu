@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/w8/w8_linear_add_kernels.h"
 
 #include "core/device.h"
@@ -16,11 +17,11 @@ constexpr int kRows           = 2048;
 constexpr int kRowsPerCta     = 16;
 constexpr int kFirstExactCols = 2;
 constexpr int kLastExactCols  = 48;
-using ProjectionLauncher      = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+using ProjectionLauncher      = void (*)(const Tensor&, const Weight&, Tensor&, hipStream_t);
 
 template <int Hidden, int ActiveCols>
 void launch_active_cols(const Tensor& x, const Weight& weight, Tensor& residual_out,
-                        cudaStream_t stream) {
+                        hipStream_t stream) {
     constexpr int TileCols = ActiveCols <= 8    ? 8
                              : ActiveCols <= 16 ? 16
                              : ActiveCols <= 24 ? 24
@@ -38,12 +39,12 @@ void launch_active_cols(const Tensor& x, const Weight& weight, Tensor& residual_
     using Geometry = W8LinearGeometry<kRows, Hidden>;
     using Schedule = W8SmallTMmaSchedule<KWarps, TileCols, MinBlocks, ScaleAccess, ActivationCache>;
     static_assert((kRows % kRowsPerCta) == 0);
-    auto* residual = static_cast<__nv_bfloat16*>(residual_out.data);
+    auto* residual = static_cast<__hip_bfloat16*>(residual_out.data);
     const W8ContiguousOutput output{residual, kRows};
     w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule, W8ContiguousOutput,
                           W8SmallTMmaResidualEpilogue>
         <<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output, W8SmallTMmaResidualEpilogue{});
 }
@@ -61,19 +62,19 @@ constexpr auto kK6144ProjectionLaunchers = make_projection_launchers<6144>(
 
 template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_medium(const Tensor& x, Tensor& residual_out, const Weight& weight,
-                   cudaStream_t stream) {
-    const W8ContiguousOutput output{static_cast<__nv_bfloat16*>(residual_out.data), kRows};
+                   hipStream_t stream) {
+    const W8ContiguousOutput output{static_cast<__hip_bfloat16*>(residual_out.data), kRows};
     w8_rowsplit_medium_t_splitk_kernel<Hidden, TileCols, KSplits, NGroups, MinBlocks,
                                        W8ContiguousOutput, true>
         <<<kRows / kRowsPerCta, KSplits * NGroups * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
 }
 
 template <int TileCols, int KSplits, int NGroups, int MinBlocks>
 void dispatch_medium_shape(const Tensor& x, const Weight& weight, Tensor& residual_out,
-                           cudaStream_t stream) {
+                           hipStream_t stream) {
     if (weight.k == 4096) {
         launch_medium<4096, TileCols, KSplits, NGroups, MinBlocks>(x, residual_out, weight, stream);
     } else {
@@ -84,7 +85,7 @@ void dispatch_medium_shape(const Tensor& x, const Weight& weight, Tensor& residu
 } // namespace
 
 void w8_linear_add_splitk_mma_launch(const Tensor& x, const Weight& weight, Tensor& residual_out,
-                                     cudaStream_t stream) {
+                                     hipStream_t stream) {
     if (x.ne[1] < kFirstExactCols || x.ne[1] > kLastExactCols) {
         throw std::invalid_argument("W8 linear_add split-K MMA requires exact T=2..48");
     }
@@ -93,23 +94,25 @@ void w8_linear_add_splitk_mma_launch(const Tensor& x, const Weight& weight, Tens
     } else {
         kK4096ProjectionLaunchers[x.ne[1] - kFirstExactCols](x, weight, residual_out, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void w8_linear_add_medium_splitk_launch(const Tensor& x, const Weight& weight, Tensor& residual_out,
-                                        cudaStream_t stream) {
+                                        hipStream_t stream) {
     const std::int32_t t = x.ne[1];
     if ((weight.k != 4096 && weight.k != 6144) || t < 49 || t > 128) {
         throw std::invalid_argument("W8 linear_add medium split-K requires T=49..128");
     }
+    // K-split counts were lowered from the CUDA schedule where the per-CTA staging tile
+    // exceeded gfx1151's 64 KiB LDS; the same K is covered with fewer splits per CTA.
     if (t <= 64) {
-        dispatch_medium_shape<64, 8, 4, 1>(x, weight, residual_out, stream);
+        dispatch_medium_shape<64, 4, 4, 1>(x, weight, residual_out, stream);
     } else if (t == 65) {
-        dispatch_medium_shape<80, 8, 2, 1>(x, weight, residual_out, stream);
+        dispatch_medium_shape<80, 4, 2, 1>(x, weight, residual_out, stream);
     } else if (t <= 72) {
-        dispatch_medium_shape<72, 8, 3, 1>(x, weight, residual_out, stream);
+        dispatch_medium_shape<72, 4, 3, 1>(x, weight, residual_out, stream);
     } else if (t <= 80) {
-        dispatch_medium_shape<80, 8, 2, 1>(x, weight, residual_out, stream);
+        dispatch_medium_shape<80, 4, 2, 1>(x, weight, residual_out, stream);
     } else if (t <= 96) {
         dispatch_medium_shape<96, 4, 6, 1>(x, weight, residual_out, stream);
     } else if (t <= 112) {
@@ -117,11 +120,11 @@ void w8_linear_add_medium_splitk_launch(const Tensor& x, const Weight& weight, T
     } else if (t <= 120) {
         dispatch_medium_shape<120, 4, 5, 1>(x, weight, residual_out, stream);
     } else if (t <= 125) {
-        dispatch_medium_shape<128, 4, 4, 1>(x, weight, residual_out, stream);
+        dispatch_medium_shape<128, 2, 4, 1>(x, weight, residual_out, stream);
     } else {
-        dispatch_medium_shape<128, 4, 8, 1>(x, weight, residual_out, stream);
+        dispatch_medium_shape<128, 2, 8, 1>(x, weight, residual_out, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Q6G64 RowSplit x BF16 SIMT GEMM.
@@ -18,8 +19,9 @@
 #include "ops/common/warp.cuh"
 #include "ops/linear/q6/q6_rowsplit_storage.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -132,7 +134,7 @@ __device__ __forceinline__ void q6_simt_issue_stage(uint4* __restrict__ shared_c
 
 template <class Schedule, bool FullStage, bool FullCols>
 __device__ __forceinline__ void
-q6_simt_consume_stage(const __nv_bfloat16* __restrict__ x, std::int32_t k, int col0,
+q6_simt_consume_stage(const __hip_bfloat16* __restrict__ x, std::int32_t k, int col0,
                       int active_cols, int stage, int active_groups,
                       const uint4* __restrict__ shared_codes, const uint4* __restrict__ shared_high,
                       const std::uint32_t* __restrict__ shared_scales, int lane,
@@ -185,14 +187,14 @@ template <class Schedule>
 __global__ __launch_bounds__(
     Schedule::kThreads,
     Schedule::
-        kLaunchBoundsMinBlocks) void q6_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x,
+        kLaunchBoundsMinBlocks) void q6_rowsplit_gemm_simt_kernel(const __hip_bfloat16* __restrict__ x,
                                                                   const std::
                                                                       uint8_t* __restrict__ codes,
                                                                   const std::
                                                                       uint8_t* __restrict__ high,
                                                                   const std::
                                                                       uint8_t* __restrict__ scales,
-                                                                  __nv_bfloat16* __restrict__ out,
+                                                                  __hip_bfloat16* __restrict__ out,
                                                                   std::int32_t rows, std::int32_t k,
                                                                   std::int32_t cols,
                                                                   std::int32_t padded_k) {

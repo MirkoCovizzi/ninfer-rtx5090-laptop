@@ -1,10 +1,11 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/math.cuh"
 #include "ops/common/warp.cuh"
 
-#include <cuda_runtime.h>
-#include <math_constants.h>
+#include <hip/hip_runtime.h>
+#include <hip/hip_math_constants.h>
 
 namespace ninfer::ops::detail {
 
@@ -62,7 +63,7 @@ __device__ __forceinline__ void sparse_moe_select_top8_warp(const float* scores,
 #pragma unroll
     for (int rank = 0; rank < kSparseMoeTopK; ++rank) {
         SparseMoeRankedValue candidate =
-            cursor < 8 ? local[cursor] : SparseMoeRankedValue{-CUDART_INF_F, 0x7fffffff, lane};
+            cursor < 8 ? local[cursor] : SparseMoeRankedValue{-HIP_INF_F, 0x7fffffff, lane};
         const SparseMoeRankedValue winner = sparse_moe_warp_best(candidate);
         if (lane == 0) {
             ids[rank]             = winner.id;

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/speculative_round.h"
 #include "ops/op_tester.h"
 
@@ -73,7 +74,7 @@ int prepare_verify_case(int k) {
     Tensor positions(d_positions.data(), DType::I32, {k + 1});
     ops::speculative_prepare_verify_inputs(token, draft_tensor, length, extent, verify, positions,
                                            nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = "speculative prepare K=" + std::to_string(k);
     int failures =
@@ -160,7 +161,7 @@ int execute_accept_case(const std::string& label, const std::vector<std::int32_t
     ops::speculative_accept_greedy_drafts(
         targets, logits, draft_tensor, extent, length, token, sampled, num_sampled, accepted,
         token_domain, static_cast<const ops::SamplingConfig*>(d_config.p), workspace, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_exact((label + " sampled").c_str(), read<std::int32_t>(d_sampled, k + 1),
                                 expected.sampled);
@@ -326,7 +327,7 @@ int batched_sampling_workspace_stride_case() {
     ops::speculative_accept_greedy_drafts(
         targets, logits_tensor, draft_tensor, extents, lengths, anchors, licensed, counts, accepted,
         token_domain, static_cast<const ops::SamplingConfig*>(d_configs.p), workspace, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_exact("speculative sampling B=2 licensed",
                                 from_device<std::int32_t>(d_licensed, columns * batch),
@@ -362,7 +363,7 @@ int select_hidden_case(int rows, int columns, int accepted_value) {
     Tensor accepted(d_accepted.p, DType::I32, {1});
     Tensor out(d_out.data(), DType::BF16, {rows, 1});
     ops::speculative_select_accepted_hidden(hidden_tensor, accepted, out, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label =
         "speculative select D=" + std::to_string(rows) + " A=" + std::to_string(accepted_value);
@@ -399,7 +400,7 @@ int remap_case(int token_count) {
     Tensor proposal_tensor(d_proposals.data(), DType::I32, {token_count});
     ops::proposal_remap_token_ids(proposal_tensor, static_cast<const std::int32_t*>(d_map.p),
                                   map_size, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = "proposal remap T=" + std::to_string(token_count);
     int failures            = verify_exact((label + " in-place output").c_str(),
@@ -413,7 +414,7 @@ int remap_case(int token_count) {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "speculative_round: SKIP (CUDA unavailable)\n";
         return 77;
     }

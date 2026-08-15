@@ -1,9 +1,11 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/math.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 
@@ -66,7 +68,7 @@ struct Q5SimtDecodeAtom {
 };
 
 struct Q5MmaDecodeAtom {
-    static __device__ __forceinline__ __nv_bfloat162 decode_pair(const std::uint8_t* staged_codes,
+    static __device__ __forceinline__ __hip_bfloat162 decode_pair(const std::uint8_t* staged_codes,
                                                                  const std::uint8_t* staged_high,
                                                                  const std::uint8_t* scale_ptr,
                                                                  std::int64_t staged_group_index,

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 
 #include "ops/linear/nvfp4/nvfp4_config.h"
@@ -27,7 +28,7 @@ Nvfp4LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_r
     return tokens >= first_w4a4 ? Nvfp4LinearAddRoute::W4A4 : Nvfp4LinearAddRoute::A16;
 }
 
-void launch_a16(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
+void launch_a16(const Tensor& x, const Weight& weight, Tensor& residual, hipStream_t stream) {
     constexpr std::int32_t kChunk = kNvfp4LastSmallT;
     for (std::int32_t token_begin = 0; token_begin < x.ne[1]; token_begin += kChunk) {
         const std::int32_t active = std::min(kChunk, x.ne[1] - token_begin);
@@ -62,7 +63,7 @@ std::size_t nvfp4_linear_add_workspace_capacity_bytes(std::int32_t output_rows,
 
 void nvfp4_linear_add_dispatch(const Tensor& x, const Weight& weight, Tensor& residual,
                                LinearPolicy policy, WorkspaceArena& workspace,
-                               cudaStream_t stream) {
+                               hipStream_t stream) {
     if (resolve_route(weight.n, weight.k, policy, x.ne[1]) == Nvfp4LinearAddRoute::A16) {
         launch_a16(x, weight, residual, stream);
         return;

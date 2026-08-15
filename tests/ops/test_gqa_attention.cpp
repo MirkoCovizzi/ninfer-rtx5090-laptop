@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "core/arena.h"
 #include "core/paged_kv_cache.h"
 #include "ninfer/ops/gqa_attention.h"
@@ -907,7 +908,7 @@ int run_append_case(const Geometry& geometry, DType dtype, MappingPattern mappin
     Tensor tp(dpositions.data(), DType::I32, {tokens});
 
     ops::gqa_kv_append(tk, tv, tp, cache.view(), nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = std::string("gqa_kv_append ") + geometry.name + " " +
                               cache_name(dtype) + " mapping=" + mapping_name(mapping);
@@ -978,7 +979,7 @@ int run_a1_case(const Geometry& geometry, DType dtype, const AttentionCase& test
 
     ops::gqa_attention(tq, tk, tv, tp, Tensor{}, ttable_row, kAttentionScale, cache.batch_view(),
                        envelope, workspace, tout, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = case_label("gqa_attention", geometry, dtype, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
@@ -1040,7 +1041,7 @@ int run_a3_case(const Geometry& geometry, DType dtype, const AttentionCase& test
 
     ops::gqa_attention_cached(tq, tp, kAttentionScale, cache.view(), envelope, workspace, tout,
                               nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label =
         case_label("gqa_attention_cached", geometry, dtype, test_case, mapping);
@@ -1216,7 +1217,7 @@ int run_batch_case(const Geometry& geometry, DType dtype, const BatchAttentionCa
                                     [&](std::int32_t valid) { return valid != test_case.width; });
     ops::gqa_attention(tq, tk, tv, tp, masked ? tvalid : Tensor{}, ttable_rows, kAttentionScale,
                        cache.view(), envelope, workspace, tout, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = std::string("gqa_attention batch ") + geometry.name + " " +
                               cache_name(dtype) + " mapping=" + mapping_name(test_case.mapping) +
@@ -1351,7 +1352,7 @@ int verify_workspace_capacity_contract() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

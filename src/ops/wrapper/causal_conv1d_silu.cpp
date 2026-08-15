@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - causal_conv1d wrapper: public api validation and launcher dispatch.
 #include "ninfer/ops/causal_conv1d_silu.h"
 
@@ -132,7 +133,7 @@ void require_metadata_accessible(const Tensor& metadata, const char* label) {
 } // namespace
 
 void causal_conv1d_silu(const Tensor& x, const Tensor& weight, const Tensor& conv_state_in,
-                        Tensor& conv_state_out, Tensor& out, cudaStream_t stream) {
+                        Tensor& conv_state_out, Tensor& out, hipStream_t stream) {
     if (x.dtype != DType::BF16 || weight.dtype != DType::BF16 ||
         conv_state_in.dtype != DType::BF16 || conv_state_out.dtype != DType::BF16 ||
         out.dtype != DType::BF16) {
@@ -170,7 +171,7 @@ void causal_conv1d_silu(const Tensor& x, const Tensor& weight, const Tensor& con
 }
 
 void causal_conv1d_silu(const Tensor& x, const Tensor& weight, Tensor& conv_state, Tensor& out,
-                        cudaStream_t stream) {
+                        hipStream_t stream) {
     const std::int64_t n = validate_common(x, weight, conv_state, out);
     if (n == 0) { return; }
 
@@ -189,7 +190,7 @@ void causal_conv1d_silu(const Tensor& x, const Tensor& weight, Tensor& conv_stat
 void causal_conv1d_silu_snapshot(const Tensor& x, const Tensor& weight, Tensor& conv_states,
                                  const Tensor& valid_columns, const Tensor& initial_state_slots,
                                  const Tensor& snapshot_base_slots, Tensor& out,
-                                 cudaStream_t stream) {
+                                 hipStream_t stream) {
     const bool masked = valid_columns.data != nullptr;
     if (x.dtype != DType::BF16 || weight.dtype != DType::BF16 || conv_states.dtype != DType::BF16 ||
         out.dtype != DType::BF16) {

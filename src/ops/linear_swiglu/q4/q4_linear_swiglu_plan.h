@@ -2,7 +2,7 @@
 
 #include "core/arena.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -42,8 +42,8 @@ std::size_t q4_linear_swiglu_capacity_workspace_bytes(std::int32_t gate_up_rows,
                                                       std::int32_t max_cols);
 
 void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor& x, const Weight& w,
-                                   Tensor& out, WorkspaceArena& ws, cudaStream_t stream);
+                                   Tensor& out, WorkspaceArena& ws, hipStream_t stream);
 void q4_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, WorkspaceArena& ws,
-                               cudaStream_t stream);
+                               hipStream_t stream);
 
 } // namespace ninfer::ops::detail

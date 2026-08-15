@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // ninfer::ops - split-KV GQA small-T attention, BF16 KV-cache partial kernel.
@@ -6,8 +7,9 @@
 // bf16 path can be tuned independently. Processes one KV head, one query-head
 // subgroup, and one token tile; a reducer combines the split-local partials.
 
-#include <cuda_bf16.h>
-#include <math_constants.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_math_constants.h>
 
 #include "ops/kernel/gqa_attention_decode.cuh"
 
@@ -18,11 +20,11 @@ namespace ninfer::ops {
 template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bool Masked,
           typename CacheInput>
 __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_kernel(
-    const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, __nv_bfloat16* cache_k,
-    __nv_bfloat16* cache_v, const std::int32_t* block_tables, const std::int32_t* valid_columns,
+    const __hip_bfloat16* q, CacheInput input, const std::int32_t* pos, __hip_bfloat16* cache_k,
+    __hip_bfloat16* cache_v, const std::int32_t* block_tables, const std::int32_t* valid_columns,
     const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t tokens,
     std::int32_t full_width, std::int32_t column_begin, std::int32_t logical_capacity, float scale,
-    __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
+    __hip_bfloat16* partial_acc, float* partial_m, float* partial_l) {
     static_assert(TokenTile >= 1 && TokenTile <= 6);
     static_assert(WarpsPerCta >= 1 && WarpsPerCta <= 4);
 
@@ -38,16 +40,16 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
     // The GQA Op's 262144-key maximum envelope spans at most 49 pages in one 27B split.
     constexpr int PageIds       = 64;
     constexpr float Log2E       = 1.4426950408889634074f;
-    constexpr unsigned FullMask = 0xffffffffu;
+    constexpr unsigned long long FullMask = 0xffffffffull;
     constexpr int QkvRows       = 2 * Bc;
 
     static_assert(QkvRows >= Br);
 
-    __shared__ __align__(16) __nv_bfloat16 qkv_s[QkvRows * D];
-    __shared__ __align__(16) __nv_bfloat16 p_s[Wc * 16 * Bc];
+    __shared__ __align__(16) __hip_bfloat16 qkv_s[QkvRows * D];
+    __shared__ __align__(16) __hip_bfloat16 p_s[Wc * 16 * Bc];
     __shared__ std::int32_t physical_pages_s[PageIds];
-    __nv_bfloat16* k_s = qkv_s;
-    __nv_bfloat16* v_s = qkv_s + Bc * D;
+    __hip_bfloat16* k_s = qkv_s;
+    __hip_bfloat16* v_s = qkv_s + Bc * D;
 
     const int kv_head     = static_cast<int>(blockIdx.x);
     const int split       = static_cast<int>(blockIdx.y);
@@ -88,7 +90,7 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
             gqa_small_t_tc_row_to_qt<Geometry>(row, tokens, kv_head, q_head, token);
             if (gqa_valid_q_head<Geometry>(kv_head, q_head)) {
                 partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] =
-                    -CUDART_INF_F;
+                    -HIP_INF_F;
                 partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] = 0.0f;
             }
         }
@@ -173,7 +175,7 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
         int q_head    = 0;
         int token     = 0;
         gqa_small_t_tc_row_to_qt<Geometry>(row, tokens, kv_head, q_head, token);
-        __nv_bfloat16 value = __float2bfloat16(0.0f);
+        __hip_bfloat16 value = __float2bfloat16(0.0f);
         if (row < row_count && gqa_valid_q_head<Geometry>(kv_head, q_head)) {
             value = q[gqa_q_index<Geometry>(q_head, d, token)];
         }
@@ -181,233 +183,257 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
     }
     __syncthreads();
 
-    const int gid = lane >> 2;
-    const int lid = lane & 3;
+    // gfx1151 WMMA: atoms are 16x16 (not 16x8). QK covers the warp's 16 rows x 32
+    // keys as Bc/16 = 2 column atoms; PV covers 16 rows x 256 dims as D/16 = 16
+    // column atoms; each atom carries 8 accumulator registers.
+    constexpr int WQKNt = QKNt / 2; // Bc / 16
+    constexpr int WPVNt = PVNt / 2; // D / 16
+    static_assert(WQKNt * 16 == Bc);
+    static_assert(WPVNt * 16 == D);
 
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int b_rin    = lane & 7;
-    const int b_koff   = ((lane >> 3) & 1) << 3;
+    const bool lane_hi    = (lane >> 4) != 0;
+    const int warp_row0   = warp * 16;
+    __hip_bfloat16* p_sw = &p_s[warp * 16 * Bc];
 
-    const int warp_row0 = warp * 16;
-    __nv_bfloat16* p_sw = &p_s[warp * 16 * Bc];
-
-    unsigned af_q[QKKs][4];
+    // Q A-fragments are captured here because the key loop overwrites the Q rows
+    // of qkv_s with the K tile (the original kernel preloaded af_q the same way);
+    // the QK MMAs below reference these registers.
+    unsigned a_frag[QKKs][8];
 #pragma unroll
     for (int k = 0; k < QKKs; ++k) {
-        const int arow = warp_row0 + a_rowoff;
-        const int acol = k * 16 + a_coloff;
-        ldmatrix_x4(af_q[k][0], af_q[k][1], af_q[k][2], af_q[k][3],
-                    smem_addr(&qkv_s[arow * D + gqa_small_t_tc_swz(arow, acol)]));
+        const int arow = warp_row0 + (lane >> 1);
+        if (wmma_a_lane_active(lane)) {
+            wmma_load_a_bf16(a_frag[k], qkv_s, arow, k * 16, D, gqa_small_t_tc_swz);
+        }
     }
     __syncthreads();
     int physical_page = physical_pages_s[0];
-    float acc[PVNt][4];
+    float acc[WPVNt][8];
 #pragma unroll
-    for (int n = 0; n < PVNt; ++n) {
+    for (int n = 0; n < WPVNt; ++n) {
 #pragma unroll
-        for (int i = 0; i < 4; ++i) { acc[n][i] = 0.0f; }
+        for (int r = 0; r < 8; ++r) { acc[n][r] = 0.0f; }
     }
-    float m0 = -CUDART_INF_F, m1 = -CUDART_INF_F, l0 = 0.0f, l1 = 0.0f;
+    // Running per-row softmax state. Lanes 0-15 track rows warp_row0+0..7 (register
+    // r = row r), lanes 16-31 track rows warp_row0+8..15 (register r = row r + 8).
+    float m[8], l[8];
+#pragma unroll
+    for (int r = 0; r < 8; ++r) { m[r] = -HIP_INF_F; l[r] = 0.0f; }
 
     for (int kb = 0; kb < key_blocks; ++kb) {
         const int k0 = first_tile + kb * Bc;
         if (kb != 0 && (k0 & kPagedKVPageMask) == 0) {
             physical_page = physical_pages_s[(k0 >> kPagedKVPageShift) - first_page];
         }
-        // Stage the bf16 K/V key tile with one cp.async wave (16B/thread, high MLP).
-        // Current-step tokens come from k_new/v_new; tail slots are zeroed.
+        // Stage the bf16 K tile with a 16B cp.async wave (k_s stays [key_l][D]
+        // swizzled); V is staged transposed as v_s[d][key] so the WMMA PV
+        // B-fragments read contiguous 8-key groups. Current-step tokens come from
+        // k_new/v_new; tail slots are zeroed.
 #pragma unroll 1
         for (int chunk = tid; chunk < Bc * (D / 8); chunk += Threads) {
-            const int key_l      = chunk / (D / 8);
-            const int d          = (chunk - key_l * (D / 8)) * 8;
-            const int key        = k0 + key_l;
-            __nv_bfloat16* k_dst = &k_s[key_l * D + gqa_small_t_tc_swz(key_l, d)];
-            __nv_bfloat16* v_dst = &v_s[key_l * D + gqa_small_t_tc_swz(key_l, d)];
+            const int key_l = chunk / (D / 8);
+            const int d     = (chunk - key_l * (D / 8)) * 8;
+            const int key   = k0 + key_l;
+            __hip_bfloat16* k_dst = &k_s[key_l * D + gqa_small_t_tc_swz(key_l, d)];
             if (key >= split_start && key < split_end) {
                 if constexpr (CacheInput::writes_cache) {
                     const int new_token = key - first_pos;
                     const bool from_new =
                         new_token >= 0 && new_token < valid_tokens && key >= first_pos;
-                    if (from_new) {
-                        const std::int64_t off = gqa_kv_new_index<Geometry>(kv_head, d, new_token);
-                        ninfer::ops::cp_async<16>(k_dst, &input.k[off]);
-                        ninfer::ops::cp_async<16>(v_dst, &input.v[off]);
-                    } else {
-                        const std::int64_t off = gqa_cache_index<Geometry>(
-                            physical_page, kv_head, d, key & kPagedKVPageMask);
-                        ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
-                        ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
-                    }
+                    const std::int64_t off =
+                        from_new ? gqa_kv_new_index<Geometry>(kv_head, d, new_token)
+                                 : gqa_cache_index<Geometry>(physical_page, kv_head, d,
+                                                             key & kPagedKVPageMask);
+                    ninfer::ops::cp_async<16>(k_dst, from_new ? &input.k[off] : &cache_k[off]);
                 } else {
                     const std::int64_t off = gqa_cache_index<Geometry>(physical_page, kv_head, d,
                                                                        key & kPagedKVPageMask);
                     ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
-                    ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
                 }
             } else {
                 store_vec(k_dst, make_int4(0, 0, 0, 0));
-                store_vec(v_dst, make_int4(0, 0, 0, 0));
+            }
+        }
+        // V transposed scatter: v_s[d * Bc + swz(d, key)]. Each 8-wide d source
+        // lands on 8 distinct swizzled slots of the d-row, so it is fanned out
+        // one bf16 at a time (mirrors the prefill BF16 kernel's stage_kv_t).
+#pragma unroll 1
+        for (int chunk = tid; chunk < Bc * (D / 8); chunk += Threads) {
+            const int key_l = chunk / (D / 8);
+            const int d     = (chunk - key_l * (D / 8)) * 8;
+            const int key   = k0 + key_l;
+            const __hip_bfloat16* src = nullptr;
+            if (key >= split_start && key < split_end) {
+                if constexpr (CacheInput::writes_cache) {
+                    const int new_token = key - first_pos;
+                    const bool from_new =
+                        new_token >= 0 && new_token < valid_tokens && key >= first_pos;
+                    const std::int64_t off =
+                        from_new ? gqa_kv_new_index<Geometry>(kv_head, d, new_token)
+                                 : gqa_cache_index<Geometry>(physical_page, kv_head, d,
+                                                             key & kPagedKVPageMask);
+                    src = from_new ? &input.v[off] : &cache_v[off];
+                } else {
+                    const std::int64_t off = gqa_cache_index<Geometry>(physical_page, kv_head, d,
+                                                                       key & kPagedKVPageMask);
+                    src = &cache_v[off];
+                }
+            }
+            const bool valid = src != nullptr;
+            // Bc is only 32 here, so the swizzle must keep its 8-key groups inside
+            // the 32-wide row (gqa_small_t_tc_swz32); the 64-range swizzle would
+            // spill past the row end.
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                const int dd         = d + i;
+                __hip_bfloat16* v_dst = &v_s[dd * Bc + gqa_small_t_tc_swz32(dd, key_l)];
+                *v_dst                = valid ? src[i] : __hip_bfloat16(0);
             }
         }
         ninfer::ops::cp_commit();
         ninfer::ops::cp_wait<0>();
         __syncthreads();
 
-        float score[QKNt][4];
+        // S = Q K^T for this warp's 16 rows over all Bc keys. With 16x16 WMMA the
+        // tile splits into WQKNt column atoms; each atom's C fragment holds one
+        // column per lane across 8 rows (lanes 0-15 / 16-31 = rows 0-7 / 8-15).
+        float score[WQKNt][8];
 #pragma unroll
-        for (int nt = 0; nt < QKNt; ++nt) {
-            score[nt][0] = score[nt][1] = score[nt][2] = score[nt][3] = 0.0f;
+        for (int nt = 0; nt < WQKNt; ++nt) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { score[nt][r] = 0.0f; }
 #pragma unroll
             for (int k = 0; k < QKKs; ++k) {
-                unsigned bf[2];
-                const int brow = nt * 8 + b_rin;
-                const int bcol = k * 16 + b_koff;
-                ldmatrix_x2(bf[0], bf[1],
-                            smem_addr(&k_s[brow * D + gqa_small_t_tc_swz(brow, bcol)]));
-                mma_bf16(score[nt][0], score[nt][1], score[nt][2], score[nt][3], af_q[k][0],
-                         af_q[k][1], af_q[k][2], af_q[k][3], bf[0], bf[1]);
+                unsigned b_frag[8];
+                wmma_load_b_bf16(b_frag, k_s, nt * 16 + (lane & 15), k * 16, D,
+                                 gqa_small_t_tc_swz);
+                WmmaC8& c  = *reinterpret_cast<WmmaC8*>(score[nt]);
+                WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag[k]);
+                WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag);
+                c          = wmma_bf16(a, b, c);
             }
         }
 
-        const int row0 = warp_row0 + gid;
-        const int row1 = row0 + 8;
-        int q_head0 = 0, token0 = 0, q_head1 = 0, token1 = 0;
-        gqa_small_t_tc_row_to_qt<Geometry>(row0, tokens, kv_head, q_head0, token0);
-        gqa_small_t_tc_row_to_qt<Geometry>(row1, tokens, kv_head, q_head1, token1);
-        const int qabs0 = (row0 < row_count) ? pos[token0] : -1;
-        const int qabs1 = (row1 < row_count) ? pos[token1] : -1;
-
-        float bm0 = -CUDART_INF_F, bm1 = -CUDART_INF_F;
+        // Per-query validity/absolute position, uniform across the 16 lanes of an
+        // 8-row half (each of those lanes holds the same rows at different cols).
+        int row_qabs[8];
+        bool row_valid[8];
 #pragma unroll
-        for (int nt = 0; nt < QKNt; ++nt) {
-            const int col0 = nt * 8 + 2 * lid;
-            const int col1 = col0 + 1;
-            const int key0 = k0 + col0;
-            const int key1 = col1 + k0;
-            score[nt][0] =
-                (row0 < row_count && key0 >= split_start && key0 < split_end && key0 <= qabs0)
-                    ? score[nt][0] * scale
-                    : -CUDART_INF_F;
-            score[nt][1] =
-                (row0 < row_count && key1 >= split_start && key1 < split_end && key1 <= qabs0)
-                    ? score[nt][1] * scale
-                    : -CUDART_INF_F;
-            score[nt][2] =
-                (row1 < row_count && key0 >= split_start && key0 < split_end && key0 <= qabs1)
-                    ? score[nt][2] * scale
-                    : -CUDART_INF_F;
-            score[nt][3] =
-                (row1 < row_count && key1 >= split_start && key1 < split_end && key1 <= qabs1)
-                    ? score[nt][3] * scale
-                    : -CUDART_INF_F;
-            bm0 = fmaxf(bm0, fmaxf(score[nt][0], score[nt][1]));
-            bm1 = fmaxf(bm1, fmaxf(score[nt][2], score[nt][3]));
+        for (int r = 0; r < 8; ++r) {
+            const int row_abs = warp_row0 + (lane_hi ? 8 : 0) + r;
+            row_valid[r]      = row_abs < row_count;
+            int q_head = 0, token = 0;
+            gqa_small_t_tc_row_to_qt<Geometry>(row_abs, tokens, kv_head, q_head, token);
+            row_qabs[r] = row_valid[r] ? pos[token] : -1;
         }
-        bm0 = warp_max<4>(bm0, FullMask);
-        bm1 = warp_max<4>(bm1, FullMask);
 
-        const float nm0    = fmaxf(m0, bm0);
-        const float nm1    = fmaxf(m1, bm1);
-        const float alpha0 = (m0 == -CUDART_INF_F) ? 0.0f : exp2_approx((m0 - nm0) * Log2E);
-        const float alpha1 = (m1 == -CUDART_INF_F) ? 0.0f : exp2_approx((m1 - nm1) * Log2E);
-
-        float bl0 = 0.0f, bl1 = 0.0f;
+        float bm[8];
 #pragma unroll
-        for (int nt = 0; nt < QKNt; ++nt) {
-            const int col0  = nt * 8 + 2 * lid;
-            const int col1  = col0 + 1;
-            const float p00 = (nm0 > -CUDART_INF_F && score[nt][0] > -CUDART_INF_F)
-                                  ? exp2_approx((score[nt][0] - nm0) * Log2E)
-                                  : 0.0f;
-            const float p01 = (nm0 > -CUDART_INF_F && score[nt][1] > -CUDART_INF_F)
-                                  ? exp2_approx((score[nt][1] - nm0) * Log2E)
-                                  : 0.0f;
-            const float p10 = (nm1 > -CUDART_INF_F && score[nt][2] > -CUDART_INF_F)
-                                  ? exp2_approx((score[nt][2] - nm1) * Log2E)
-                                  : 0.0f;
-            const float p11 = (nm1 > -CUDART_INF_F && score[nt][3] > -CUDART_INF_F)
-                                  ? exp2_approx((score[nt][3] - nm1) * Log2E)
-                                  : 0.0f;
-            bl0 += p00 + p01;
-            bl1 += p10 + p11;
-            p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col0)]           = __float2bfloat16(p00);
-            p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col1)]           = __float2bfloat16(p01);
-            p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col0)] = __float2bfloat16(p10);
-            p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col1)] = __float2bfloat16(p11);
+        for (int r = 0; r < 8; ++r) { bm[r] = -HIP_INF_F; }
+#pragma unroll
+        for (int nt = 0; nt < WQKNt; ++nt) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int key  = k0 + nt * 16 + (lane & 15);
+                const bool keep = row_valid[r] && key >= split_start && key < split_end &&
+                                  key <= row_qabs[r];
+                score[nt][r] = keep ? score[nt][r] * scale : -HIP_INF_F;
+                bm[r]        = fmaxf(bm[r], score[nt][r]);
+            }
         }
-        bl0 = warp_sum<4>(bl0, FullMask);
-        bl1 = warp_sum<4>(bl1, FullMask);
-
-        l0 = l0 * alpha0 + bl0;
-        l1 = l1 * alpha1 + bl1;
-        m0 = nm0;
-        m1 = nm1;
 #pragma unroll
-        for (int n = 0; n < PVNt; ++n) {
-            acc[n][0] *= alpha0;
-            acc[n][1] *= alpha0;
-            acc[n][2] *= alpha1;
-            acc[n][3] *= alpha1;
+        for (int r = 0; r < 8; ++r) { bm[r] = warp_max<16>(bm[r], FullMask); }
+
+        float nm[8], alpha[8];
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            nm[r]    = fmaxf(m[r], bm[r]);
+            alpha[r] = (m[r] == -HIP_INF_F) ? 0.0f : exp2_approx((m[r] - nm[r]) * Log2E);
+        }
+
+        float bl[8];
+#pragma unroll
+        for (int r = 0; r < 8; ++r) { bl[r] = 0.0f; }
+#pragma unroll
+        for (int nt = 0; nt < WQKNt; ++nt) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int row_l = r + (lane_hi ? 8 : 0);
+                const int col   = nt * 16 + (lane & 15);
+                const float p   = (nm[r] > -HIP_INF_F && score[nt][r] > -HIP_INF_F)
+                                      ? exp2_approx((score[nt][r] - nm[r]) * Log2E)
+                                      : 0.0f;
+                bl[r] += p;
+                p_sw[row_l * Bc + gqa_small_t_tc_swz32(row_l, col)] = __float2bfloat16(p);
+            }
+        }
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            bl[r] = warp_sum<16>(bl[r], FullMask);
+            l[r]  = l[r] * alpha[r] + bl[r];
+            m[r]  = nm[r];
+        }
+#pragma unroll
+        for (int n = 0; n < WPVNt; ++n) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { acc[n][r] *= alpha[r]; }
         }
         __syncwarp();
 
+        // O += P V, contracting over the Bc keys. P (A-operand) is read from the
+        // swizzled p_sw tile; V is read from the transposed v_s[d][key] tile.
+        unsigned pv_a[PVKs][8];
 #pragma unroll
-        for (int n = 0; n < PVNt; ++n) {
+        for (int k = 0; k < PVKs; ++k) {
+            if (wmma_a_lane_active(lane)) {
+                wmma_load_a_bf16(pv_a[k], p_sw, lane >> 1, k * 16, Bc, gqa_small_t_tc_swz32);
+            }
+        }
+#pragma unroll
+        for (int n = 0; n < WPVNt; ++n) {
 #pragma unroll
             for (int k = 0; k < PVKs; ++k) {
-                unsigned pf[4];
-                const int pcol = k * 16 + a_coloff;
-                ldmatrix_x4(pf[0], pf[1], pf[2], pf[3],
-                            smem_addr(&p_sw[a_rowoff * Bc + gqa_small_t_tc_swz32(a_rowoff, pcol)]));
-                unsigned vf[2];
-                const int vrow = k * 16 + b_koff + b_rin;
-                const int vcol = n * 8;
-                ldmatrix_x2_t(vf[0], vf[1],
-                              smem_addr(&v_s[vrow * D + gqa_small_t_tc_swz(vrow, vcol)]));
-                mma_bf16(acc[n][0], acc[n][1], acc[n][2], acc[n][3], pf[0], pf[1], pf[2], pf[3],
-                         vf[0], vf[1]);
+                unsigned vf[8];
+                wmma_load_b_bf16(vf, v_s, n * 16 + (lane & 15), k * 16, Bc,
+                                 gqa_small_t_tc_swz32);
+                WmmaC8& c  = *reinterpret_cast<WmmaC8*>(acc[n]);
+                WmmaA16I a = *reinterpret_cast<WmmaA16I*>(pv_a[k]);
+                WmmaA16I b = *reinterpret_cast<WmmaA16I*>(vf);
+                c          = wmma_bf16(a, b, c);
             }
         }
         __syncthreads();
     }
-
-    if (lid == 0) {
-        const int row0 = warp_row0 + gid;
-        const int row1 = row0 + 8;
-        if (row0 < row_count) {
-            int q_head = 0;
-            int token  = 0;
-            gqa_small_t_tc_row_to_qt<Geometry>(row0, tokens, kv_head, q_head, token);
-            partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] = m0;
-            partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] = l0;
-        }
-        if (row1 < row_count) {
-            int q_head = 0;
-            int token  = 0;
-            gqa_small_t_tc_row_to_qt<Geometry>(row1, tokens, kv_head, q_head, token);
-            partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] = m1;
-            partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] = l1;
+    // Publish the running per-row softmax stats. Each 8-row half's rows are uniform
+    // across its 16 lanes after the per-iteration warp reductions, so one lane of
+    // each half writes all eight, and the row-to-(q_head, token) map diverges per row.
+    if (lane == 0 || lane == 16) {
+        const int half_off = (lane >> 4) << 3;
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            const int row_abs = warp_row0 + half_off + r;
+            if (row_abs < row_count) {
+                int q_head = 0;
+                int token  = 0;
+                gqa_small_t_tc_row_to_qt<Geometry>(row_abs, tokens, kv_head, q_head, token);
+                partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] = m[r];
+                partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] = l[r];
+            }
         }
     }
 
-    // MMA fragments hold each row in four-lane groups. Stage the final split-local
-    // accumulator through shared memory so partial_acc is written as contiguous d-vector stores.
+    // WMMA C-fragments hold one output column per lane across 8 rows. Stage the
+    // final split-local accumulator through shared memory so partial_acc is
+    // written as contiguous d-vector stores.
 #pragma unroll
-    for (int n = 0; n < PVNt; ++n) {
-        const int d0   = n * 8 + 2 * lid;
-        const int d1   = d0 + 1;
-        const int row0 = warp_row0 + gid;
-        const int row1 = row0 + 8;
-        if (row0 < row_count) {
-            qkv_s[row0 * D + d0] = __float2bfloat16(acc[n][0]);
-            qkv_s[row0 * D + d1] = __float2bfloat16(acc[n][1]);
-        }
-        if (row1 < row_count) {
-            qkv_s[row1 * D + d0] = __float2bfloat16(acc[n][2]);
-            qkv_s[row1 * D + d1] = __float2bfloat16(acc[n][3]);
+    for (int n = 0; n < WPVNt; ++n) {
+        const int d = n * 16 + (lane & 15);
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            const int row_abs = warp_row0 + r + (lane_hi ? 8 : 0);
+            if (row_abs < row_count) {
+                qkv_s[row_abs * D + d] = __float2bfloat16(acc[n][r]);
+            }
         }
     }
     __syncthreads();

@@ -3,7 +3,7 @@
 #include "core/tensor.h"
 #include "ninfer/ops/linear.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +17,6 @@ namespace ninfer::ops::detail {
                                                                 std::int32_t max_tokens);
 
 void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
-                    WorkspaceArena* workspace, cudaStream_t stream);
+                    WorkspaceArena* workspace, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

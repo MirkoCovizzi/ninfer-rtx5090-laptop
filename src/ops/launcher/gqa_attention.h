@@ -6,7 +6,7 @@
 #include "core/tensor.h"
 #include "ninfer/ops/gqa_attention.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -40,24 +40,24 @@ void gqa_attention_small_t_launch(const Tensor& q, const Tensor& k, const Tensor
                                   PagedKVBatchLayerView cache, GqaExecutionEnvelope envelope,
                                   std::int32_t column_begin, std::int32_t width,
                                   Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
-                                  Tensor& out, cudaStream_t stream);
+                                  Tensor& out, hipStream_t stream);
 
 void gqa_attention_cached_small_t_launch(const Tensor& q, const Tensor& positions, float scale,
                                          const PagedKVLayerView& cache,
                                          GqaExecutionEnvelope envelope, Tensor& partial_acc,
                                          Tensor& partial_m, Tensor& partial_l, Tensor& out,
-                                         cudaStream_t stream);
+                                         hipStream_t stream);
 
 void gqa_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor& v,
                                  const Tensor& positions, const Tensor& valid_columns,
                                  const Tensor& table_rows, float scale, PagedKVBatchLayerView cache,
-                                 Tensor& out, cudaStream_t stream);
+                                 Tensor& out, hipStream_t stream);
 
 void gqa_kv_append_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
-                          PagedKVLayerView cache, cudaStream_t stream);
+                          PagedKVLayerView cache, hipStream_t stream);
 
 void gqa_attention_prompt_attention_launch(const Tensor& q, const Tensor& positions, float scale,
                                            const PagedKVLayerView& cache, Tensor& out,
-                                           cudaStream_t stream);
+                                           hipStream_t stream);
 
 } // namespace ninfer::ops::detail

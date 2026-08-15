@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -18,6 +18,6 @@ namespace ninfer::ops {
  * implementation-defined. `bias` must not overlap `x`. There is no workspace or other state side
  * effect.
  */
-void add_bias(const Tensor& bias, Tensor& x, cudaStream_t stream);
+void add_bias(const Tensor& bias, Tensor& x, hipStream_t stream);
 
 } // namespace ninfer::ops

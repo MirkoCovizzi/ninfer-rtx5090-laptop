@@ -3,7 +3,7 @@
 #include "core/layout.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime_api.h>
+#include <hip/hip_runtime_api.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -116,7 +116,7 @@ public:
     [[nodiscard]] PagedKVAllocation reserve(std::uint32_t page_entitlement);
 
     // Zeros only the named physical page groups across every storage plane.
-    void zero_pages(std::span<const std::int32_t> page_ids, cudaStream_t stream = nullptr);
+    void zero_pages(std::span<const std::int32_t> page_ids, hipStream_t stream = nullptr);
 
 private:
     friend class PagedKVAllocation;
@@ -161,13 +161,13 @@ public:
 
     void set_page_entitlement(std::uint32_t pages);
     void cancel_unmapped_entitlement() noexcept;
-    void materialize_pages(std::uint32_t pages, cudaStream_t stream = nullptr);
-    void materialize_tokens(std::uint32_t tokens, cudaStream_t stream = nullptr);
+    void materialize_pages(std::uint32_t pages, hipStream_t stream = nullptr);
+    void materialize_tokens(std::uint32_t tokens, hipStream_t stream = nullptr);
     void trim_pages(std::uint32_t pages);
     void trim_tokens(std::uint32_t tokens);
 
-    void bind_row(std::int32_t row, cudaStream_t stream = nullptr);
-    void publish_mapping(cudaStream_t stream = nullptr) const;
+    void bind_row(std::int32_t row, hipStream_t stream = nullptr);
+    void publish_mapping(hipStream_t stream = nullptr) const;
     void unbind_row() noexcept;
     [[nodiscard]] Tensor block_table() const;
 
@@ -179,7 +179,7 @@ private:
 
     PagedKVAllocation(PagedKVPool& pool, std::uint32_t page_entitlement);
     void publish_range(std::uint32_t first_page, std::uint32_t page_count,
-                       cudaStream_t stream) const;
+                       hipStream_t stream) const;
 
     PagedKVPool* pool_ = nullptr;
     std::vector<std::int32_t> page_ids_;

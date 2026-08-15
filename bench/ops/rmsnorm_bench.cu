@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Performance bench for the registered Qwen3.6 RMSNorm domains.
 //
 // Default matrix:
@@ -13,7 +14,7 @@
 #include "ninfer_bench_common.h"
 #include "ops/kernel/rmsnorm.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -61,8 +62,8 @@ constexpr Shape kShapes[] = {
 };
 
 template <int Block, bool Gated>
-__global__ void rmsnorm_warp_payload_control(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                             const __nv_bfloat162* z, __nv_bfloat162* out, int d,
+__global__ void rmsnorm_warp_payload_control(const __hip_bfloat162* x, const __hip_bfloat162* weight,
+                                             const __hip_bfloat162* z, __hip_bfloat162* out, int d,
                                              std::int64_t rows) {
     constexpr int kWarpsPerBlock = Block / 32;
     const int lane               = static_cast<int>(threadIdx.x) & 31;
@@ -86,8 +87,8 @@ __global__ void rmsnorm_warp_payload_control(const __nv_bfloat162* x, const __nv
 }
 
 template <int Block, bool Gated>
-__global__ void rmsnorm_cta_payload_control(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                            const __nv_bfloat162* z, __nv_bfloat162* out, int d,
+__global__ void rmsnorm_cta_payload_control(const __hip_bfloat162* x, const __hip_bfloat162* weight,
+                                            const __hip_bfloat162* z, __hip_bfloat162* out, int d,
                                             std::int64_t rows) {
     const std::int64_t row = static_cast<std::int64_t>(blockIdx.x);
     if (row >= rows) { return; }
@@ -115,7 +116,7 @@ DeviceBuffer make_varied_bf16(std::size_t n, std::uint32_t seed) {
         host[i]       = f32_to_bf16(2.0f * u - 1.0f);
     }
     DeviceBuffer device(n * 2);
-    cudaMemcpy(device.p, host.data(), n * 2, cudaMemcpyHostToDevice);
+    hipMemcpy(device.p, host.data(), n * 2, hipMemcpyHostToDevice);
     return device;
 }
 
@@ -159,19 +160,19 @@ const char* production_route(const Shape& shape, int rows) {
 
 template <int Block>
 void launch_plain_candidate(const Shape& shape, const void* x, const void* weight, void* out,
-                            int rows, cudaStream_t stream) {
+                            int rows, hipStream_t stream) {
     if (shape.d == 128) {
         ops::rmsnorm_warp_bf16x2_kernel<ops::RmsEpilogue::Plain, Block>
             <<<static_cast<unsigned int>((rows + Block / 32 - 1) / (Block / 32)), Block, 0,
-               stream>>>(static_cast<const __nv_bfloat162*>(x),
-                         static_cast<const __nv_bfloat162*>(weight), nullptr,
-                         static_cast<__nv_bfloat162*>(out), shape.d, rows, 1.0e-6f);
+               stream>>>(static_cast<const __hip_bfloat162*>(x),
+                         static_cast<const __hip_bfloat162*>(weight), nullptr,
+                         static_cast<__hip_bfloat162*>(out), shape.d, rows, 1.0e-6f);
     } else if (shape.d == 2048) {
         constexpr int kMaxPairsPerThread = 1024 / Block;
         ops::rmsnorm_cta_bf16x2_kernel<ops::RmsEpilogue::Plain, Block, kMaxPairsPerThread>
             <<<static_cast<unsigned int>(rows), Block, 0, stream>>>(
-                static_cast<const __nv_bfloat162*>(x), static_cast<const __nv_bfloat162*>(weight),
-                nullptr, static_cast<__nv_bfloat162*>(out), shape.d, rows, 1.0e-6f);
+                static_cast<const __hip_bfloat162*>(x), static_cast<const __hip_bfloat162*>(weight),
+                nullptr, static_cast<__hip_bfloat162*>(out), shape.d, rows, 1.0e-6f);
     } else {
         throw std::invalid_argument("RMSNorm candidate requires plain D128 or D2048");
     }
@@ -192,12 +193,12 @@ void run(const Shape& shape, int tokens, Route route, bool profile) {
 
     // Weight is reused across rows and excluded. Gated RMSNorm additionally reads z.
     const double bytes = static_cast<double>(shape.gated ? 3 : 2) * static_cast<double>(n) * 2.0;
-    const auto launch  = [&](cudaStream_t stream) {
+    const auto launch  = [&](hipStream_t stream) {
         if (route == Route::Payload) {
-            const auto* x2 = static_cast<const __nv_bfloat162*>(x.p);
-            const auto* w2 = static_cast<const __nv_bfloat162*>(weight.p);
-            const auto* z2 = static_cast<const __nv_bfloat162*>(z.p);
-            auto* out2     = static_cast<__nv_bfloat162*>(out.p);
+            const auto* x2 = static_cast<const __hip_bfloat162*>(x.p);
+            const auto* w2 = static_cast<const __hip_bfloat162*>(weight.p);
+            const auto* z2 = static_cast<const __hip_bfloat162*>(z.p);
+            auto* out2     = static_cast<__hip_bfloat162*>(out.p);
             if (shape.d == 128 && !shape.unit_offset && !shape.gated) {
                 constexpr int block = 128;
                 const unsigned grid = static_cast<unsigned>((rows + block / 32 - 1) / (block / 32));
@@ -250,7 +251,7 @@ void run(const Shape& shape, int tokens, Route route, bool profile) {
     };
     if (profile) {
         launch(nullptr);
-        cudaDeviceSynchronize();
+        hipDeviceSynchronize();
         std::printf("profile rmsnorm %s T=%d [D=%d,rows=%d]\n", shape.name, tokens, shape.d, rows);
         return;
     }
@@ -279,7 +280,7 @@ void run(const Shape& shape, int tokens, Route route, bool profile) {
 
 int main(int argc, char** argv) {
     int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

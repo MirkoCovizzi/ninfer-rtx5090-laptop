@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Paired MTP K/V W8G32 GEMM. One CTA keeps a single BF16 activation tile in
@@ -13,10 +14,10 @@ inline constexpr int kW8PairMmaMinBlocks = TileCols <= 64 ? 3 : 2;
 template <int TileCols, bool Full>
 __global__
 __launch_bounds__((TileCols / 16) * 32, kW8PairMmaMinBlocks<TileCols>) void w8_pair_gemm_mma_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ k_codes,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ k_codes,
     const std::uint8_t* __restrict__ k_scales, const std::uint8_t* __restrict__ v_codes,
-    const std::uint8_t* __restrict__ v_scales, __nv_bfloat16* __restrict__ k_out,
-    __nv_bfloat16* __restrict__ v_out, std::int32_t m, std::int32_t k, std::int32_t n,
+    const std::uint8_t* __restrict__ v_scales, __hip_bfloat16* __restrict__ k_out,
+    __hip_bfloat16* __restrict__ v_out, std::int32_t m, std::int32_t k, std::int32_t n,
     std::int32_t padded_k) {
     constexpr int BM                = 32;
     constexpr int BN                = TileCols;
@@ -25,6 +26,10 @@ __launch_bounds__((TileCols / 16) * 32, kW8PairMmaMinBlocks<TileCols>) void w8_p
     constexpr int MT                = 2;
     constexpr int NT                = 2;
     constexpr int KSUB              = 4;
+    // gfx1151 WMMA atoms are 16x16. The warp tile is BM rows x WN(16) cols; use WMT m16-row
+    // atoms and WNT 16-column atoms (WN==16, so exactly one column atom, no overlap).
+    constexpr int WMT = BM / 16;
+    constexpr int WNT = WN / 16;
     constexpr int WARPS_N           = BN / WN;
     constexpr int WARPS             = WARPS_N;
     constexpr int THREADS           = WARPS * 32;
@@ -32,8 +37,8 @@ __launch_bounds__((TileCols / 16) * 32, kW8PairMmaMinBlocks<TileCols>) void w8_p
     static_assert(TileCols == 64 || TileCols == 80 || TileCols == 96 || TileCols == 112 ||
                   TileCols == 128);
 
-    __shared__ __align__(16) __nv_bfloat16 As[BM * BK];
-    __shared__ __align__(16) __nv_bfloat16 Bs[2][BN * BK];
+    __shared__ __align__(16) __hip_bfloat16 As[BM * BK];
+    __shared__ __align__(16) __hip_bfloat16 Bs[2][BN * BK];
     __shared__ __align__(16) std::uint8_t Cr[2][BM * BK];
     __shared__ __align__(16) std::uint8_t Sr[2][BM * SCALE_CACHE_BYTES];
 
@@ -47,26 +52,19 @@ __launch_bounds__((TileCols / 16) * 32, kW8PairMmaMinBlocks<TileCols>) void w8_p
     const int n0   = static_cast<int>(blockIdx.y) * BN;
     const int kg   = padded_k / 32;
 
-    float acc_k[MT][NT][4];
-    float acc_v[MT][NT][4];
+    float acc_k[WMT][WNT][8];
+    float acc_v[WMT][WNT][8];
 #pragma unroll
-    for (int mi = 0; mi < MT; ++mi) {
+    for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-        for (int ni = 0; ni < NT; ++ni) {
+        for (int ni = 0; ni < WNT; ++ni) {
 #pragma unroll
-            for (int ci = 0; ci < 4; ++ci) {
-                acc_k[mi][ni][ci] = 0.0f;
-                acc_v[mi][ni][ci] = 0.0f;
+            for (int r = 0; r < 8; ++r) {
+                acc_k[mi][ni][r] = 0.0f;
+                acc_v[mi][ni][r] = 0.0f;
             }
         }
     }
-
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int b_rin    = lane & 7;
-    const int b_koff   = ((lane >> 3) & 1) << 3;
 
     auto stage_x = [&](int stage, int kt) {
         const int k0 = kt * BK;
@@ -143,7 +141,7 @@ __launch_bounds__((TileCols / 16) * 32, kW8PairMmaMinBlocks<TileCols>) void w8_p
                                       ? *reinterpret_cast<const std::uint32_t*>(
                                             &Sr[p][row * SCALE_CACHE_BYTES + scale_pair_offset])
                                       : 0;
-            scale_pair          = __shfl_sync(0xffffffffu, scale_pair, half * 16);
+            scale_pair          = __shfl_sync(0xffffffffffffffffull, scale_pair, half * 16);
 #pragma unroll
             for (int gg = 0; gg < 2; ++gg) {
                 const float scale =
@@ -153,7 +151,7 @@ __launch_bounds__((TileCols / 16) * 32, kW8PairMmaMinBlocks<TileCols>) void w8_p
                     *reinterpret_cast<const std::uint16_t*>(&Cr[p][row * BK + col]);
                 const int q0 = static_cast<int>(static_cast<std::int8_t>(packed & 0xffu));
                 const int q1 = static_cast<int>(static_cast<std::int8_t>(packed >> 8));
-                const __nv_bfloat162 values = __floats2bfloat162_rn(static_cast<float>(q0) * scale,
+                const __hip_bfloat162 values = __floats2bfloat162_rn(static_cast<float>(q0) * scale,
                                                                     static_cast<float>(q1) * scale);
                 store_vec(&As[row * BK + w8g32_swz64(row, col)], values);
             }
@@ -161,22 +159,20 @@ __launch_bounds__((TileCols / 16) * 32, kW8PairMmaMinBlocks<TileCols>) void w8_p
     };
 
     auto mma_pair = [&](int p, int stage) {
-        unsigned af[2][MT][4];
-        unsigned bf[2][NT][2];
+        unsigned af[2][WMT][8];
+        unsigned bf[2][WNT][8];
         auto load_fragments = [&](int slot, int ks) {
 #pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
-                const int ar = mi * 16 + a_rowoff;
-                const int ac = ks * 16 + a_coloff;
-                ldmatrix_x4(af[slot][mi][0], af[slot][mi][1], af[slot][mi][2], af[slot][mi][3],
-                            smem_addr(&As[ar * BK + w8g32_swz64(ar, ac)]));
+            for (int mi = 0; mi < WMT; ++mi) {
+                const int row = mi * 16 + (lane >> 1);
+                if (wmma_a_lane_active(lane)) {
+                    wmma_load_a_bf16(af[slot][mi], As, row, ks * 16, BK, w8g32_swz64);
+                }
             }
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int br = wn * WN + ni * 8 + b_rin;
-                const int bc = ks * 16 + b_koff;
-                ldmatrix_x2(bf[slot][ni][0], bf[slot][ni][1],
-                            smem_addr(&Bs[stage][br * BK + w8g32_swz64(br, bc)]));
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int col = wn * WN + ni * 16 + (lane & 15);
+                wmma_load_b_bf16(bf[slot][ni], Bs[stage], col, ks * 16, BK, w8g32_swz64);
             }
         };
         load_fragments(0, 0);
@@ -185,20 +181,13 @@ __launch_bounds__((TileCols / 16) * 32, kW8PairMmaMinBlocks<TileCols>) void w8_p
             const int slot = ks & 1;
             if (ks + 1 < KSUB) { load_fragments(slot ^ 1, ks + 1); }
 #pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
+            for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-                for (int ni = 0; ni < NT; ++ni) {
-                    if (p == 0) {
-                        mma_bf16(acc_k[mi][ni][0], acc_k[mi][ni][1], acc_k[mi][ni][2],
-                                 acc_k[mi][ni][3], af[slot][mi][0], af[slot][mi][1],
-                                 af[slot][mi][2], af[slot][mi][3], bf[slot][ni][0],
-                                 bf[slot][ni][1]);
-                    } else {
-                        mma_bf16(acc_v[mi][ni][0], acc_v[mi][ni][1], acc_v[mi][ni][2],
-                                 acc_v[mi][ni][3], af[slot][mi][0], af[slot][mi][1],
-                                 af[slot][mi][2], af[slot][mi][3], bf[slot][ni][0],
-                                 bf[slot][ni][1]);
-                    }
+                for (int ni = 0; ni < WNT; ++ni) {
+                    WmmaC8& c  = *reinterpret_cast<WmmaC8*>(p == 0 ? acc_k[mi][ni] : acc_v[mi][ni]);
+                    WmmaA16I a = *reinterpret_cast<WmmaA16I*>(af[slot][mi]);
+                    WmmaA16I b = *reinterpret_cast<WmmaA16I*>(bf[slot][ni]);
+                    c          = wmma_bf16(a, b, c);
                 }
             }
         }
@@ -242,31 +231,30 @@ __launch_bounds__((TileCols / 16) * 32, kW8PairMmaMinBlocks<TileCols>) void w8_p
     for (int p = 0; p < 2; ++p) {
         auto* out = p == 0 ? k_out : v_out;
 #pragma unroll
-        for (int mi = 0; mi < MT; ++mi) {
-            const int r0 = m0 + mi * 16 + gid;
-            const int r1 = r0 + 8;
+        for (int mi = 0; mi < WMT; ++mi) {
+            const int row_lo = m0 + mi * 16 + (lane < 16 ? 0 : 8);
 #pragma unroll
-            for (int ni = 0; ni < NT; ++ni) {
-                const int c0   = n0 + wn * WN + ni * 8 + 2 * lid;
-                const int c1   = c0 + 1;
-                const float* a = p == 0 ? acc_k[mi][ni] : acc_v[mi][ni];
+            for (int ni = 0; ni < WNT; ++ni) {
+                const int col       = n0 + wn * WN + ni * 16 + (lane & 15);
+                const int local_col = ni * 16 + (lane & 15);
+                if (local_col >= WN) { continue; }
+                const float* values = p == 0 ? acc_k[mi][ni] : acc_v[mi][ni];
                 if constexpr (Full) {
-                    out[static_cast<std::int64_t>(c0) * m + r0] = __float2bfloat16_rn(a[0]);
-                    out[static_cast<std::int64_t>(c1) * m + r0] = __float2bfloat16_rn(a[1]);
-                    out[static_cast<std::int64_t>(c0) * m + r1] = __float2bfloat16_rn(a[2]);
-                    out[static_cast<std::int64_t>(c1) * m + r1] = __float2bfloat16_rn(a[3]);
+                    if (col < n) {
+#pragma unroll
+                        for (int r = 0; r < 8; ++r) {
+                            out[static_cast<std::int64_t>(col) * m + row_lo + r] =
+                                __float2bfloat16_rn(values[r]);
+                        }
+                    }
                 } else {
-                    if (r0 < m && c0 < n) {
-                        out[static_cast<std::int64_t>(c0) * m + r0] = __float2bfloat16_rn(a[0]);
-                    }
-                    if (r0 < m && c1 < n) {
-                        out[static_cast<std::int64_t>(c1) * m + r0] = __float2bfloat16_rn(a[1]);
-                    }
-                    if (r1 < m && c0 < n) {
-                        out[static_cast<std::int64_t>(c0) * m + r1] = __float2bfloat16_rn(a[2]);
-                    }
-                    if (r1 < m && c1 < n) {
-                        out[static_cast<std::int64_t>(c1) * m + r1] = __float2bfloat16_rn(a[3]);
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        const int row = row_lo + r;
+                        if (row < m && col < n) {
+                            out[static_cast<std::int64_t>(col) * m + row] =
+                                __float2bfloat16_rn(values[r]);
+                        }
                     }
                 }
             }

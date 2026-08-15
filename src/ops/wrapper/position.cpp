@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/position.h"
 
 #include "ops/launcher/position.h"
@@ -26,7 +27,7 @@ void require_i32_scalar(const Tensor& tensor, const char* name) {
 
 } // namespace
 
-void fill_i32_positions(Tensor& positions, std::int32_t start, cudaStream_t stream) {
+void fill_i32_positions(Tensor& positions, std::int32_t start, hipStream_t stream) {
     require_i32_vector(positions, "fill_i32_positions positions");
     if (start < 0 || start > std::numeric_limits<std::int32_t>::max() - positions.ne[0]) {
         throw std::invalid_argument("fill_i32_positions: range is outside non-negative I32");
@@ -35,7 +36,7 @@ void fill_i32_positions(Tensor& positions, std::int32_t start, cudaStream_t stre
 }
 
 void offset_i32_positions(const Tensor& source, const Tensor& delta, Tensor& destination,
-                          cudaStream_t stream) {
+                          hipStream_t stream) {
     require_i32_vector(source, "offset_i32_positions source");
     require_i32_scalar(delta, "offset_i32_positions delta");
     require_i32_vector(destination, "offset_i32_positions destination");

@@ -22,7 +22,7 @@ struct ShapeCase {
     std::span<const std::int32_t> route_interiors;
 };
 
-bool cuda_available();
+bool hip_available();
 
 int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shape);
 

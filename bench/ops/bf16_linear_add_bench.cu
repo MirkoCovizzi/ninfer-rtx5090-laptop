@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Cold-cache benchmark and route crossover tuner for BF16 LinearAdd [5120,6144].
 
 #include "ninfer/ops/linear_add.h"
@@ -7,8 +8,8 @@
 #include "ninfer_bench_common.h"
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
 
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cmath>
@@ -202,7 +203,7 @@ std::string route_name(Route route, std::int32_t tokens) {
 }
 
 void launch_route(Route route, const Tensor& x, const Weight& weight, Tensor& residual,
-                  WorkspaceArena& workspace, cudaStream_t stream) {
+                  WorkspaceArena& workspace, hipStream_t stream) {
     switch (route) {
     case Route::Production:
         ops::linear_add(x, weight, residual, workspace, stream);
@@ -283,8 +284,8 @@ int main(int argc, char** argv) {
     try {
         const Options options         = parse_options(argc, argv);
         const std::int32_t max_tokens = options.tokens.back();
-        cudaStream_t stream           = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream           = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
 
         DeviceBuffer flush(options.flush_bytes);
         DeviceBuffer input    = bench::make_bf16(static_cast<std::size_t>(kHidden) * max_tokens);
@@ -303,16 +304,16 @@ int main(int argc, char** argv) {
                 bench::flush_l2(flush, stream);
                 launch_route(options.route, x, weight.weight, out, workspace, stream);
             }
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            HIP_CHECK(hipStreamSynchronize(stream));
             bench::flush_l2(flush, stream);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            HIP_CHECK(hipStreamSynchronize(stream));
             std::printf("PROFILE route=%s T=%d\n", route_name(options.route, tokens).c_str(),
                         tokens);
-            CUDA_CHECK(cudaProfilerStart());
+            HIP_CHECK(hipProfilerStart());
             launch_route(options.route, x, weight.weight, out, workspace, stream);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
-            CUDA_CHECK(cudaProfilerStop());
-            CUDA_CHECK(cudaStreamDestroy(stream));
+            HIP_CHECK(hipStreamSynchronize(stream));
+            HIP_CHECK(hipProfilerStop());
+            HIP_CHECK(hipStreamDestroy(stream));
             return 0;
         }
 
@@ -331,10 +332,10 @@ int main(int argc, char** argv) {
                     if (options.route == Route::All) { return; }
                     throw std::invalid_argument("selected route does not support T");
                 }
-                CUDA_CHECK(cudaMemsetAsync(
+                HIP_CHECK(hipMemsetAsync(
                     out.data, 0, 2ULL * static_cast<std::uint64_t>(kRows) * tokens, stream));
-                CUDA_CHECK(cudaStreamSynchronize(stream));
-                const auto launch = [&](cudaStream_t launch_stream) {
+                HIP_CHECK(hipStreamSynchronize(stream));
+                const auto launch = [&](hipStream_t launch_stream) {
                     launch_route(route, x, weight.weight, out, workspace, launch_stream);
                 };
                 Result result =
@@ -352,7 +353,7 @@ int main(int argc, char** argv) {
             }
         }
         write_csv(options, results);
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_bf16_linear_add_bench: %s\n", error.what());

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - embedding wrapper: public api validation and qtype dispatch.
 #include "ninfer/ops/embedding.h"
 
@@ -180,7 +181,7 @@ void require_non_empty_tensors(const Tensor& ids, const Tensor& out) {
 
 } // namespace
 
-void embedding(const Tensor& ids, const Weight& table, Tensor& out, cudaStream_t stream) {
+void embedding(const Tensor& ids, const Weight& table, Tensor& out, hipStream_t stream) {
     if (ids.dtype != DType::I32) { throw std::invalid_argument("embedding: ids must be I32"); }
     if (out.dtype != DType::BF16) { throw std::invalid_argument("embedding: out must be BF16"); }
 

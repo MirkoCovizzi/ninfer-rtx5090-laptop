@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/vision_context.h"
 
@@ -131,9 +132,9 @@ VisionWorkspaceLayout build_workspace_layout(std::size_t patches64, std::size_t 
     return out;
 }
 
-void copy_host(const void* src, Tensor& dst, cudaStream_t stream) {
+void copy_host(const void* src, Tensor& dst, hipStream_t stream) {
     if (dst.bytes() == 0) { return; }
-    CUDA_CHECK(cudaMemcpyAsync(dst.data, src, dst.bytes(), cudaMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(dst.data, src, dst.bytes(), hipMemcpyHostToDevice, stream));
 }
 
 } // namespace
@@ -222,7 +223,7 @@ void VisionContext::encode(const VisionItemView& item, Tensor& output,
     }
     const auto patches  = static_cast<std::int32_t>(patches64);
     const auto tokens   = static_cast<std::int32_t>(tokens64);
-    cudaStream_t stream = ctx_.stream;
+    hipStream_t stream = ctx_.stream;
     workspace.reset();
     const DeviceSpan backing = workspace.alloc_bytes(layout.bytes, kWorkspaceAlignment);
 
@@ -421,7 +422,7 @@ bool VisionPrefillSession::release_consumed_media_payload() noexcept {
 
 double VisionPrefillSession::elapsed_seconds() const {
     double milliseconds = 0.0;
-    for (const CudaEventTimer& timer : timers_) { milliseconds += timer.elapsed_ms(); }
+    for (const HipEventTimer& timer : timers_) { milliseconds += timer.elapsed_ms(); }
     return milliseconds / 1000.0;
 }
 

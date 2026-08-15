@@ -6,12 +6,18 @@ function(ninfer_internal_includes target)
     ${PROJECT_SOURCE_DIR}/third_party/utf8proc)
 endfunction()
 
-function(ninfer_cuda_archive target)
-  set_target_properties(${target} PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON)
-  target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+function(ninfer_hip_archive target)
+  # hipcc compiles .cu sources as HIP device code; mark them explicitly so CMake
+  # routes them through the HIP compiler even though the extension is .cu.
+  get_target_property(_srcs ${target} SOURCES)
+  list(FILTER _srcs INCLUDE REGEX "\\.cu$")
+  set_source_files_properties(${_srcs} PROPERTIES LANGUAGE HIP)
+  target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-gline-tables-only>)
 endfunction()
+
+find_library(ROCTRACER_LIBRARY roctracer64 HINTS ${ROCM_PATH}/lib /opt/rocm/lib)
+find_library(ROCTX_LIBRARY roctx64 HINTS ${ROCM_PATH}/lib /opt/rocm/lib)
+find_path(ROCTRACER_INCLUDE_DIR roctracer/roctx.h HINTS ${ROCM_PATH}/include /opt/rocm/include)
 
 # Device/tensor/layout/graph primitives and the model-independent request runtime.
 add_library(ninfer_core STATIC
@@ -30,8 +36,13 @@ add_library(ninfer_core STATIC
   runtime/engine/public_types.cpp
   runtime/engine/request_memory.cpp)
 ninfer_internal_includes(ninfer_core)
-ninfer_cuda_archive(ninfer_core)
-target_link_libraries(ninfer_core PUBLIC CUDA::cudart CUDA::nvtx3)
+ninfer_hip_archive(ninfer_core)
+target_link_libraries(ninfer_core PUBLIC hip::device)
+# Profiling ranges (nvtx.h) call roctx directly; make the library available to
+# every target that pulls in the core archive.
+if(ROCTX_LIBRARY)
+  target_link_libraries(ninfer_core PUBLIC ${ROCTX_LIBRARY})
+endif()
 
 # Generic .ninfer framing, binding, and direct final materialization.
 add_library(ninfer_artifact STATIC
@@ -42,20 +53,6 @@ add_library(ninfer_artifact STATIC
   artifact/typed_binding.cpp)
 ninfer_internal_includes(ninfer_artifact)
 target_link_libraries(ninfer_artifact PUBLIC ninfer_core)
-
-# The warp-specialized SM120 kernel uses setmaxnreg to transfer registers from its
-# producer warpgroup to its consumer warpgroups. Relocatable device code makes ptxas
-# discard that contract, so this self-contained kernel is intentionally compiled in a
-# non-RDC archive and called through a host launcher from ninfer_ops.
-add_library(ninfer_nvfp4_tma STATIC
-  ops/linear/nvfp4/nvfp4_w4a4_tma.cu
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma.cu)
-ninfer_internal_includes(ninfer_nvfp4_tma)
-set_target_properties(ninfer_nvfp4_tma PROPERTIES
-  CUDA_SEPARABLE_COMPILATION OFF
-  CUDA_RESOLVE_DEVICE_SYMBOLS OFF)
-target_compile_options(ninfer_nvfp4_tma PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
-target_link_libraries(ninfer_nvfp4_tma PRIVATE ninfer_core CUDA::cudart CUDA::cuda_driver)
 
 # Shared mathematical Ops. The list is intentionally explicit: adding a
 # source is a build-boundary decision, not an accidental recursive-glob side effect.
@@ -102,10 +99,6 @@ add_library(ninfer_ops STATIC
   ops/attn_input_proj/bf16/bf16_attn_input_gemm_mma.cu
   ops/attn_input_proj/bf16/bf16_attn_input_small_t.cu
   ops/attn_input_proj/bf16/bf16_attn_input_plan.cpp
-  ops/attn_input_proj/nvfp4/nvfp4_attn_input_decode.cu
-  ops/attn_input_proj/nvfp4/nvfp4_attn_input_small_t.cu
-  ops/attn_input_proj/nvfp4/nvfp4_attn_input_w4a4.cu
-  ops/attn_input_proj/nvfp4/nvfp4_attn_input_plan.cpp
   ops/attn_input_proj/q4_q5/q4_q5_attn_input_gemm_mma.cu
   ops/attn_input_proj/q4_q5/q4_q5_attn_input_small_t.cu
   ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.cpp
@@ -114,14 +107,6 @@ add_library(ninfer_ops STATIC
   ops/attn_input_proj/w8/w8_attn_input_gemm_simt.cu
   ops/attn_input_proj/w8/w8_attn_input_gemm_splitk.cu
   ops/attn_input_proj/w8/w8_attn_input_plan.cpp
-  ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_decode.cu
-  ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_small_t.cu
-  ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_w4a4.cu
-  ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_plan.cpp
-  ops/gdn_input_proj/nvfp4/nvfp4_gdn_snapshot_decode.cu
-  ops/gdn_input_proj/nvfp4/nvfp4_gdn_snapshot_small_t.cu
-  ops/gdn_input_proj/nvfp4/nvfp4_gdn_snapshot_post.cu
-  ops/gdn_input_proj/nvfp4/nvfp4_gdn_snapshot_plan.cpp
   ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_gemm_mma.cu
   ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_independent.cu
   ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu
@@ -138,10 +123,7 @@ add_library(ninfer_ops STATIC
   ops/linear/bf16/bf16_small_t.cu
   ops/linear/bf16/bf16_dispatch.cpp
   ops/linear/nvfp4/nvfp4_format.cpp
-  ops/linear/nvfp4/nvfp4_gemv.cu
-  ops/linear/nvfp4/nvfp4_small_t.cu
-  ops/linear/nvfp4/nvfp4_w4a4.cu
-  ops/linear/nvfp4/nvfp4_dispatch.cpp
+  ops/linear/nvfp4/nvfp4_hip_stubs.cpp
   ops/linear/q4/q4_small_t_mma.cu
   ops/linear/q4/q4_rowsplit_gemm_mma.cu
   ops/linear/q4/q4_rowsplit_gemm_simt.cu
@@ -155,10 +137,6 @@ add_library(ninfer_ops STATIC
   ops/linear_add/bf16/bf16_linear_add_gemm_mma.cu
   ops/linear_add/bf16/bf16_linear_add_small_t.cu
   ops/linear_add/bf16/bf16_linear_add_plan.cpp
-  ops/linear_add/nvfp4/nvfp4_linear_add_decode.cu
-  ops/linear_add/nvfp4/nvfp4_linear_add_small_t.cu
-  ops/linear_add/nvfp4/nvfp4_linear_add_w4a4.cu
-  ops/linear_add/nvfp4/nvfp4_linear_add_plan.cpp
   ops/linear_add/q5/q5_linear_add_gemm_mma.cu
   ops/linear_add/q5/q5_linear_add_gemm_simt.cu
   ops/linear_add/q5/q5_linear_add_gemv.cu
@@ -170,10 +148,6 @@ add_library(ninfer_ops STATIC
   ops/linear_swiglu/q4/q4_linear_swiglu_gemm_mma.cu
   ops/linear_swiglu/q4/q4_linear_swiglu_gemv.cu
   ops/linear_swiglu/q4/q4_linear_swiglu_plan.cpp
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_decode.cu
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_small_t.cu
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4.cu
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.cpp
   ops/linear_swiglu/w8/w8_linear_swiglu_decode.cu
   ops/linear_swiglu/w8/w8_linear_swiglu_gemm_mma.cu
   ops/linear_swiglu/w8/w8_linear_swiglu_gemm_splitk.cu
@@ -236,8 +210,8 @@ add_library(ninfer_ops STATIC
   ops/wrapper/vision_attention.cpp
   ops/wrapper/vision_pos_embed.cpp)
 ninfer_internal_includes(ninfer_ops)
-ninfer_cuda_archive(ninfer_ops)
-target_link_libraries(ninfer_ops PUBLIC ninfer_core PRIVATE ninfer_nvfp4_tma)
+ninfer_hip_archive(ninfer_ops)
+target_link_libraries(ninfer_ops PUBLIC ninfer_core)
 
 # Product-independent text and media mechanisms.
 add_library(ninfer_text STATIC
@@ -314,5 +288,5 @@ if(NINFER_BUILD_SERVE)
     ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
   target_link_libraries(ninfer_serve
     PUBLIC ninfer_engine Threads::Threads
-    PRIVATE ninfer_media_acquire CUDA::cudart)
+    PRIVATE ninfer_media_acquire hip::device)
 endif()

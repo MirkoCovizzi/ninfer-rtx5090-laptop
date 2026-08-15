@@ -1,6 +1,7 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
-#include <cuda_fp16.h>
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/speculative_round.h"
 #include "ops/launcher/speculative_round.h"
 
@@ -71,7 +72,7 @@ std::size_t speculative_accept_greedy_drafts_workspace_capacity_bytes(std::int32
 
 void speculative_prepare_verify_inputs(const Tensor& anchors, const Tensor& drafts,
                                        const Tensor& base_positions, const Tensor& current_extents,
-                                       Tensor& verify_ids, Tensor& positions, cudaStream_t stream) {
+                                       Tensor& verify_ids, Tensor& positions, hipStream_t stream) {
     constexpr const char* op = "speculative_prepare_verify_inputs";
     const std::int32_t k     = drafts.ne[0];
     const std::int32_t batch = drafts.ne[1];
@@ -91,7 +92,7 @@ void speculative_prepare_verify_inputs(const Tensor& anchors, const Tensor& draf
 
 void speculative_prepare_verify_ids(const Tensor& anchors, const Tensor& drafts,
                                     const Tensor& current_extents, Tensor& verify_ids,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     constexpr const char* op = "speculative_prepare_verify_ids";
     const std::int32_t k     = drafts.ne[0];
     const std::int32_t batch = drafts.ne[1];
@@ -111,7 +112,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
                                       Tensor& lengths, Tensor& anchors, Tensor& licensed_tokens,
                                       Tensor& licensed_counts, Tensor& accepted,
                                       std::int32_t token_domain, const SamplingConfig* configs,
-                                      WorkspaceArena& workspace, cudaStream_t stream) {
+                                      WorkspaceArena& workspace, hipStream_t stream) {
     constexpr const char* op = "speculative_accept_greedy_drafts";
     const std::int32_t k     = drafts.ne[0];
     const std::int32_t batch = drafts.ne[1];
@@ -149,7 +150,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
 }
 
 void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& selectors, Tensor& out,
-                                        cudaStream_t stream) {
+                                        hipStream_t stream) {
     constexpr const char* op = "speculative_select_accepted_hidden";
     require_dtype(hidden, DType::BF16, op, "hidden");
     if (hidden.ne[0] <= 0 || hidden.ne[1] <= 0 || hidden.ne[2] <= 0 || hidden.ne[3] != 1) {
@@ -165,7 +166,7 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
 }
 
 void proposal_remap_token_ids(Tensor& proposal_tokens, const std::int32_t* id_map, std::int32_t n,
-                              cudaStream_t stream) {
+                              hipStream_t stream) {
     constexpr const char* op = "proposal_remap_token_ids";
     require_dtype(proposal_tokens, DType::I32, op, "proposal_tokens");
     if (proposal_tokens.ne[0] <= 0 || proposal_tokens.ne[1] != 1 || proposal_tokens.ne[2] != 1 ||

@@ -1,6 +1,8 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -18,8 +20,8 @@ __global__ void scatter_bf16x8_kernel(const uint4* src, const std::int32_t* indi
     }
 }
 
-__global__ void scatter_bf16x2_kernel(const __nv_bfloat162* src, const std::int32_t* indices,
-                                      __nv_bfloat162* dst, std::int32_t pairs) {
+__global__ void scatter_bf16x2_kernel(const __hip_bfloat162* src, const std::int32_t* indices,
+                                      __hip_bfloat162* dst, std::int32_t pairs) {
     const std::int32_t src_col = static_cast<std::int32_t>(blockIdx.x);
     const std::int32_t dst_col = indices[src_col];
 
@@ -31,8 +33,8 @@ __global__ void scatter_bf16x2_kernel(const __nv_bfloat162* src, const std::int3
     }
 }
 
-__global__ void scatter_scalar_kernel(const __nv_bfloat16* src, const std::int32_t* indices,
-                                      __nv_bfloat16* dst, std::int32_t d) {
+__global__ void scatter_scalar_kernel(const __hip_bfloat16* src, const std::int32_t* indices,
+                                      __hip_bfloat16* dst, std::int32_t d) {
     const std::int32_t src_col = static_cast<std::int32_t>(blockIdx.x);
     const std::int32_t dst_col = indices[src_col];
 

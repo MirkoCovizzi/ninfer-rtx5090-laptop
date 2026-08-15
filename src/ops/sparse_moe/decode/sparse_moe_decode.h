@@ -4,7 +4,7 @@
 #include "core/tensor.h"
 #include "ninfer/ops/sparse_moe.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -44,15 +44,15 @@ SparseMoeDecodeWorkspace allocate_sparse_moe_decode_workspace(Arena& arena) {
 void sparse_moe_decode_launch_d3_small_t(const Tensor& x, const SparseMoeWeights& weights,
                                          const int* token_ids, float* token_activations,
                                          std::int32_t tokens, SparseMoeSmallTD3Schedule schedule,
-                                         cudaStream_t stream,
+                                         hipStream_t stream,
                                          const int* adaptive_route_jobs = nullptr);
 void sparse_moe_decode_launch_d4_small_t(const SparseMoeWeights& weights, Tensor& destination,
                                          const int* token_ids, const float* token_alpha,
                                          const float* shared_scale, const float* token_activations,
                                          std::int32_t tokens, SparseMoeSmallTD4Schedule schedule,
-                                         cudaStream_t stream,
+                                         hipStream_t stream,
                                          const int* adaptive_route_jobs = nullptr);
 void sparse_moe_decode_launch(const Tensor& x, const SparseMoeWeights& weights, Tensor& destination,
-                              const SparseMoeDecodeWorkspace& workspace, cudaStream_t stream);
+                              const SparseMoeDecodeWorkspace& workspace, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

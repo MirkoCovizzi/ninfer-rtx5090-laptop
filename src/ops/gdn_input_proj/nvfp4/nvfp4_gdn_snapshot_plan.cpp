@@ -64,7 +64,7 @@ void nvfp4_gdn_snapshot_dispatch(const Tensor& x, const Weight& weight, const Te
                                  const Tensor& initial_slot, const Tensor& snapshot_base_slot,
                                  Tensor& query, Tensor& key, Tensor& value, Tensor& z,
                                  LinearPolicy policy, WorkspaceArena& workspace,
-                                 cudaStream_t stream) {
+                                 hipStream_t stream) {
     switch (nvfp4_gdn_conv_resolve_plan(policy, x.ne[1], 1).schedule) {
     case Nvfp4GdnConvScheduleId::DecodeFusedA16:
         nvfp4_gdn_snapshot_decode_launch(x, weight, conv_weight, conv_states, valid_columns,

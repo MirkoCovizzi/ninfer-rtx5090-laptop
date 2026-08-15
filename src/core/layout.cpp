@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "core/layout.h"
 
 #include <algorithm>

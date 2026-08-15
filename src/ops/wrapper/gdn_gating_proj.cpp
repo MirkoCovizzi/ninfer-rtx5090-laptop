@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h"
@@ -77,7 +78,7 @@ std::size_t gdn_norm_gating_proj_workspace_capacity_bytes(std::int32_t heads,
 
 void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_weight,
                      const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g,
-                     Tensor& beta, cudaStream_t stream) {
+                     Tensor& beta, hipStream_t stream) {
     constexpr const char* op  = "gdn_gating_proj";
     const std::int32_t tokens = x.ne[1];
     require_sequence_tensor(x, DType::BF16, 5120, tokens, op, "x");
@@ -93,7 +94,7 @@ void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_we
 
 void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_log,
                      const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g, Tensor& beta,
-                     cudaStream_t stream) {
+                     hipStream_t stream) {
     constexpr const char* op  = "gdn_gating_proj";
     const std::int32_t tokens = x.ne[1];
     require_sequence_tensor(x, DType::BF16, 2048, tokens, op, "x");
@@ -111,7 +112,7 @@ void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_l
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& a_weight, const Weight& b_weight, const Tensor& A_log,
                           const Tensor& dt_bias, WorkspaceArena& ws, Tensor& h, Tensor& g,
-                          Tensor& beta, cudaStream_t stream) {
+                          Tensor& beta, hipStream_t stream) {
     constexpr const char* op  = "gdn_norm_gating_proj";
     const std::int32_t tokens = x.ne[1];
     if (!(eps > 0.0F) || !std::isfinite(eps)) {
@@ -134,7 +135,7 @@ void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& ab_weight, const Tensor& A_log, const Tensor& dt_bias,
                           WorkspaceArena& ws, Tensor& h, Tensor& g, Tensor& beta,
-                          cudaStream_t stream) {
+                          hipStream_t stream) {
     constexpr const char* op  = "gdn_norm_gating_proj";
     const std::int32_t tokens = x.ne[1];
     if (!(eps > 0.0F) || !std::isfinite(eps)) {

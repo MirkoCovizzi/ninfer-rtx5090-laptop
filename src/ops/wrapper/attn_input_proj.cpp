@@ -80,7 +80,7 @@ void validate_policy(LinearPolicy policy) {
 
 void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                             Tensor& k, Tensor& v, LinearPolicy policy, WorkspaceArena* workspace,
-                            cudaStream_t stream) {
+                            hipStream_t stream) {
     validate_policy(policy);
     if (weight.qtype == QType::BF16_CTRL) {
         constexpr std::int32_t kHidden = 5120;
@@ -103,6 +103,9 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
     }
 
     if (weight.qtype == QType::NVFP4) {
+#if defined(__HIP_PLATFORM_AMD__)
+        throw std::invalid_argument("attn_input_proj: NVFP4 weights are not supported on HIP");
+#else
         constexpr std::int32_t kHidden = 5120;
         constexpr std::int32_t kQRows  = 6144;
         constexpr std::int32_t kKvRows = 1024;
@@ -123,6 +126,7 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
         }
         detail::nvfp4_attn_input_dispatch(x, weight, q, gate, k, v, policy, workspace, stream);
         return;
+#endif
     }
 
     constexpr std::int32_t kHidden = 2048;
@@ -161,12 +165,16 @@ std::size_t attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::in
         }
         return 0;
     case QType::NVFP4:
+#if defined(__HIP_PLATFORM_AMD__)
+        throw std::invalid_argument("attn_input_proj workspace: NVFP4 weights are not supported on HIP");
+#else
         if (parent_rows != detail::Nvfp4AttnInputGeometry::kOutputRows ||
             input_rows != detail::Nvfp4AttnInputGeometry::kInputRows ||
             (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA4)) {
             throw std::invalid_argument("attn_input_proj workspace: unsupported NVFP4 profile");
         }
         return detail::nvfp4_attn_input_workspace_capacity_bytes(policy, min_tokens, max_tokens);
+#endif
     case QType::W8G32_F16S:
         if (parent_rows != 9216 || input_rows != 2048 || policy != LinearPolicy::A16Only) {
             throw std::invalid_argument("attn_input_proj workspace: unsupported W8 profile");
@@ -188,7 +196,7 @@ std::size_t attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::in
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
                      const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
-                     cudaStream_t stream) {
+                     hipStream_t stream) {
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kQRows  = 6144;
     constexpr std::int32_t kKvRows = 1024;
@@ -207,19 +215,19 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight, Tensor& q,
                      Tensor& gate, Tensor& k, Tensor& v, LinearPolicy policy,
-                     WorkspaceArena& workspace, cudaStream_t stream) {
+                     WorkspaceArena& workspace, hipStream_t stream) {
     dispatch_single_parent(x, query_key_gate_value_weight, q, gate, k, v, policy, &workspace,
                            stream);
 }
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight, Tensor& q,
-                     Tensor& gate, Tensor& k, Tensor& v, cudaStream_t stream) {
+                     Tensor& gate, Tensor& k, Tensor& v, hipStream_t stream) {
     dispatch_single_parent(x, query_key_gate_value_weight, q, gate, k, v, LinearPolicy::A16Only,
                            nullptr, stream);
 }
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tensor& q, Tensor& k,
-                     Tensor& v, cudaStream_t stream) {
+                     Tensor& v, hipStream_t stream) {
     constexpr std::int32_t kHidden = 2048;
     constexpr std::int32_t kQRows  = 4096;
     constexpr std::int32_t kKvRows = 1024;

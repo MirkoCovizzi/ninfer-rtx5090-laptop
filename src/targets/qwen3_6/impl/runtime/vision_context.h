@@ -110,7 +110,7 @@ private:
     std::uint32_t final_item_ = 0;
     bool final_item_encoded_  = false;
     bool payload_released_    = false;
-    std::vector<CudaEventTimer> timers_;
+    std::vector<HipEventTimer> timers_;
 };
 
 } // namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS::schedule

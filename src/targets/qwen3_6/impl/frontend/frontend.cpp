@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include <ninfer/targets/qwen3_6/frontend.h>
 
 #include <ninfer/targets/qwen3_6/frontend_resources.h>

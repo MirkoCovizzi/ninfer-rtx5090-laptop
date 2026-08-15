@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - causal_conv1d launcher: grid/block/stream configuration + kernel launch.
 #include "ops/launcher/causal_conv1d.h"
 
 #include "ops/common/math.h"
 #include "ops/kernel/causal_conv1d.cuh"
-#include "core/device.h" // CUDA_CHECK
+#include "core/device.h" // HIP_CHECK
 
 #include <algorithm>
 #include <cstdint>
@@ -37,7 +38,7 @@ int prefill_output_grid_for(std::int32_t C, std::int32_t T, int block) {
 
 void causal_conv1d_prefill_launch(const Tensor& x, const Tensor& weight,
                                   const Tensor& conv_state_in, Tensor& conv_state_out, Tensor& out,
-                                  cudaStream_t stream) {
+                                  hipStream_t stream) {
     constexpr int kOutputBlock  = 256;
     constexpr int kChannelBlock = 256;
     constexpr int kPairBlock    = 256;
@@ -49,85 +50,85 @@ void causal_conv1d_prefill_launch(const Tensor& x, const Tensor& weight,
     const auto out_state_addr   = reinterpret_cast<std::uintptr_t>(conv_state_out.data);
     const auto out_addr         = reinterpret_cast<std::uintptr_t>(out.data);
 
-    if (((x_addr | w_addr | in_addr | out_state_addr | out_addr) & (alignof(__nv_bfloat162) - 1)) ==
+    if (((x_addr | w_addr | in_addr | out_state_addr | out_addr) & (alignof(__hip_bfloat162) - 1)) ==
             0 &&
         (C & 1) == 0) {
         causal_conv1d_prefill_pairs_kernel<<<prefill_output_grid_for(C / 2, T, kPairBlock),
                                              kPairBlock, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.data),
-            static_cast<const __nv_bfloat16*>(conv_state_in.data),
-            static_cast<__nv_bfloat16*>(out.data), C, T);
-        CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.data),
+            static_cast<const __hip_bfloat16*>(conv_state_in.data),
+            static_cast<__hip_bfloat16*>(out.data), C, T);
+        HIP_CHECK(hipGetLastError());
     } else {
         causal_conv1d_prefill_kernel<<<prefill_output_grid_for(C, T, kOutputBlock), kOutputBlock, 0,
                                        stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.data),
-            static_cast<const __nv_bfloat16*>(conv_state_in.data),
-            static_cast<__nv_bfloat16*>(out.data), C, T);
-        CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.data),
+            static_cast<const __hip_bfloat16*>(conv_state_in.data),
+            static_cast<__hip_bfloat16*>(out.data), C, T);
+        HIP_CHECK(hipGetLastError());
     }
 
     causal_conv1d_prefill_state_kernel<<<grid_for(C, kChannelBlock, "prefill state"), kChannelBlock,
                                          0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data),
-        static_cast<const __nv_bfloat16*>(conv_state_in.data),
-        static_cast<__nv_bfloat16*>(conv_state_out.data), C, T);
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<const __hip_bfloat16*>(x.data),
+        static_cast<const __hip_bfloat16*>(conv_state_in.data),
+        static_cast<__hip_bfloat16*>(conv_state_out.data), C, T);
+    HIP_CHECK(hipGetLastError());
 }
 
 void causal_conv1d_smallt_launch(const Tensor& x, const Tensor& weight, const Tensor& conv_state_in,
-                                 Tensor& conv_state_out, Tensor& out, cudaStream_t stream) {
+                                 Tensor& conv_state_out, Tensor& out, hipStream_t stream) {
     const std::int32_t C = x.ne[0];
     const std::int32_t T = x.ne[1];
     const dim3 block(kCausalConvChannelTile, static_cast<unsigned int>(T));
     const int grid = grid_for(C, kCausalConvChannelTile, "small-T");
 
     causal_conv1d_smallt_kernel<<<grid, block, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const __nv_bfloat16*>(weight.data),
-        static_cast<const __nv_bfloat16*>(conv_state_in.data),
-        static_cast<__nv_bfloat16*>(conv_state_out.data), static_cast<__nv_bfloat16*>(out.data), C,
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const __hip_bfloat16*>(weight.data),
+        static_cast<const __hip_bfloat16*>(conv_state_in.data),
+        static_cast<__hip_bfloat16*>(conv_state_out.data), static_cast<__hip_bfloat16*>(out.data), C,
         T);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void causal_conv1d_sequence_launch(const Tensor& x, const Tensor& weight,
                                    const Tensor& conv_state_in, Tensor& conv_state_out, Tensor& out,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     const std::int32_t C = x.ne[0];
     const std::int32_t T = x.ne[1];
     const int block      = T == 1 ? 256 : 32;
 
     causal_conv1d_sequence_kernel<<<grid_for(C, block, "sequence"), block, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const __nv_bfloat16*>(weight.data),
-        static_cast<const __nv_bfloat16*>(conv_state_in.data),
-        static_cast<__nv_bfloat16*>(conv_state_out.data), static_cast<__nv_bfloat16*>(out.data), C,
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const __hip_bfloat16*>(weight.data),
+        static_cast<const __hip_bfloat16*>(conv_state_in.data),
+        static_cast<__hip_bfloat16*>(conv_state_out.data), static_cast<__hip_bfloat16*>(out.data), C,
         T);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void causal_conv1d_decode_launch(const Tensor& x, const Tensor& weight, const Tensor& conv_state_in,
-                                 Tensor& conv_state_out, Tensor& out, cudaStream_t stream) {
+                                 Tensor& conv_state_out, Tensor& out, hipStream_t stream) {
     constexpr int kBlock = 256;
     const std::int32_t C = x.ne[0];
 
     if (conv_state_in.data == conv_state_out.data) {
         causal_conv1d_decode_kernel<<<grid_for(C, kBlock, "decode"), kBlock, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.data),
-            static_cast<__nv_bfloat16*>(conv_state_out.data), static_cast<__nv_bfloat16*>(out.data),
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.data),
+            static_cast<__hip_bfloat16*>(conv_state_out.data), static_cast<__hip_bfloat16*>(out.data),
             C);
     } else {
         causal_conv1d_decode_distinct_kernel<<<grid_for(C, kBlock, "distinct decode"), kBlock, 0,
                                                stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.data),
-            static_cast<const __nv_bfloat16*>(conv_state_in.data),
-            static_cast<__nv_bfloat16*>(conv_state_out.data), static_cast<__nv_bfloat16*>(out.data),
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.data),
+            static_cast<const __hip_bfloat16*>(conv_state_in.data),
+            static_cast<__hip_bfloat16*>(conv_state_out.data), static_cast<__hip_bfloat16*>(out.data),
             C);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <bool Masked>
@@ -135,7 +136,7 @@ void launch_batched_sequence_snapshot(const Tensor& x, const Tensor& weight, Ten
                                       const Tensor& valid_columns,
                                       const Tensor& initial_state_slots,
                                       const Tensor& snapshot_base_slots, Tensor& out,
-                                      std::int64_t slot_stride, cudaStream_t stream) {
+                                      std::int64_t slot_stride, hipStream_t stream) {
     const std::int32_t C     = x.ne[0];
     const std::int32_t width = x.ne[1];
     const std::int32_t batch = x.ne[2];
@@ -143,19 +144,19 @@ void launch_batched_sequence_snapshot(const Tensor& x, const Tensor& weight, Ten
     const dim3 grid(grid_for(C, block, "batched sequence snapshot"),
                     static_cast<unsigned int>(batch));
     causal_conv1d_batched_sequence_snapshot_kernel<Masked><<<grid, block, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const __nv_bfloat16*>(weight.data),
-        static_cast<__nv_bfloat16*>(conv_states.data),
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const __hip_bfloat16*>(weight.data),
+        static_cast<__hip_bfloat16*>(conv_states.data),
         Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr,
         static_cast<const std::int32_t*>(initial_state_slots.data),
         static_cast<const std::int32_t*>(snapshot_base_slots.data),
-        static_cast<__nv_bfloat16*>(out.data), C, width, slot_stride);
+        static_cast<__hip_bfloat16*>(out.data), C, width, slot_stride);
 }
 
 template <bool Masked>
 void launch_batched_smallt_snapshot(const Tensor& x, const Tensor& weight, Tensor& conv_states,
                                     const Tensor& valid_columns, const Tensor& initial_state_slots,
                                     const Tensor& snapshot_base_slots, Tensor& out,
-                                    std::int64_t slot_stride, cudaStream_t stream) {
+                                    std::int64_t slot_stride, hipStream_t stream) {
     const std::int32_t C     = x.ne[0];
     const std::int32_t width = x.ne[1];
     const std::int32_t batch = x.ne[2];
@@ -163,18 +164,18 @@ void launch_batched_smallt_snapshot(const Tensor& x, const Tensor& weight, Tenso
     const dim3 grid(grid_for(C, kCausalConvChannelTile, "batched small-T snapshot"),
                     static_cast<unsigned int>(batch));
     causal_conv1d_batched_snapshot_smallt_kernel<Masked><<<grid, block, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const __nv_bfloat16*>(weight.data),
-        static_cast<__nv_bfloat16*>(conv_states.data),
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const __hip_bfloat16*>(weight.data),
+        static_cast<__hip_bfloat16*>(conv_states.data),
         Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr,
         static_cast<const std::int32_t*>(initial_state_slots.data),
         static_cast<const std::int32_t*>(snapshot_base_slots.data),
-        static_cast<__nv_bfloat16*>(out.data), C, width, slot_stride);
+        static_cast<__hip_bfloat16*>(out.data), C, width, slot_stride);
 }
 
 void causal_conv1d_snapshot_launch(const Tensor& x, const Tensor& weight, Tensor& conv_states,
                                    const Tensor& valid_columns, const Tensor& initial_state_slots,
                                    const Tensor& snapshot_base_slots, Tensor& out,
-                                   cudaStream_t stream) {
+                                   hipStream_t stream) {
     const std::int32_t C = x.ne[0];
     const std::int32_t T = x.ne[1];
     const std::int32_t B = x.ne[2];
@@ -185,32 +186,32 @@ void causal_conv1d_snapshot_launch(const Tensor& x, const Tensor& weight, Tensor
         constexpr int kBlock = 256;
         causal_conv1d_snapshot_decode_kernel<<<grid_for(C, kBlock, "snapshot decode"), kBlock, 0,
                                                stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.data),
-            static_cast<__nv_bfloat16*>(conv_states.data),
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.data),
+            static_cast<__hip_bfloat16*>(conv_states.data),
             static_cast<const std::int32_t*>(initial_state_slots.data),
             static_cast<const std::int32_t*>(snapshot_base_slots.data),
-            static_cast<__nv_bfloat16*>(out.data), C, slot_stride);
+            static_cast<__hip_bfloat16*>(out.data), C, slot_stride);
     } else if (B == 1 && valid_columns.data == nullptr && T <= kCausalConvParallelMaxTokens) {
         const dim3 block(kCausalConvChannelTile, static_cast<unsigned int>(T));
         const int grid = grid_for(C, kCausalConvChannelTile, "small-T snapshot");
         causal_conv1d_snapshot_smallt_kernel<<<grid, block, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.data),
-            static_cast<__nv_bfloat16*>(conv_states.data),
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.data),
+            static_cast<__hip_bfloat16*>(conv_states.data),
             static_cast<const std::int32_t*>(initial_state_slots.data),
             static_cast<const std::int32_t*>(snapshot_base_slots.data),
-            static_cast<__nv_bfloat16*>(out.data), C, T, slot_stride);
+            static_cast<__hip_bfloat16*>(out.data), C, T, slot_stride);
     } else if (B == 1 && valid_columns.data == nullptr) {
         constexpr int kBlock = 32;
         causal_conv1d_sequence_snapshot_kernel<<<grid_for(C, kBlock, "sequence snapshot"), kBlock,
                                                  0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.data),
-            static_cast<__nv_bfloat16*>(conv_states.data),
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.data),
+            static_cast<__hip_bfloat16*>(conv_states.data),
             static_cast<const std::int32_t*>(initial_state_slots.data),
             static_cast<const std::int32_t*>(snapshot_base_slots.data),
-            static_cast<__nv_bfloat16*>(out.data), C, T, slot_stride);
+            static_cast<__hip_bfloat16*>(out.data), C, T, slot_stride);
     } else if (T == 1) {
         if (valid_columns.data == nullptr) {
             launch_batched_sequence_snapshot<false>(x, weight, conv_states, valid_columns,
@@ -240,7 +241,7 @@ void causal_conv1d_snapshot_launch(const Tensor& x, const Tensor& weight, Tensor
                                                initial_state_slots, snapshot_base_slots, out,
                                                slot_stride, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

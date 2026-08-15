@@ -1,10 +1,12 @@
+#include "hip/hip_runtime.h"
 #include "ops/gdn_input_proj/nvfp4/nvfp4_gdn_snapshot_plan.h"
 
 #include "core/device.h"
 #include "ops/gdn_input_proj/gdn_conv.cuh"
 #include "ops/gdn_input_proj/nvfp4/nvfp4_gdn_conv_output.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -13,10 +15,10 @@ namespace {
 
 template <int WarpsPerCta, int TokenTile, class Publish>
 __global__ __launch_bounds__(WarpsPerCta * 32) void nvfp4_gdn_conv_post_kernel(
-    const __nv_bfloat16* __restrict__ projected, const __nv_bfloat16* __restrict__ conv_weight,
-    const __nv_bfloat16* __restrict__ conv_states, const std::int32_t* __restrict__ initial_slot,
-    const std::int32_t* __restrict__ valid_columns, __nv_bfloat16* __restrict__ query,
-    __nv_bfloat16* __restrict__ key, __nv_bfloat16* __restrict__ value, std::int32_t tokens,
+    const __hip_bfloat16* __restrict__ projected, const __hip_bfloat16* __restrict__ conv_weight,
+    const __hip_bfloat16* __restrict__ conv_states, const std::int32_t* __restrict__ initial_slot,
+    const std::int32_t* __restrict__ valid_columns, __hip_bfloat16* __restrict__ query,
+    __hip_bfloat16* __restrict__ key, __hip_bfloat16* __restrict__ value, std::int32_t tokens,
     Publish publish) {
     static_assert((kNvfp4GdnChannels % 32) == 0);
 
@@ -54,7 +56,7 @@ __global__ __launch_bounds__(WarpsPerCta * 32) void nvfp4_gdn_conv_post_kernel(
     const float w2 = shared.weight[2][lane];
     const float w3 = shared.weight[3][lane];
 
-    __nv_bfloat16* output;
+    __hip_bfloat16* output;
     std::int32_t output_rows;
     std::int32_t output_row;
     if (row < kNvfp4GdnQueryRows) {
@@ -113,20 +115,20 @@ __global__ __launch_bounds__(WarpsPerCta * 32) void nvfp4_gdn_conv_post_kernel(
 template <class Publish>
 void launch(const Tensor& projected, const Tensor& conv_weight, const Tensor& conv_states,
             const Tensor& valid_columns, const Tensor& initial_slot, Tensor& query, Tensor& key,
-            Tensor& value, Publish publish, cudaStream_t stream) {
+            Tensor& value, Publish publish, hipStream_t stream) {
     constexpr int kWarpsPerCta = 32;
     constexpr int kTokenTile   = 8;
     constexpr int kBlocks      = kNvfp4GdnChannels / 32;
     nvfp4_gdn_conv_post_kernel<kWarpsPerCta, kTokenTile><<<kBlocks, kWarpsPerCta * 32, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(projected.data),
-        static_cast<const __nv_bfloat16*>(conv_weight.data),
-        static_cast<const __nv_bfloat16*>(conv_states.data),
+        static_cast<const __hip_bfloat16*>(projected.data),
+        static_cast<const __hip_bfloat16*>(conv_weight.data),
+        static_cast<const __hip_bfloat16*>(conv_states.data),
         static_cast<const std::int32_t*>(initial_slot.data),
         valid_columns.data == nullptr ? nullptr
                                       : static_cast<const std::int32_t*>(valid_columns.data),
-        static_cast<__nv_bfloat16*>(query.data), static_cast<__nv_bfloat16*>(key.data),
-        static_cast<__nv_bfloat16*>(value.data), projected.ne[1], publish);
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<__hip_bfloat16*>(query.data), static_cast<__hip_bfloat16*>(key.data),
+        static_cast<__hip_bfloat16*>(value.data), projected.ne[1], publish);
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
@@ -135,9 +137,9 @@ void nvfp4_gdn_snapshot_post_launch(const Tensor& projected, const Tensor& conv_
                                     Tensor& conv_states, const Tensor& valid_columns,
                                     const Tensor& initial_slot, const Tensor& snapshot_base_slot,
                                     Tensor& query, Tensor& key, Tensor& value,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     launch(projected, conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
-           SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
+           SnapshotHistoryPublish{static_cast<__hip_bfloat16*>(conv_states.data),
                                   static_cast<const std::int32_t*>(snapshot_base_slot.data),
                                   kNvfp4GdnChannels},
            stream);
@@ -146,7 +148,7 @@ void nvfp4_gdn_snapshot_post_launch(const Tensor& projected, const Tensor& conv_
 void nvfp4_gdn_record_post_launch(const Tensor& conv_record, const Tensor& conv_weight,
                                   const Tensor& conv_states, const Tensor& valid_columns,
                                   const Tensor& initial_slot, Tensor& query, Tensor& key,
-                                  Tensor& value, cudaStream_t stream) {
+                                  Tensor& value, hipStream_t stream) {
     launch(conv_record, conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
            NoHistoryPublish{}, stream);
 }

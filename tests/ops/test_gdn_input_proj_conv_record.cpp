@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gdn_input_proj.h"
 
 #include "ops/input_projection_test_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -150,7 +151,7 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
                     snapshot_k, snapshot_v, snapshot_z_view, snapshot_workspace);
     record_launch(x, conv_weight, record_state_view, valid, initial, conv_record_view, record_q,
                   record_k, record_v, record_z_view, record_workspace);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = 0;
     failures +=
@@ -335,7 +336,7 @@ int run_nvfp4() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

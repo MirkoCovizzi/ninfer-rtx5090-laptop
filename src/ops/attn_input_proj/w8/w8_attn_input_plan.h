@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -40,12 +40,12 @@ bool w8_attn_input_admits(const W8AttnInputProblem& problem) noexcept;
 W8AttnInputPlan w8_attn_input_resolve_plan(const W8AttnInputProblem& problem);
 
 void w8_attn_input_execute_plan(const W8AttnInputPlan& plan, const Tensor& x, const Weight& weight,
-                                Tensor& q, Tensor& gate, Tensor& k, Tensor& v, cudaStream_t stream);
+                                Tensor& q, Tensor& gate, Tensor& k, Tensor& v, hipStream_t stream);
 void w8_attn_input_execute_plan(const W8AttnInputPlan& plan, const Tensor& x, const Weight& weight,
-                                Tensor& q, Tensor& k, Tensor& v, cudaStream_t stream);
+                                Tensor& q, Tensor& k, Tensor& v, hipStream_t stream);
 void w8_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                            Tensor& k, Tensor& v, cudaStream_t stream);
+                            Tensor& k, Tensor& v, hipStream_t stream);
 void w8_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Tensor& v,
-                            cudaStream_t stream);
+                            hipStream_t stream);
 
 } // namespace ninfer::ops::detail

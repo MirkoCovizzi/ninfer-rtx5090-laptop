@@ -3,7 +3,7 @@
 #include "core/arena.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -60,6 +60,6 @@ enum class SparseMoeEpilogue : std::uint8_t {
  * graph-stable transient storage and carries no state beyond the call.
  */
 void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilogue epilogue,
-                Tensor& destination, WorkspaceArena& workspace, cudaStream_t stream);
+                Tensor& destination, WorkspaceArena& workspace, hipStream_t stream);
 
 } // namespace ninfer::ops

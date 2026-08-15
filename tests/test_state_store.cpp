@@ -1,7 +1,7 @@
 #include "core/device.h"
 #include "core/linear_attention_state.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <iostream>
@@ -37,8 +37,8 @@ int fail(const char* message) {
     return 1;
 }
 
-bool cuda_unavailable(cudaError_t err) {
-    return err == cudaErrorNoDevice || err == cudaErrorInsufficientDriver;
+bool hip_unavailable(hipError_t err) {
+    return err == hipErrorNoDevice || err == hipErrorInsufficientDriver;
 }
 
 int expect_size(std::size_t actual, std::size_t expected, const char* label) {
@@ -62,7 +62,7 @@ int check_shape(const ninfer::Tensor& tensor, const std::int32_t (&expected)[4],
 
 int expect_device_byte(const ninfer::Tensor& tensor, unsigned char expected, const char* label) {
     std::vector<unsigned char> host(tensor.bytes());
-    CUDA_CHECK(cudaMemcpy(host.data(), tensor.data, host.size(), cudaMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(host.data(), tensor.data, host.size(), hipMemcpyDeviceToHost));
     for (unsigned char value : host) {
         if (value != expected) {
             std::cerr << label << " expected byte 0x" << std::hex << static_cast<int>(expected)
@@ -77,13 +77,13 @@ int expect_device_byte(const ninfer::Tensor& tensor, unsigned char expected, con
 
 int main() {
     int count                   = 0;
-    const cudaError_t count_err = cudaGetDeviceCount(&count);
-    if (cuda_unavailable(count_err)) {
+    const hipError_t count_err = hipGetDeviceCount(&count);
+    if (hip_unavailable(count_err)) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
-    if (count_err != cudaSuccess) {
-        std::cerr << "cudaGetDeviceCount failed: " << cudaGetErrorString(count_err) << '\n';
+    if (count_err != hipSuccess) {
+        std::cerr << "hipGetDeviceCount failed: " << hipGetErrorString(count_err) << '\n';
         return 1;
     }
     if (count == 0) {
@@ -95,7 +95,7 @@ int main() {
     ninfer::DeviceContext ctx(0);
     auto state_plan = plan_state(3, 10, 3, 4, 5, 6);
     ninfer::DeviceArena state_arena(state_plan.bytes);
-    CUDA_CHECK(cudaMemset(state_arena.base(), 0x4a, state_arena.capacity()));
+    HIP_CHECK(hipMemset(state_arena.base(), 0x4a, state_arena.capacity()));
     ninfer::LinearAttentionStatePool state({state_arena.base(), state_arena.capacity()},
                                            state_plan.layout);
 
@@ -143,7 +143,7 @@ int main() {
 
     auto slotted_plan = plan_state(2, 10, 3, 4, 5, 6, 3);
     ninfer::DeviceArena slotted_arena(slotted_plan.bytes);
-    CUDA_CHECK(cudaMemset(slotted_arena.base(), 0, slotted_arena.capacity()));
+    HIP_CHECK(hipMemset(slotted_arena.base(), 0, slotted_arena.capacity()));
     ninfer::LinearAttentionStatePool slotted({slotted_arena.base(), slotted_arena.capacity()},
                                              slotted_plan.layout);
     failures += expect_size(slotted.slot_count(), 3, "slotted.slot_count");
@@ -158,12 +158,12 @@ int main() {
     ninfer::Tensor recurrent1        = slotted.recurrent_slot(0, 1);
     ninfer::Tensor conv1_layer1      = slotted.conv_slot(1, 1);
     ninfer::Tensor recurrent1_layer1 = slotted.recurrent_slot(1, 1);
-    CUDA_CHECK(cudaMemset(conv0.data, 0x7a, conv0.bytes()));
-    CUDA_CHECK(cudaMemset(conv1.data, 0x6b, conv1.bytes()));
-    CUDA_CHECK(cudaMemset(recurrent0.data, 0x5c, recurrent0.bytes()));
-    CUDA_CHECK(cudaMemset(recurrent1.data, 0x4d, recurrent1.bytes()));
-    CUDA_CHECK(cudaMemset(conv1_layer1.data, 0x3c, conv1_layer1.bytes()));
-    CUDA_CHECK(cudaMemset(recurrent1_layer1.data, 0x2d, recurrent1_layer1.bytes()));
+    HIP_CHECK(hipMemset(conv0.data, 0x7a, conv0.bytes()));
+    HIP_CHECK(hipMemset(conv1.data, 0x6b, conv1.bytes()));
+    HIP_CHECK(hipMemset(recurrent0.data, 0x5c, recurrent0.bytes()));
+    HIP_CHECK(hipMemset(recurrent1.data, 0x4d, recurrent1.bytes()));
+    HIP_CHECK(hipMemset(conv1_layer1.data, 0x3c, conv1_layer1.bytes()));
+    HIP_CHECK(hipMemset(recurrent1_layer1.data, 0x2d, recurrent1_layer1.bytes()));
 
     slotted.copy_slot(1, 2, ctx.stream);
     ctx.synchronize();

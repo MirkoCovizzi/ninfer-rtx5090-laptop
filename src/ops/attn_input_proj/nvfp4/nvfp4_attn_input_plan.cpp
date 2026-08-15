@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/attn_input_proj/nvfp4/nvfp4_attn_input_plan.h"
 
 #include "ops/linear/nvfp4/nvfp4_config.h"
@@ -25,7 +26,7 @@ Nvfp4AttnInputRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tensor& k,
-                Tensor& v, cudaStream_t stream) {
+                Tensor& v, hipStream_t stream) {
     constexpr std::int32_t kChunk  = kNvfp4LastSmallT;
     constexpr std::int32_t kQRows  = 6144;
     constexpr std::int32_t kKvRows = 1024;
@@ -71,7 +72,7 @@ std::size_t nvfp4_attn_input_workspace_capacity_bytes(LinearPolicy policy, std::
 
 void nvfp4_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                                Tensor& k, Tensor& v, LinearPolicy policy, WorkspaceArena* workspace,
-                               cudaStream_t stream) {
+                               hipStream_t stream) {
     if (resolve_route(policy, x.ne[1]) == Nvfp4AttnInputRoute::A16) {
         launch_a16(x, weight, q, gate, k, v, stream);
         return;

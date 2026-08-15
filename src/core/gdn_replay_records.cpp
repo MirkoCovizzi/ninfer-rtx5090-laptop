@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "core/gdn_replay_records.h"
 
 #include <array>

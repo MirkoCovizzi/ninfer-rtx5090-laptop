@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 

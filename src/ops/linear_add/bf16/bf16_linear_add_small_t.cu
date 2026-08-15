@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
 
 #include "core/device.h"
@@ -12,34 +13,34 @@
 namespace ninfer::ops::detail {
 namespace {
 
-using Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+using Launch = void (*)(const Tensor&, const Weight&, Tensor&, hipStream_t);
 
 struct Bf16LinearAddSmallTOutput {
-    __nv_bfloat16* residual;
+    __hip_bfloat16* residual;
     std::int32_t rows;
 
     __device__ __forceinline__ void store(std::int32_t row, std::int32_t token,
                                           float accumulator) const {
-        __nv_bfloat16* destination = residual + static_cast<std::int64_t>(token) * rows + row;
+        __hip_bfloat16* destination = residual + static_cast<std::int64_t>(token) * rows + row;
         const float residual_value = __bfloat162float(*destination);
         *destination               = __float2bfloat16_rn(accumulator + residual_value);
     }
 };
 
 template <int ActiveTokens>
-void launch_exact(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
+void launch_exact(const Tensor& x, const Weight& weight, Tensor& residual, hipStream_t stream) {
     using Geometry = Bf16GemvGeometry<5120, 6144>;
     using Schedule = typename Bf16LinearSmallTProductionSchedule<Geometry, ActiveTokens>::Type;
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
 
-    const Bf16LinearAddSmallTOutput output{static_cast<__nv_bfloat16*>(residual.data),
+    const Bf16LinearAddSmallTOutput output{static_cast<__hip_bfloat16*>(residual.data),
                                            Geometry::kOutputRows};
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
     bf16_small_t_inner_kernel<Geometry, ActiveTokens, Schedule>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const __nv_bfloat16*>(weight.qdata), output);
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data),
+            static_cast<const __hip_bfloat16*>(weight.qdata), output);
+    HIP_CHECK(hipGetLastError());
 }
 
 template <std::size_t... Offsets>
@@ -54,7 +55,7 @@ constexpr auto kLaunchers = make_launchers(
 } // namespace
 
 void bf16_linear_add_small_t_launch(const Tensor& x, const Weight& weight, Tensor& residual,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     kLaunchers[static_cast<std::size_t>(x.ne[1] - kBf16LinearAddSmallTMinTokens)](x, weight,
                                                                                   residual, stream);
 }

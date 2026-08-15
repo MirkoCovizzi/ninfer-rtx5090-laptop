@@ -32,7 +32,7 @@ Bf16Launch select_bf16_launch(std::int32_t n, std::int32_t k, std::int32_t t, Li
 }
 
 void bf16_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
-                   cudaStream_t stream) {
+                   hipStream_t stream) {
     const Bf16Launch launch = select_bf16_launch(weight.n, weight.k, x.ne[1], policy);
     launch(x, weight, out, stream);
 }

@@ -47,7 +47,7 @@ int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::ui
     Tensor y_tensor(device_y.data(), DType::BF16, {rows, columns});
     Tensor x_tensor(device_x.data(), DType::BF16, {rows, columns});
     ops::residual_add(y_tensor, x_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_x.data(), count), expected,
                                     residual_add_bf16_criterion());
@@ -75,7 +75,7 @@ int run_cancellation_case() {
     Tensor y_tensor(device_y.data(), DType::BF16, {static_cast<int>(y.size())});
     Tensor x_tensor(device_x.data(), DType::BF16, {static_cast<int>(x.size())});
     ops::residual_add(y_tensor, x_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_pointwise("residual_add cancellation",
                                     from_device_bf16(device_x.data(), expected.size()), expected,
@@ -90,7 +90,7 @@ int run_cancellation_case() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

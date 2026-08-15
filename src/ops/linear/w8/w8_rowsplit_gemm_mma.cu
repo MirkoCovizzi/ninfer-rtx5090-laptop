@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear/w8/w8_rowsplit_gemm_mma.cuh"
 
 #include "core/device.h"
@@ -12,22 +13,22 @@ namespace ninfer::ops::detail {
 namespace {
 
 template <class Schedule, bool Full>
-void launch_slice(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_slice(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     const std::int32_t rows     = w.n;
     const std::int32_t k        = w.k;
     const std::int32_t cols     = x.ne[1];
     const std::int32_t padded_k = w.padded_shape[1];
     const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::BM)),
                     static_cast<unsigned>(div_up(cols, Schedule::BN)), 1u);
-    const W8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), rows};
+    const W8ContiguousOutput output{static_cast<__hip_bfloat16*>(out.data), rows};
     w8_rowsplit_gemm_mma_kernel<Schedule, Full><<<grid, Schedule::THREADS, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.scales), output, rows, k, cols, padded_k);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Schedule>
-void launch_route(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_route(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     const bool full = (w.n % Schedule::BM) == 0 && (x.ne[1] % Schedule::BN) == 0 &&
                       w.k == w.padded_shape[1] && (w.k % Schedule::BK) == 0;
     for_each_token_slice(x.ne[1], Schedule::BN, [&](std::int32_t offset, std::int32_t count) {
@@ -43,7 +44,7 @@ void launch_route(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t st
 
 template <std::int32_t TileCols>
 void launch_exact_tail(W8Launch prefix_launch, const Tensor& x, const Weight& w, Tensor& out,
-                       cudaStream_t stream) {
+                       hipStream_t stream) {
     const std::int32_t full_cols = (x.ne[1] / TileCols) * TileCols;
     if (full_cols <= 0) {
         throw std::invalid_argument("w8 exact-tail route requires a non-empty MMA prefix");
@@ -86,7 +87,7 @@ using MmaR64x16C48K128A1 = W8RowSplitMmaGemmSchedule<64, 48, 16, 24, 2, 2, 128, 
 } // namespace
 
 #define NINFER_W8_MMA_LAUNCHER(Name, Schedule)                                                     \
-    void Name(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {                \
+    void Name(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {                \
         launch_route<Schedule>(x, w, out, stream);                                                 \
     }
 
@@ -108,7 +109,7 @@ NINFER_W8_MMA_LAUNCHER(launch_w8_mma_r64x16_c48_k128_a1, MmaR64x16C48K128A1)
 #undef NINFER_W8_MMA_LAUNCHER
 
 #define NINFER_W8_EXACT_LAUNCHER(Name, Prefix, TileCols)                                           \
-    void Name(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {                \
+    void Name(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {                \
         launch_exact_tail<TileCols>(Prefix, x, w, out, stream);                                    \
     }
 

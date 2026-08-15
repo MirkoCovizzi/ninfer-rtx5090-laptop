@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "targets/qwen3_6_27b/impl/variant.h"
 
 #include "ninfer/ops/attn_input_proj.h"
@@ -112,7 +113,7 @@ std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t,
 void Variant::attention_projection(const Tensor& hidden,
                                    const FullAttentionProjectionWeights& weights, Tensor& query,
                                    Tensor& gate, Tensor& key, Tensor& value, qwen3_6::TextPhase,
-                                   WorkspaceArena& workspace, cudaStream_t stream) {
+                                   WorkspaceArena& workspace, hipStream_t stream) {
     if (const auto* split = std::get_if<SplitAttentionProjectionPayload>(&weights)) {
         ops::attn_input_proj(hidden, split->query_key, split->gate_value, query, gate, key, value,
                              stream);
@@ -125,14 +126,14 @@ void Variant::attention_projection(const Tensor& hidden,
 
 void Variant::attention_output_projection(const Tensor& attention, const Weight& weight,
                                           Tensor& residual, qwen3_6::TextPhase,
-                                          WorkspaceArena& workspace, cudaStream_t stream) {
+                                          WorkspaceArena& workspace, hipStream_t stream) {
     ops::linear_add(attention, weight, residual, text_policy(weight), workspace, stream);
 }
 
 void Variant::mtp_attention_projection(const Tensor& hidden,
                                        const MtpAttentionProjectionWeights& weights, Tensor& query,
                                        Tensor& gate, Tensor& key, Tensor& value,
-                                       WorkspaceArena& workspace, cudaStream_t stream) {
+                                       WorkspaceArena& workspace, hipStream_t stream) {
     auto scope     = workspace.scope();
     const int cols = hidden.ne[1];
     Tensor packed  = workspace.alloc(DType::BF16, {TextConfig::mtp_attention_input_rows, cols});
@@ -145,20 +146,20 @@ void Variant::mtp_attention_projection(const Tensor& hidden,
 }
 
 void Variant::mtp_kv_projection(const Tensor& hidden, const MtpAttentionProjectionWeights& weights,
-                                Tensor& key, Tensor& value, WorkspaceArena&, cudaStream_t stream) {
+                                Tensor& key, Tensor& value, WorkspaceArena&, hipStream_t stream) {
     ops::linear_pair(hidden, weights.key, weights.value, key, value, stream);
 }
 
 void Variant::mtp_q_gate_projection(const Tensor& hidden,
                                     const MtpAttentionProjectionWeights& weights, Tensor& query,
-                                    Tensor& gate, WorkspaceArena&, cudaStream_t stream) {
+                                    Tensor& gate, WorkspaceArena&, hipStream_t stream) {
     ops::linear(hidden, weights.query, query, stream);
     ops::linear(hidden, weights.output_gate, gate, stream);
 }
 
 void Variant::gdn_input_projection(const Tensor& hidden, const GdnProjectionWeights& weights,
                                    Tensor& qkv, Tensor& output_gate, qwen3_6::TextPhase,
-                                   WorkspaceArena& workspace, cudaStream_t stream) {
+                                   WorkspaceArena& workspace, hipStream_t stream) {
     Tensor output_gate_flat =
         output_gate.view({TextConfig::value_dim, static_cast<int>(hidden.ne[1])});
     if (const auto* split =
@@ -177,7 +178,7 @@ void Variant::gdn_input_projection_snapshot(
     const Tensor& hidden, const GdnProjectionWeights& weights, const Tensor& conv_weight,
     Tensor& conv_states, const Tensor& valid_columns, const Tensor& initial_slot,
     const Tensor& snapshot_base_slot, Tensor& query, Tensor& key, Tensor& value,
-    Tensor& output_gate, qwen3_6::TextPhase, WorkspaceArena& workspace, cudaStream_t stream) {
+    Tensor& output_gate, qwen3_6::TextPhase, WorkspaceArena& workspace, hipStream_t stream) {
     Tensor output_gate_view = output_gate.view({TextConfig::value_dim, hidden.ne[1], hidden.ne[2]});
     if (const auto* split =
             std::get_if<SplitGdnInputProjectionPayload>(&weights.input_projection)) {
@@ -199,7 +200,7 @@ void Variant::gdn_input_projection_record(const Tensor& hidden, const GdnProject
                                           const Tensor& valid_columns, const Tensor& initial_slots,
                                           Tensor& conv_record, Tensor& query, Tensor& key,
                                           Tensor& value, Tensor& output_gate, qwen3_6::TextPhase,
-                                          WorkspaceArena& workspace, cudaStream_t stream) {
+                                          WorkspaceArena& workspace, hipStream_t stream) {
     auto workspace_scope     = workspace.scope();
     const DeviceSpan storage = workspace.alloc_bytes(gdn_record_workspace_bytes(hidden, weights));
     WorkspaceArena leaf_workspace(storage);
@@ -221,21 +222,21 @@ void Variant::gdn_input_projection_record(const Tensor& hidden, const GdnProject
 
 void Variant::gdn_output_projection(const Tensor& hidden, const Weight& weight, Tensor& residual,
                                     qwen3_6::TextPhase, WorkspaceArena& workspace,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     ops::linear_add(hidden, weight, residual, text_policy(weight), workspace, stream);
 }
 
 void Variant::gdn_norm_control_projection(const Tensor& residual, const Tensor& norm_weight,
                                           float eps, const GdnProjectionWeights& weights,
                                           Tensor& hidden, Tensor& g, Tensor& beta,
-                                          WorkspaceArena& workspace, cudaStream_t stream) {
+                                          WorkspaceArena& workspace, hipStream_t stream) {
     ops::gdn_norm_gating_proj(residual, norm_weight, eps, weights.a_projection,
                               weights.b_projection, weights.a_log, weights.dt_bias, workspace,
                               hidden, g, beta, stream);
 }
 
 void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, Tensor& residual,
-                         qwen3_6::TextPhase, WorkspaceArena& workspace, cudaStream_t stream) {
+                         qwen3_6::TextPhase, WorkspaceArena& workspace, hipStream_t stream) {
     auto scope        = workspace.scope();
     Tensor activation = workspace.alloc(DType::BF16, {TextConfig::intermediate, hidden.ne[1]});
     ops::linear_swiglu(hidden, weights.gate_up, activation, text_policy(weights.gate_up), workspace,
@@ -245,7 +246,7 @@ void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, 
 }
 
 void Variant::mtp_post_mixer(const Tensor& hidden, const MtpPostMixerWeights& weights,
-                             Tensor& residual, WorkspaceArena& workspace, cudaStream_t stream) {
+                             Tensor& residual, WorkspaceArena& workspace, hipStream_t stream) {
     auto scope     = workspace.scope();
     const int cols = hidden.ne[1];
     Tensor gate_up = workspace.alloc(DType::BF16, {TextConfig::mtp_mlp_gate_up_rows, cols});

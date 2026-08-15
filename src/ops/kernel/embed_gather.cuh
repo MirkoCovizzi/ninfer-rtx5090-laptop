@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/math.h"
@@ -5,8 +6,9 @@
 // ninfer::ops - embedding kernels. Dense copies BF16 rows; Q6 decodes
 // ROW_SPLIT nibble, high, and scale planes.
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 
@@ -30,8 +32,8 @@ __device__ __forceinline__ int unpack_q6_code(const std::uint8_t* nibble, const 
     return (u & 0x20u) ? static_cast<int>(u) - 64 : static_cast<int>(u);
 }
 
-__global__ void embed_gather_dense_kernel(const std::int32_t* ids, const __nv_bfloat16* table,
-                                          __nv_bfloat16* out, std::int32_t d, std::int32_t T) {
+__global__ void embed_gather_dense_kernel(const std::int32_t* ids, const __hip_bfloat16* table,
+                                          __hip_bfloat16* out, std::int32_t d, std::int32_t T) {
     const std::int64_t n      = static_cast<std::int64_t>(d) * T;
     const std::int64_t start  = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
@@ -44,7 +46,7 @@ __global__ void embed_gather_dense_kernel(const std::int32_t* ids, const __nv_bf
 
 __global__ void embed_gather_q6_kernel(const std::int32_t* ids, const std::uint8_t* codes,
                                        const std::uint8_t* high, const std::uint8_t* scales,
-                                       __nv_bfloat16* out, std::int32_t d, std::int32_t T,
+                                       __hip_bfloat16* out, std::int32_t d, std::int32_t T,
                                        std::int32_t padded_d) {
     const std::int32_t kg     = padded_d / kEmbedGatherQ6Group;
     const std::int64_t n      = static_cast<std::int64_t>(d) * T;
@@ -72,7 +74,7 @@ __global__ void embed_gather_q6_kernel(const std::int32_t* ids, const std::uint8
 __launch_bounds__(kEmbedGatherQ6Group* kEmbedGatherQ6GroupsPerBlock) __global__
     void embed_gather_q6_grouped_kernel(const std::int32_t* ids, const std::uint8_t* codes,
                                         const std::uint8_t* high, const std::uint8_t* scales,
-                                        __nv_bfloat16* out, std::int32_t d, std::int32_t T) {
+                                        __hip_bfloat16* out, std::int32_t d, std::int32_t T) {
     const std::int32_t kg           = d / kEmbedGatherQ6Group;
     const std::int32_t group_blocks = div_up(kg, kEmbedGatherQ6GroupsPerBlock);
     const std::int32_t t            = static_cast<std::int32_t>(blockIdx.x) / group_blocks;
@@ -90,7 +92,7 @@ __launch_bounds__(kEmbedGatherQ6Group* kEmbedGatherQ6GroupsPerBlock) __global__
         scale_bits = static_cast<int>(scales[group_index * 2]) |
                      (static_cast<int>(scales[group_index * 2 + 1]) << 8);
     }
-    scale_bits        = __shfl_sync(0xffffffffu, scale_bits, 0);
+    scale_bits        = __shfl_sync(0xffffffffffffffffull, scale_bits, 0);
     const float scale = __half2float(__ushort_as_half(static_cast<std::uint16_t>(scale_bits)));
     const int code    = unpack_q6_code(codes + group_index * kEmbedGatherQ6NibbleBpr,
                                        high + group_index * kEmbedGatherQ6HighBpr, lane);
@@ -100,7 +102,7 @@ __launch_bounds__(kEmbedGatherQ6Group* kEmbedGatherQ6GroupsPerBlock) __global__
 }
 
 __global__ void embed_gather_w8_kernel(const std::int32_t* ids, const std::uint8_t* codes,
-                                       const std::uint8_t* scales, __nv_bfloat16* out,
+                                       const std::uint8_t* scales, __hip_bfloat16* out,
                                        std::int32_t d, std::int32_t T, std::int32_t padded_d) {
     const std::int32_t kg     = padded_d / kEmbedGatherW8Group;
     const std::int64_t n      = static_cast<std::int64_t>(d) * T;
@@ -125,7 +127,7 @@ __global__ void embed_gather_w8_kernel(const std::int32_t* ids, const std::uint8
 
 __launch_bounds__(32) __global__
     void embed_gather_w8_grouped_2048_kernel(const std::int32_t* ids, const std::uint8_t* codes,
-                                             const std::uint8_t* scales, __nv_bfloat16* out) {
+                                             const std::uint8_t* scales, __hip_bfloat16* out) {
     const std::int32_t t   = static_cast<std::int32_t>(blockIdx.x) / kEmbedGatherW8Groups;
     const std::int32_t g   = static_cast<std::int32_t>(blockIdx.x) - t * kEmbedGatherW8Groups;
     const std::int32_t row = ids[t];
@@ -136,7 +138,7 @@ __launch_bounds__(32) __global__
         scale_bits = static_cast<int>(scales[group_index * 2]) |
                      (static_cast<int>(scales[group_index * 2 + 1]) << 8);
     }
-    scale_bits        = __shfl_sync(0xffffffffu, scale_bits, 0);
+    scale_bits        = __shfl_sync(0xffffffffffffffffull, scale_bits, 0);
     const float scale = __half2float(__ushort_as_half(static_cast<std::uint16_t>(scale_bits)));
     const auto code   = static_cast<std::int8_t>(
         codes[group_index * kEmbedGatherW8Group + static_cast<std::int32_t>(threadIdx.x)]);
@@ -147,7 +149,7 @@ __launch_bounds__(32) __global__
 
 __launch_bounds__(256) __global__
     void embed_gather_w8_row_2048_kernel(const std::int32_t* ids, const std::uint8_t* codes,
-                                         const std::uint8_t* scales, __nv_bfloat16* out) {
+                                         const std::uint8_t* scales, __hip_bfloat16* out) {
     const int tid = static_cast<int>(threadIdx.x);
     const int t   = static_cast<int>(blockIdx.x);
     const int row = ids[t];
@@ -164,7 +166,7 @@ __launch_bounds__(256) __global__
     const auto* code_row = codes + static_cast<std::int64_t>(row) * kEmbedGatherW8D;
     const uint2 packed   = *reinterpret_cast<const uint2*>(code_row + k);
     auto* out_pairs =
-        reinterpret_cast<__nv_bfloat162*>(out + static_cast<std::int64_t>(t) * kEmbedGatherW8D + k);
+        reinterpret_cast<__hip_bfloat162*>(out + static_cast<std::int64_t>(t) * kEmbedGatherW8D + k);
 #pragma unroll
     for (int word_index = 0; word_index < 2; ++word_index) {
         const std::uint32_t word = word_index == 0 ? packed.x : packed.y;

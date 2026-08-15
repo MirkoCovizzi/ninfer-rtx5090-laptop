@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -27,7 +27,7 @@ namespace ninfer::ops {
  * Workspace:
  *   None. The Op has no other state side effect.
  */
-void fill_i32_positions(Tensor& positions, std::int32_t start, cudaStream_t stream);
+void fill_i32_positions(Tensor& positions, std::int32_t start, hipStream_t stream);
 
 /**
  * Op: offset_i32_positions
@@ -49,6 +49,6 @@ void fill_i32_positions(Tensor& positions, std::int32_t start, cudaStream_t stre
  *   None. The Op has no other state side effect.
  */
 void offset_i32_positions(const Tensor& source, const Tensor& delta, Tensor& destination,
-                          cudaStream_t stream);
+                          hipStream_t stream);
 
 } // namespace ninfer::ops

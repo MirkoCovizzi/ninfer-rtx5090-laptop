@@ -1,9 +1,11 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 #include "ops/gdn_input_proj/gdn_conv.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -20,7 +22,7 @@ inline constexpr std::int32_t kNvfp4GdnParentRows = kNvfp4GdnChannels + kNvfp4Gd
 template <int Tokens, class Publish>
 struct Nvfp4GdnConvOutput {
     GdnConvEpilogue<Publish> conv;
-    __nv_bfloat16* z;
+    __hip_bfloat16* z;
 
     __device__ __forceinline__ void store_row(std::int32_t parent_row,
                                               const float (&projected)[Tokens]) const {
@@ -51,14 +53,14 @@ make_nvfp4_gdn_conv_output(const Tensor& conv_weight, const Tensor& conv_states,
                            Tensor& key, Tensor& value, Tensor& z, Publish publish) {
     return {
         {
-            static_cast<const __nv_bfloat16*>(conv_weight.data),
-            static_cast<const __nv_bfloat16*>(conv_states.data),
+            static_cast<const __hip_bfloat16*>(conv_weight.data),
+            static_cast<const __hip_bfloat16*>(conv_states.data),
             static_cast<const std::int32_t*>(initial_slot.data),
             valid_columns.data == nullptr ? nullptr
                                           : static_cast<const std::int32_t*>(valid_columns.data),
-            static_cast<__nv_bfloat16*>(query.data),
-            static_cast<__nv_bfloat16*>(key.data),
-            static_cast<__nv_bfloat16*>(value.data),
+            static_cast<__hip_bfloat16*>(query.data),
+            static_cast<__hip_bfloat16*>(key.data),
+            static_cast<__hip_bfloat16*>(value.data),
             kNvfp4GdnChannels,
             kNvfp4GdnQueryRows,
             kNvfp4GdnKeyRows,
@@ -68,7 +70,7 @@ make_nvfp4_gdn_conv_output(const Tensor& conv_weight, const Tensor& conv_states,
             0,
             publish,
         },
-        static_cast<__nv_bfloat16*>(z.data),
+        static_cast<__hip_bfloat16*>(z.data),
     };
 }
 

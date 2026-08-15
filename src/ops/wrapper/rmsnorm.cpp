@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - rmsnorm wrapper: public api validation and launcher dispatch.
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/gated_rmsnorm.h"
@@ -48,7 +49,7 @@ void require_same_shape(const Tensor& a, const Tensor& b, const char* b_label) {
 namespace {
 
 void rmsnorm_impl(const Tensor& x, const Tensor& weight, float eps, bool unit_offset,
-                  const Tensor* z, Tensor& out, cudaStream_t stream) {
+                  const Tensor* z, Tensor& out, hipStream_t stream) {
     if (x.dtype != DType::BF16 || weight.dtype != DType::BF16 || out.dtype != DType::BF16 ||
         (z != nullptr && z->dtype != DType::BF16)) {
         throw std::invalid_argument("rmsnorm: x/weight/z/out must be BF16");
@@ -89,12 +90,12 @@ void rmsnorm_impl(const Tensor& x, const Tensor& weight, float eps, bool unit_of
 } // namespace
 
 void rmsnorm(const Tensor& x, const Tensor& weight, float eps, bool unit_offset, Tensor& out,
-             cudaStream_t stream) {
+             hipStream_t stream) {
     rmsnorm_impl(x, weight, eps, unit_offset, nullptr, out, stream);
 }
 
 void gated_rmsnorm(const Tensor& x, const Tensor& weight, const Tensor& z, float eps, Tensor& out,
-                   cudaStream_t stream) {
+                   hipStream_t stream) {
     rmsnorm_impl(x, weight, eps, false, &z, out, stream);
 }
 

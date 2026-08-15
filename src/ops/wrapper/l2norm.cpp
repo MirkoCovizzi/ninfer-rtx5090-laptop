@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - l2norm wrapper: public api validation and launcher dispatch.
 #include "ninfer/ops/l2norm.h"
 
@@ -41,7 +42,7 @@ void require_same_shape(const Tensor& a, const Tensor& b) {
 
 } // namespace
 
-void l2norm(const Tensor& x, float eps, Tensor& out, cudaStream_t stream) {
+void l2norm(const Tensor& x, float eps, Tensor& out, hipStream_t stream) {
     if (x.dtype != DType::BF16 || out.dtype != DType::BF16) {
         throw std::invalid_argument("l2norm: x/out must be BF16");
     }

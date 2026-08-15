@@ -3,7 +3,7 @@
 #include "core/arena.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -97,7 +97,7 @@ enum class LinearPolicy : std::uint8_t {
  * @param[in] stream CUDA stream on which execution is enqueued.
  */
 void linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
-            WorkspaceArena& workspace, cudaStream_t stream);
+            WorkspaceArena& workspace, hipStream_t stream);
 
 /**
  * @brief Applies the A16-only form of the bias-free matrix projection.
@@ -110,6 +110,6 @@ void linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
  * @param[out] out Contiguous BF16 output matrix `[N,T]`.
  * @param[in] stream CUDA stream on which execution is enqueued.
  */
-void linear(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
+void linear(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
 
 } // namespace ninfer::ops

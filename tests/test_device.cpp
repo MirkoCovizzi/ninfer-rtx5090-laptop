@@ -1,6 +1,6 @@
 #include "core/device.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <iostream>
 #include <stdexcept>
@@ -13,8 +13,8 @@ int fail(const char* message) {
     return 1;
 }
 
-bool cuda_unavailable(cudaError_t err) {
-    return err == cudaErrorNoDevice || err == cudaErrorInsufficientDriver;
+bool hip_unavailable(hipError_t err) {
+    return err == hipErrorNoDevice || err == hipErrorInsufficientDriver;
 }
 
 int expect_throws_device(int device_id) {
@@ -50,13 +50,13 @@ int check_context(const ninfer::DeviceContext& ctx, const char* label) {
 
 int main() {
     int count                   = 0;
-    const cudaError_t count_err = cudaGetDeviceCount(&count);
-    if (cuda_unavailable(count_err)) {
+    const hipError_t count_err = hipGetDeviceCount(&count);
+    if (hip_unavailable(count_err)) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
-    if (count_err != cudaSuccess) {
-        std::cerr << "cudaGetDeviceCount failed: " << cudaGetErrorString(count_err) << '\n';
+    if (count_err != hipSuccess) {
+        std::cerr << "hipGetDeviceCount failed: " << hipGetErrorString(count_err) << '\n';
         return 1;
     }
     if (count == 0) {
@@ -74,7 +74,7 @@ int main() {
     failures += check_context(ctx, "ctx");
     ctx.synchronize();
 
-    const cudaStream_t original_stream = ctx.stream;
+    const hipStream_t original_stream = ctx.stream;
     ninfer::DeviceContext moved(std::move(ctx));
     if (ctx.stream != nullptr || ctx.load_stream != nullptr) {
         ++failures;
@@ -88,7 +88,7 @@ int main() {
 
     failures += expect_throws_device(count);
 
-    ninfer::CudaEventTimer timer(moved);
+    ninfer::HipEventTimer timer(moved);
     timer.start();
     moved.synchronize();
     const float elapsed_ms = timer.stop_ms();

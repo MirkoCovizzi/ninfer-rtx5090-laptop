@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -22,6 +22,6 @@ namespace ninfer::ops {
  * other contiguous dimensions use the scalar route.
  */
 void vision_pos_embed_add(const Tensor& table, const Tensor& indices, const Tensor& weights,
-                          Tensor& x, cudaStream_t stream);
+                          Tensor& x, hipStream_t stream);
 
 } // namespace ninfer::ops

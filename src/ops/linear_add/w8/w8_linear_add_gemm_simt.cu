@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_add/w8/w8_linear_add_kernels.h"
 
 #include "core/device.h"
@@ -17,13 +18,13 @@ constexpr int kDecodeGroups = kDecodeK / 32;
 
 template <int RowsPerCta>
 __global__ __launch_bounds__(RowsPerCta * 32, 2) void w8_linear_add_decode_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
-    const std::uint8_t* __restrict__ scales, __nv_bfloat16* __restrict__ residual) {
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const std::uint8_t* __restrict__ scales, __hip_bfloat16* __restrict__ residual) {
     constexpr int kValuesPerLane  = 8;
     constexpr int kValuesPerPhase = 32 * kValuesPerLane;
     constexpr int kGroupsPerPhase = kValuesPerPhase / 32;
     constexpr int kPhases         = kDecodeK / kValuesPerPhase;
-    constexpr unsigned kMask      = 0xffffffffu;
+    constexpr unsigned long long kMask = 0xffffffffull;
 
     const int lane       = static_cast<int>(threadIdx.x) & 31;
     const int warp       = static_cast<int>(threadIdx.x) >> 5;
@@ -71,18 +72,18 @@ __global__ __launch_bounds__(RowsPerCta * 32, 2) void w8_linear_add_decode_kerne
 }
 
 template <int RowsPerCta>
-void launch_decode(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
+void launch_decode(const Tensor& x, const Weight& w, Tensor& residual_out, hipStream_t stream) {
     static_assert((2048 % RowsPerCta) == 0);
     w8_linear_add_decode_kernel<RowsPerCta><<<2048 / RowsPerCta, RowsPerCta * 32, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(residual_out.data));
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<const __hip_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.scales), static_cast<__hip_bfloat16*>(residual_out.data));
+    HIP_CHECK(hipGetLastError());
 }
 
 template <int ColsPerTile, bool Full>
-void launch_tt(const __nv_bfloat16* x, const std::uint8_t* codes, const std::uint8_t* scales,
-               __nv_bfloat16* residual_out, std::int32_t rows, std::int32_t k, std::int32_t cols,
-               std::int32_t padded_k, std::int32_t full_slabs, cudaStream_t stream) {
+void launch_tt(const __hip_bfloat16* x, const std::uint8_t* codes, const std::uint8_t* scales,
+               __hip_bfloat16* residual_out, std::int32_t rows, std::int32_t k, std::int32_t cols,
+               std::int32_t padded_k, std::int32_t full_slabs, hipStream_t stream) {
     constexpr int kThreads = kRowsPerBlock * 32;
     const dim3 grid(static_cast<unsigned>(div_up(rows, kRowsPerBlock)),
                     static_cast<unsigned>(div_up(cols, ColsPerTile)), 1u);
@@ -94,13 +95,13 @@ void launch_tt(const __nv_bfloat16* x, const std::uint8_t* codes, const std::uin
 
 template <int ColsPerTile>
 void launch_variant(bool full, const Tensor& x, const Weight& w, Tensor& residual_out,
-                    cudaStream_t stream) {
-    const auto* xp       = static_cast<const __nv_bfloat16*>(x.data);
+                    hipStream_t stream) {
+    const auto* xp       = static_cast<const __hip_bfloat16*>(x.data);
     const bool aligned_x = (x.ne[0] % 8) == 0 && (reinterpret_cast<std::uintptr_t>(xp) & 0xfu) == 0;
     const std::int32_t full_slabs = aligned_x ? x.ne[0] / 1024 : 0;
     const auto* codes             = static_cast<const std::uint8_t*>(w.qdata);
     const auto* scales            = static_cast<const std::uint8_t*>(w.scales);
-    auto* out                     = static_cast<__nv_bfloat16*>(residual_out.data);
+    auto* out                     = static_cast<__hip_bfloat16*>(residual_out.data);
 
     if (full) {
         launch_tt<ColsPerTile, true>(xp, codes, scales, out, residual_out.ne[0], x.ne[0], x.ne[1],
@@ -109,33 +110,33 @@ void launch_variant(bool full, const Tensor& x, const Weight& w, Tensor& residua
         launch_tt<ColsPerTile, false>(xp, codes, scales, out, residual_out.ne[0], x.ne[0], x.ne[1],
                                       w.padded_shape[1], full_slabs, stream);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
 
 void w8_linear_add_decode_r4_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     launch_decode<4>(x, w, residual_out, stream);
 }
 
 void w8_linear_add_decode_r8_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     launch_decode<8>(x, w, residual_out, stream);
 }
 
 void w8_linear_add_decode_r16_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
-                                     cudaStream_t stream) {
+                                     hipStream_t stream) {
     launch_decode<16>(x, w, residual_out, stream);
 }
 
 void w8_linear_add_simt_r8_c4_launch(bool full, const Tensor& x, const Weight& w,
-                                     Tensor& residual_out, cudaStream_t stream) {
+                                     Tensor& residual_out, hipStream_t stream) {
     launch_variant<4>(full, x, w, residual_out, stream);
 }
 
 void w8_linear_add_simt_r8_c8_launch(bool full, const Tensor& x, const Weight& w,
-                                     Tensor& residual_out, cudaStream_t stream) {
+                                     Tensor& residual_out, hipStream_t stream) {
     launch_variant<8>(full, x, w, residual_out, stream);
 }
 

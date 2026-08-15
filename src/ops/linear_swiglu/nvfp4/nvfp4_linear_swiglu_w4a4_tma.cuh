@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/math.cuh"
@@ -5,8 +6,9 @@
 #include "ops/common/mma.cuh"
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -32,7 +34,7 @@ union alignas(128) Nvfp4LinearSwiGluTmaScratch {
     static constexpr int kPairN = Schedule::kBlockN / 2;
 
     Nvfp4LinearSwiGluTmaTensorStorage<Schedule> tensors;
-    __nv_bfloat16 output[Schedule::kBlockM * (kPairN + 8)];
+    __hip_bfloat16 output[Schedule::kBlockM * (kPairN + 8)];
 };
 
 template <class Schedule>
@@ -50,7 +52,7 @@ __global__ __launch_bounds__(
                                                                       Nvfp4W4a4TmaDescriptors
                                                                           descriptors,
                                                                   float alpha,
-                                                                  __nv_bfloat16* __restrict__ output) {
+                                                                  __hip_bfloat16* __restrict__ output) {
     static_assert(Geometry::kOutputRows == 34816);
     static_assert(Geometry::kInputRows == 5120);
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
@@ -230,9 +232,9 @@ __global__ __launch_bounds__(
         for (int mma_n = 0; mma_n < kGateMmaFragments; ++mma_n) {
             const int pair_row =
                 warp_n * (kPairN / Schedule::kWarpsN) + mma_n * 8 + accumulator_col;
-            auto* destination0 = reinterpret_cast<__nv_bfloat162*>(
+            auto* destination0 = reinterpret_cast<__hip_bfloat162*>(
                 shared_output + token0 * kOutputStride + pair_row);
-            auto* destination1 = reinterpret_cast<__nv_bfloat162*>(
+            auto* destination1 = reinterpret_cast<__hip_bfloat162*>(
                 shared_output + token1 * kOutputStride + pair_row);
             const auto& gate = accumulators[mma_m][mma_n];
             const auto& up   = accumulators[mma_m][mma_n + kGateMmaFragments];

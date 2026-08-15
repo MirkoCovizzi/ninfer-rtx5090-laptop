@@ -1,6 +1,8 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -10,8 +12,8 @@ inline constexpr int kMtpAttnRows = 14336;
 inline constexpr int kMtpQRows    = 6144;
 inline constexpr int kMtpKvRows   = 1024;
 
-__global__ void mtp_pack_fc_input_kernel(const __nv_bfloat16* embedding_norm,
-                                         const __nv_bfloat16* hidden_norm, __nv_bfloat16* out,
+__global__ void mtp_pack_fc_input_kernel(const __hip_bfloat16* embedding_norm,
+                                         const __hip_bfloat16* hidden_norm, __hip_bfloat16* out,
                                          std::int32_t rows) {
     const int row = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (row >= rows) { return; }
@@ -23,8 +25,8 @@ __global__ void mtp_pack_fc_input_kernel(const __nv_bfloat16* embedding_norm,
     out[out_base + rows + row]  = hidden_norm[in_idx];
 }
 
-__global__ void mtp_split_attn_in_kernel(const __nv_bfloat16* attn_in, __nv_bfloat16* q,
-                                         __nv_bfloat16* k, __nv_bfloat16* gate, __nv_bfloat16* v,
+__global__ void mtp_split_attn_in_kernel(const __hip_bfloat16* attn_in, __hip_bfloat16* q,
+                                         __hip_bfloat16* k, __hip_bfloat16* gate, __hip_bfloat16* v,
                                          std::int32_t tokens) {
     const std::int64_t idx = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
     const std::int64_t n   = static_cast<std::int64_t>(kMtpAttnRows) * tokens;
@@ -32,7 +34,7 @@ __global__ void mtp_split_attn_in_kernel(const __nv_bfloat16* attn_in, __nv_bflo
 
     const int row             = static_cast<int>(idx % kMtpAttnRows);
     const int token           = static_cast<int>(idx / kMtpAttnRows);
-    const __nv_bfloat16 value = attn_in[idx];
+    const __hip_bfloat16 value = attn_in[idx];
 
     if (row < kMtpQRows) {
         q[static_cast<std::int64_t>(token) * kMtpQRows + row] = value;

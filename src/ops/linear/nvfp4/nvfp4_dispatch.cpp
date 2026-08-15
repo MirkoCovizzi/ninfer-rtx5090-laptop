@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
 
 #include "ops/linear/nvfp4/nvfp4_config.h"
@@ -41,7 +42,7 @@ Nvfp4LinearRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows
     throw std::logic_error("unreachable NVFP4 linear problem");
 }
 
-void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, hipStream_t stream) {
     constexpr std::int32_t kChunk = kNvfp4LastSmallT;
     for (std::int32_t token_begin = 0; token_begin < x.ne[1]; token_begin += kChunk) {
         const std::int32_t active = std::min(kChunk, x.ne[1] - token_begin);
@@ -74,7 +75,7 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t output_rows, std:
 }
 
 void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
-                    WorkspaceArena* workspace, cudaStream_t stream) {
+                    WorkspaceArena* workspace, hipStream_t stream) {
     validate_nvfp4_weight(weight, "nvfp4 linear");
     if (!is_nvfp4_linear_problem(weight.n, weight.k) || x.ne[1] <= 0) {
         throw std::invalid_argument("nvfp4 linear: unsupported shape");

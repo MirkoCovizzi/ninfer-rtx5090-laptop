@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Standalone sustained device-memory bandwidth probe.
 //
 // Build:
@@ -7,7 +8,7 @@
 // read or write and 2N bytes for a copy (N read + N written). This is the
 // column to compare with the advertised memory-bus bandwidth.
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cmath>
@@ -20,12 +21,12 @@
 #include <utility>
 #include <vector>
 
-#define CUDA_CHECK(expr)                                                                           \
+#define HIP_CHECK(expr)                                                                           \
     do {                                                                                           \
-        const cudaError_t error__ = (expr);                                                        \
-        if (error__ != cudaSuccess) {                                                              \
+        const hipError_t error__ = (expr);                                                        \
+        if (error__ != hipSuccess) {                                                              \
             std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__,                  \
-                         cudaGetErrorString(error__));                                             \
+                         hipGetErrorString(error__));                                             \
             std::exit(EXIT_FAILURE);                                                               \
         }                                                                                          \
     } while (false)
@@ -59,11 +60,11 @@ template <typename T>
 class DeviceBuffer {
 public:
     explicit DeviceBuffer(std::size_t count) : count_(count) {
-        CUDA_CHECK(cudaMalloc(&data_, count_ * sizeof(T)));
+        HIP_CHECK(hipMalloc(&data_, count_ * sizeof(T)));
     }
 
     ~DeviceBuffer() {
-        if (data_ != nullptr) { cudaFree(data_); }
+        if (data_ != nullptr) { hipFree(data_); }
     }
 
     DeviceBuffer(const DeviceBuffer&)            = delete;
@@ -82,17 +83,17 @@ private:
 
 class Event {
 public:
-    Event() { CUDA_CHECK(cudaEventCreate(&event_)); }
+    Event() { HIP_CHECK(hipEventCreate(&event_)); }
 
-    ~Event() { cudaEventDestroy(event_); }
+    ~Event() { hipEventDestroy(event_); }
 
     Event(const Event&)            = delete;
     Event& operator=(const Event&) = delete;
 
-    cudaEvent_t get() const { return event_; }
+    hipEvent_t get() const { return event_; }
 
 private:
-    cudaEvent_t event_{};
+    hipEvent_t event_{};
 };
 
 __global__ void write_u128_kernel(uint4* __restrict__ dst, std::size_t count, uint4 value) {
@@ -222,25 +223,25 @@ Options parse_options(int argc, char** argv) {
 }
 
 template <typename Launch>
-double elapsed_ms(cudaStream_t stream, int iterations, Launch&& launch) {
+double elapsed_ms(hipStream_t stream, int iterations, Launch&& launch) {
     Event start;
     Event stop;
-    CUDA_CHECK(cudaEventRecord(start.get(), stream));
+    HIP_CHECK(hipEventRecord(start.get(), stream));
     for (int i = 0; i < iterations; ++i) { launch(); }
-    CUDA_CHECK(cudaEventRecord(stop.get(), stream));
-    CUDA_CHECK(cudaEventSynchronize(stop.get()));
+    HIP_CHECK(hipEventRecord(stop.get(), stream));
+    HIP_CHECK(hipEventSynchronize(stop.get()));
     float milliseconds = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start.get(), stop.get()));
+    HIP_CHECK(hipEventElapsedTime(&milliseconds, start.get(), stop.get()));
     return static_cast<double>(milliseconds);
 }
 
 template <typename Launch>
 Result benchmark(const char* name, std::size_t payload_bytes, double traffic_multiplier,
-                 double peak_gbps, double trial_seconds, int trials, cudaStream_t stream,
+                 double peak_gbps, double trial_seconds, int trials, hipStream_t stream,
                  Launch&& launch) {
     // A few untimed sweeps settle clocks and page mappings before calibration.
     for (int i = 0; i < 8; ++i) { launch(); }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     const double calibration_ms = elapsed_ms(stream, 2, launch) / 2.0;
     const int iterations =
@@ -252,7 +253,7 @@ Result benchmark(const char* name, std::size_t payload_bytes, double traffic_mul
         const double milliseconds = elapsed_ms(stream, iterations, launch);
         trial_ns.push_back(milliseconds * 1.0e6 / iterations);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 
     std::sort(trial_ns.begin(), trial_ns.end());
     const double best_ns      = trial_ns.front();
@@ -268,7 +269,7 @@ Result benchmark(const char* name, std::size_t payload_bytes, double traffic_mul
 template <typename Kernel>
 int resident_grid(Kernel kernel, int sm_count) {
     int blocks_per_sm = 0;
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, kernel, kThreads, 0));
+    HIP_CHECK(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, kernel, kThreads, 0));
     return std::max(sm_count, sm_count * blocks_per_sm);
 }
 
@@ -284,13 +285,13 @@ int main(int argc, char** argv) {
     const Options options = parse_options(argc, argv);
 
     int device = 0;
-    CUDA_CHECK(cudaGetDevice(&device));
-    cudaDeviceProp prop{};
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+    HIP_CHECK(hipGetDevice(&device));
+    hipDeviceProp_t prop{};
+    HIP_CHECK(hipGetDeviceProperties(&prop, device));
 
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    HIP_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
 
     std::size_t bytes =
         options.size_gib > 0.0
@@ -339,13 +340,13 @@ int main(int argc, char** argv) {
     DeviceBuffer<uint4> destination(vector_count);
     DeviceBuffer<uint4> checksums(read_grid);
 
-    cudaStream_t stream{};
-    CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    hipStream_t stream{};
+    HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
 
     const uint4 source_value = make_uint4(0x13579bdfu, 0x2468ace0u, 0xdeadbeefu, 0x10203040u);
     write_u128_kernel<<<write_grid, kThreads, 0, stream>>>(source.get(), vector_count,
                                                            source_value);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 
     // Long preconditioning phase: make the first reported method independent
     // of idle P-state ramp-up.
@@ -353,14 +354,14 @@ int main(int argc, char** argv) {
         copy_u128_kernel<<<copy_grid, kThreads, 0, stream>>>(source.get(), destination.get(),
                                                              vector_count);
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<Result> results;
     results.reserve(6);
 
     results.push_back(benchmark(
-        "cudaMemsetAsync (write)", bytes, 1.0, options.peak_gbps, options.seconds, options.trials,
-        stream, [&] { CUDA_CHECK(cudaMemsetAsync(destination.get(), 0xa5, bytes, stream)); }));
+        "hipMemsetAsync (write)", bytes, 1.0, options.peak_gbps, options.seconds, options.trials,
+        stream, [&] { HIP_CHECK(hipMemsetAsync(destination.get(), 0xa5, bytes, stream)); }));
 
     const uint4 write_value = make_uint4(0x55aa55aau, 0xaa55aa55u, 0x31415926u, 0x27182818u);
     results.push_back(benchmark("kernel uint4 write", bytes, 1.0, options.peak_gbps,
@@ -387,17 +388,17 @@ int main(int argc, char** argv) {
                                         source.get(), destination.get(), vector_count);
                                 }));
 
-    results.push_back(benchmark("cudaMemcpyAsync D2D", bytes, 2.0, options.peak_gbps,
+    results.push_back(benchmark("hipMemcpyAsync D2D", bytes, 2.0, options.peak_gbps,
                                 options.seconds, options.trials, stream, [&] {
-                                    CUDA_CHECK(cudaMemcpyAsync(destination.get(), source.get(),
-                                                               bytes, cudaMemcpyDeviceToDevice,
+                                    HIP_CHECK(hipMemcpyAsync(destination.get(), source.get(),
+                                                               bytes, hipMemcpyDeviceToDevice,
                                                                stream));
                                 }));
 
     uint4 checksum{};
-    CUDA_CHECK(cudaMemcpyAsync(&checksum, checksums.get(), sizeof(checksum), cudaMemcpyDeviceToHost,
+    HIP_CHECK(hipMemcpyAsync(&checksum, checksums.get(), sizeof(checksum), hipMemcpyDeviceToHost,
                                stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::printf("%-28s %12s %12s %12s %10s %10s\n", "method", "payload", "best bus", "median bus",
                 "of peak", "best ms");
@@ -414,6 +415,6 @@ int main(int argc, char** argv) {
     std::printf("Note: copy payload is half its bus rate because every copied byte is "
                 "both read and written.\n");
 
-    CUDA_CHECK(cudaStreamDestroy(stream));
+    HIP_CHECK(hipStreamDestroy(stream));
     return EXIT_SUCCESS;
 }

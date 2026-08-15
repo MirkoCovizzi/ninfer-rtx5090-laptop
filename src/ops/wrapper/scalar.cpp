@@ -17,12 +17,12 @@ void require_scalar(const Tensor& tensor, DType dtype, const char* name) {
 
 } // namespace
 
-void set_i32_scalar(Tensor& destination, std::int32_t value, cudaStream_t stream) {
+void set_i32_scalar(Tensor& destination, std::int32_t value, hipStream_t stream) {
     require_scalar(destination, DType::I32, "set_i32_scalar destination");
     detail::set_i32_scalar_launch(destination, value, stream);
 }
 
-void assign_i32_scalar(const Tensor& source, Tensor& destination, cudaStream_t stream) {
+void assign_i32_scalar(const Tensor& source, Tensor& destination, hipStream_t stream) {
     require_scalar(source, DType::I32, "assign_i32_scalar source");
     require_scalar(destination, DType::I32, "assign_i32_scalar destination");
     if (source.data == destination.data) {
@@ -32,7 +32,7 @@ void assign_i32_scalar(const Tensor& source, Tensor& destination, cudaStream_t s
 }
 
 void add_i32_scalars(const Tensor& lhs, const Tensor& rhs, Tensor& destination,
-                     cudaStream_t stream) {
+                     hipStream_t stream) {
     require_scalar(lhs, DType::I32, "add_i32_scalars lhs");
     require_scalar(rhs, DType::I32, "add_i32_scalars rhs");
     require_scalar(destination, DType::I32, "add_i32_scalars destination");
@@ -42,12 +42,12 @@ void add_i32_scalars(const Tensor& lhs, const Tensor& rhs, Tensor& destination,
     detail::add_i32_scalars_launch(lhs, rhs, destination, stream);
 }
 
-void increment_i32_scalar(Tensor& scalar, cudaStream_t stream) {
+void increment_i32_scalar(Tensor& scalar, hipStream_t stream) {
     require_scalar(scalar, DType::I32, "increment_i32_scalar scalar");
     detail::increment_i32_scalar_launch(scalar, stream);
 }
 
-void increment_i64_scalar(Tensor& scalar, cudaStream_t stream) {
+void increment_i64_scalar(Tensor& scalar, hipStream_t stream) {
     require_scalar(scalar, DType::I64, "increment_i64_scalar scalar");
     detail::increment_i64_scalar_launch(scalar, stream);
 }

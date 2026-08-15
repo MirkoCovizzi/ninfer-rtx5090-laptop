@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Cold-cache public Op benchmark for the registered Q4 LinearSwiGLU profile.
 
 #include "ninfer/ops/linear_swiglu.h"
@@ -6,7 +7,7 @@
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -96,8 +97,8 @@ int main(int argc, char** argv) {
         const std::int32_t min_t = *min_it;
         const std::int32_t max_t = *max_it;
 
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(kFlushBytes);
         DeviceBuffer input = bench::make_bf16(static_cast<std::size_t>(kHidden) * max_t);
         DeviceBuffer output(static_cast<std::size_t>(kOutputRows) * max_t * sizeof(std::uint16_t));
@@ -107,7 +108,7 @@ int main(int argc, char** argv) {
             QType::Q4G64_F16S, kGateUpRows, kHidden, min_t, max_t);
         WorkspaceArena workspace(std::max<std::size_t>(workspace_capacity, 256));
 
-        const auto launch = [&](std::int32_t tokens, cudaStream_t launch_stream) {
+        const auto launch = [&](std::int32_t tokens, hipStream_t launch_stream) {
             Tensor x(input.p, DType::BF16, {kHidden, tokens});
             Tensor out(output.p, DType::BF16, {kOutputRows, tokens});
             ops::linear_swiglu(x, packed.weight, out, workspace, launch_stream);
@@ -115,16 +116,16 @@ int main(int argc, char** argv) {
 
         if (options.profile) {
             launch(options.tokens.front(), stream);
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            HIP_CHECK(hipStreamSynchronize(stream));
             std::printf("PROFILE linear_swiglu Q4 T=%d workspace=%zu\n", options.tokens.front(),
                         workspace_capacity);
-            CUDA_CHECK(cudaStreamDestroy(stream));
+            HIP_CHECK(hipStreamDestroy(stream));
             return 0;
         }
 
         for (const std::int32_t tokens : options.tokens) {
             const auto timing = bench::measure_cold_launch(
-                [&](cudaStream_t launch_stream) { launch(tokens, launch_stream); }, flush, stream,
+                [&](hipStream_t launch_stream) { launch(tokens, launch_stream); }, flush, stream,
                 options.warmup, options.repeat);
             const double seconds = timing.median_us * 1.0e-6;
             const double flops   = 2.0 * static_cast<double>(kGateUpRows) * kHidden * tokens;
@@ -135,7 +136,7 @@ int main(int argc, char** argv) {
                         workspace_capacity);
         }
 
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_q4_linear_swiglu_bench: %s\n", error.what());

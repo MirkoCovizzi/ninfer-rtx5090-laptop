@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/swa.h"
 
 #include "core/arena.h"
@@ -210,7 +211,7 @@ int run_case(int tokens, int context_length, InputProfile profile = InputProfile
 
     ops::swa(q_tensor, query_k_tensor, query_v_tensor, positions_tensor, valid_tensor, lane_tensor,
              kScale, context, envelope, workspace, out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     std::string label = "swa T=" + std::to_string(tokens) + " L=" + std::to_string(context_length);
     if (envelope_max != context_length) {
@@ -305,7 +306,7 @@ int run_batch_case() {
         Tensor lane_row      = lanes_tensor.slice(0, b, 1);
         ops::swa(q_row, query_k_row, query_v_row, positions_row, valid_row, lane_row, kScale,
                  context, envelope, single_workspace, single_out_tensor, nullptr);
-        cuda_synchronize();
+        hip_synchronize();
         const auto row = from_device<std::uint16_t>(single_out.data(), row_q_count);
         std::copy(row.begin(), row.end(),
                   expected.begin() + static_cast<std::ptrdiff_t>(b * row_q_count));
@@ -313,7 +314,7 @@ int run_batch_case() {
 
     ops::swa(q_tensor, query_k_tensor, query_v_tensor, positions_tensor, valid_tensor, lanes_tensor,
              kScale, context, envelope, workspace, out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures =
         verify_exact("swa B=2 mixed lengths and lanes",
@@ -325,7 +326,7 @@ int run_batch_case() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: CUDA device unavailable\n";
         return 77;
     }

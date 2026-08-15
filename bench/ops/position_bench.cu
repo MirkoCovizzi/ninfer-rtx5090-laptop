@@ -1,10 +1,11 @@
+#include "hip/hip_runtime.h"
 // Exact small-T qualification benchmark for offset_i32_positions.
 #include "ninfer/ops/position.h"
 #include "core/device.h"
 #include "ninfer_bench_common.h"
 #include "ops/launcher/position.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -38,45 +39,45 @@ std::vector<int> parse_tokens(const char* raw) {
 
 Result bench_cold_graph(const launch_fn& launch, double bytes, DeviceBuffer& flush, int warmup,
                         int repeat) {
-    cudaStream_t stream = nullptr;
-    CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    hipStream_t stream = nullptr;
+    HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
     launch(stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
-    cudaGraph_t graph    = nullptr;
-    cudaGraphExec_t exec = nullptr;
-    CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+    hipGraph_t graph    = nullptr;
+    hipGraphExec_t exec = nullptr;
+    HIP_CHECK(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal));
     launch(stream);
-    CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
-    CUDA_CHECK(cudaGraphInstantiate(&exec, graph, 0));
+    HIP_CHECK(hipStreamEndCapture(stream, &graph));
+    HIP_CHECK(hipGraphInstantiate(&exec, graph, 0));
 
-    cudaEvent_t begin = nullptr;
-    cudaEvent_t end   = nullptr;
-    CUDA_CHECK(cudaEventCreate(&begin));
-    CUDA_CHECK(cudaEventCreate(&end));
+    hipEvent_t begin = nullptr;
+    hipEvent_t end   = nullptr;
+    HIP_CHECK(hipEventCreate(&begin));
+    HIP_CHECK(hipEventCreate(&end));
     for (int i = 0; i < warmup; ++i) {
-        CUDA_CHECK(cudaMemsetAsync(flush.p, 0xa5, flush.bytes, stream));
-        CUDA_CHECK(cudaGraphLaunch(exec, stream));
+        HIP_CHECK(hipMemsetAsync(flush.p, 0xa5, flush.bytes, stream));
+        HIP_CHECK(hipGraphLaunch(exec, stream));
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
     for (int i = 0; i < repeat; ++i) {
-        CUDA_CHECK(cudaMemsetAsync(flush.p, 0xa5, flush.bytes, stream));
-        CUDA_CHECK(cudaEventRecord(begin, stream));
-        CUDA_CHECK(cudaGraphLaunch(exec, stream));
-        CUDA_CHECK(cudaEventRecord(end, stream));
-        CUDA_CHECK(cudaEventSynchronize(end));
+        HIP_CHECK(hipMemsetAsync(flush.p, 0xa5, flush.bytes, stream));
+        HIP_CHECK(hipEventRecord(begin, stream));
+        HIP_CHECK(hipGraphLaunch(exec, stream));
+        HIP_CHECK(hipEventRecord(end, stream));
+        HIP_CHECK(hipEventSynchronize(end));
         float milliseconds = 0.0F;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, begin, end));
+        HIP_CHECK(hipEventElapsedTime(&milliseconds, begin, end));
         samples.push_back(static_cast<double>(milliseconds) * 1000.0);
     }
-    CUDA_CHECK(cudaEventDestroy(begin));
-    CUDA_CHECK(cudaEventDestroy(end));
-    CUDA_CHECK(cudaGraphExecDestroy(exec));
-    CUDA_CHECK(cudaGraphDestroy(graph));
-    CUDA_CHECK(cudaStreamDestroy(stream));
+    HIP_CHECK(hipEventDestroy(begin));
+    HIP_CHECK(hipEventDestroy(end));
+    HIP_CHECK(hipGraphExecDestroy(exec));
+    HIP_CHECK(hipGraphDestroy(graph));
+    HIP_CHECK(hipStreamDestroy(stream));
 
     std::sort(samples.begin(), samples.end());
     Result result;
@@ -96,13 +97,13 @@ void run(int tokens, int candidate_block, DeviceBuffer* flush, int warmup, int r
     DeviceBuffer delta(sizeof(std::int32_t));
     DeviceBuffer destination(host.size() * sizeof(std::int32_t));
     const std::int32_t delta_value = -17;
-    cudaMemcpy(source.p, host.data(), source.bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(delta.p, &delta_value, sizeof(delta_value), cudaMemcpyHostToDevice);
+    hipMemcpy(source.p, host.data(), source.bytes, hipMemcpyHostToDevice);
+    hipMemcpy(delta.p, &delta_value, sizeof(delta_value), hipMemcpyHostToDevice);
     Tensor tsource(source.p, DType::I32, {tokens});
     Tensor tdelta(delta.p, DType::I32, {1});
     Tensor tdestination(destination.p, DType::I32, {tokens});
 
-    const auto launch = [&](cudaStream_t stream) {
+    const auto launch = [&](hipStream_t stream) {
         if (candidate_block == 0) {
             ops::offset_i32_positions(tsource, tdelta, tdestination, stream);
         } else {
@@ -127,7 +128,7 @@ void run(int tokens, int candidate_block, DeviceBuffer* flush, int warmup, int r
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h> // cudaStream_t
+#include <hip/hip_runtime.h> // hipStream_t
 
 namespace ninfer::ops {
 
@@ -34,10 +35,10 @@ namespace ninfer::ops {
  * workspace or persistent state.
  */
 void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tensor& k,
-          cudaStream_t stream);
+          hipStream_t stream);
 
 // Single-tensor form with the same formula and storage contract. The head count comes directly
 // from x; Q versus K role does not change the transformation.
-void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaStream_t stream);
+void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, hipStream_t stream);
 
 } // namespace ninfer::ops

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Captured Qwen3.6-35B-A3B target-verification output-stage benchmark.
 //
 // The timed graph is final RMSNorm -> Q6 full-vocabulary head -> argmax.
@@ -11,7 +12,7 @@
 #include "quantized_weight.cuh"
 #include "ops/linear/q6/q6_dispatch.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -100,8 +101,8 @@ const char* q6_launch_name(ops::detail::Q6Launch launch) {
 }
 
 int run(const Options& options) {
-    cudaStream_t stream = nullptr;
-    CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    hipStream_t stream = nullptr;
+    HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
 
     bench::PackedQuantizedWeight head = bench::make_row_split_weight(
         QType::Q6G64_F16S, kVocab, kHidden, kHidden, {0x35, 0x12, 0x3c00});
@@ -109,7 +110,7 @@ int run(const Options& options) {
         bench::make_bf16(static_cast<std::size_t>(kHidden) * kMaxTokens);
     std::vector<std::uint16_t> norm_host(kHidden, bench::f32_to_bf16(0.0F));
     ninfer::DeviceBuffer norm(norm_host.size() * sizeof(std::uint16_t));
-    CUDA_CHECK(cudaMemcpy(norm.p, norm_host.data(), norm.bytes, cudaMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(norm.p, norm_host.data(), norm.bytes, hipMemcpyHostToDevice));
     ninfer::DeviceBuffer hidden(static_cast<std::size_t>(kHidden) * kMaxTokens *
                                 sizeof(std::uint16_t));
     ninfer::DeviceBuffer logits(static_cast<std::size_t>(kVocab) * kMaxTokens *
@@ -118,7 +119,7 @@ int run(const Options& options) {
     ninfer::DeviceBuffer flush(options.flush_size);
     WorkspaceArena workspace(1);
 
-    std::printf("# gpu=RTX_5090 cuda=13.1 sm=120a flush_mib=%zu warmup=%d repeat=%d\n",
+    std::printf("# gpu=strix_halo hip=7.13 gfx=1151 flush_mib=%zu warmup=%d repeat=%d\n",
                 options.flush_size >> 20, options.warmup, options.repeat);
     std::printf("%4s %5s %10s %10s %10s %-24s %s\n", "T", "nodes", "median_us", "min_us", "p95_us",
                 "head_route", "argmax_route");
@@ -132,14 +133,14 @@ int run(const Options& options) {
         const ops::detail::Q6Launch head_launch =
             ops::detail::select_q6_a16_launch(kVocab, kHidden, t);
 
-        const auto body = [&](cudaStream_t body_stream) {
+        const auto body = [&](hipStream_t body_stream) {
             ops::rmsnorm(x, norm_weight, kRmsEps, true, normalized, body_stream);
             ops::linear(normalized, head.weight, output, body_stream);
             ops::argmax(output, selected, kValidVocab, body_stream);
         };
 
         body(stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         bench::TimedGraph graph;
         graph.capture(stream, body);
         const bench::ColdTiming timing =
@@ -148,7 +149,7 @@ int run(const Options& options) {
                     timing.min_us, timing.p95_us, q6_launch_name(head_launch), "public");
     }
 
-    CUDA_CHECK(cudaStreamDestroy(stream));
+    HIP_CHECK(hipStreamDestroy(stream));
     return 0;
 }
 

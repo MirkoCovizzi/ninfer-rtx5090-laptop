@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/launcher/scatter.h"
 
 #include "ops/kernel/scatter.cuh"
@@ -7,7 +8,7 @@
 
 namespace ninfer::ops::detail {
 
-void scatter_launch(const Tensor& src, const Tensor& indices, Tensor& dst, cudaStream_t stream) {
+void scatter_launch(const Tensor& src, const Tensor& indices, Tensor& dst, hipStream_t stream) {
     constexpr int block        = 256;
     constexpr int vector_block = 128;
     const int d                = src.ne[0];
@@ -20,21 +21,21 @@ void scatter_launch(const Tensor& src, const Tensor& indices, Tensor& dst, cudaS
             static_cast<uint4*>(dst.data), d / 8);
     } else if ((d & 1) == 0 && ((src_addr | dst_addr) & 0x3u) == 0) {
         scatter_bf16x2_kernel<<<vision, block, 0, stream>>>(
-            static_cast<const __nv_bfloat162*>(src.data),
-            static_cast<const std::int32_t*>(indices.data), static_cast<__nv_bfloat162*>(dst.data),
+            static_cast<const __hip_bfloat162*>(src.data),
+            static_cast<const std::int32_t*>(indices.data), static_cast<__hip_bfloat162*>(dst.data),
             d / 2);
     } else {
         scatter_scalar_kernel<<<vision, block, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(src.data),
-            static_cast<const std::int32_t*>(indices.data), static_cast<__nv_bfloat16*>(dst.data),
+            static_cast<const __hip_bfloat16*>(src.data),
+            static_cast<const std::int32_t*>(indices.data), static_cast<__hip_bfloat16*>(dst.data),
             d);
     }
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 void scatter_bf16_batch_launch(const Tensor& source, const Tensor& lanes,
                                const Tensor& valid_columns, Tensor& destination,
-                               cudaStream_t stream) {
+                               hipStream_t stream) {
     constexpr int block = 128;
     const dim3 grid(source.ne[1], source.ne[2], 1);
     scatter_bf16_batch_kernel<<<grid, block, 0, stream>>>(
@@ -43,7 +44,7 @@ void scatter_bf16_batch_launch(const Tensor& source, const Tensor& lanes,
         source.ne[0] / 8, source.ne[1],
         destination.nb[1] / static_cast<std::int64_t>(sizeof(uint4)),
         destination.nb[2] / static_cast<std::int64_t>(sizeof(uint4)));
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

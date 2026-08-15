@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/w8/w8_linear_swiglu_kernels.h"
 
 #include "core/device.h"
@@ -5,8 +6,9 @@
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 
@@ -19,13 +21,13 @@ constexpr int kGroupsPerRow = kK / 32;
 
 template <int RowsPerCta>
 __global__ __launch_bounds__(RowsPerCta * 32, 2) void w8_linear_swiglu_decode_pair_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
-    const std::uint8_t* __restrict__ scales, __nv_bfloat16* __restrict__ out) {
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const std::uint8_t* __restrict__ scales, __hip_bfloat16* __restrict__ out) {
     constexpr int kValuesPerLane  = 8;
     constexpr int kValuesPerPhase = 32 * kValuesPerLane;
     constexpr int kGroupsPerPhase = kValuesPerPhase / 32;
     constexpr int kPhases         = kK / kValuesPerPhase;
-    constexpr unsigned kMask      = 0xffffffffu;
+    constexpr unsigned long long kMask = 0xffffffffull;
 
     const int lane          = static_cast<int>(threadIdx.x) & 31;
     const int warp          = static_cast<int>(threadIdx.x) >> 5;
@@ -88,29 +90,29 @@ __global__ __launch_bounds__(RowsPerCta * 32, 2) void w8_linear_swiglu_decode_pa
 }
 
 template <int RowsPerCta>
-void launch_decode(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_decode(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     static_assert(kIntermediate % RowsPerCta == 0);
     w8_linear_swiglu_decode_pair_kernel<RowsPerCta>
         <<<kIntermediate / RowsPerCta, RowsPerCta * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-            static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data));
-    CUDA_CHECK(cudaGetLastError());
+            static_cast<const __hip_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const std::uint8_t*>(w.scales), static_cast<__hip_bfloat16*>(out.data));
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
 
 void w8_linear_swiglu_decode_pair_launch(const Tensor& x, const Weight& w, Tensor& out,
-                                         cudaStream_t stream) {
+                                         hipStream_t stream) {
     launch_decode<8>(x, w, out, stream);
 }
 
 void w8_linear_swiglu_decode_pair_r4_launch(const Tensor& x, const Weight& w, Tensor& out,
-                                            cudaStream_t stream) {
+                                            hipStream_t stream) {
     launch_decode<4>(x, w, out, stream);
 }
 
 void w8_linear_swiglu_decode_pair_r16_launch(const Tensor& x, const Weight& w, Tensor& out,
-                                             cudaStream_t stream) {
+                                             hipStream_t stream) {
     launch_decode<16>(x, w, out, stream);
 }
 

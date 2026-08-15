@@ -1,10 +1,12 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/mma.cuh"
 #include "ops/common/memory.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 #include <type_traits>
@@ -44,7 +46,7 @@ __device__ __forceinline__ int q4_small_t_swizzle_64(int row, int col) {
 }
 
 union Q4SmallTBf16PairBits {
-    __nv_bfloat162 pair;
+    __hip_bfloat162 pair;
     unsigned bits;
 };
 
@@ -59,10 +61,10 @@ __device__ __forceinline__ unsigned q4_small_t_bf16_pair(std::uint8_t packed) {
 template <class Geometry, int TileCols, int ActiveCols, class Epilogue = Q4SmallTMmaStoreEpilogue,
           class RowPolicy = Q4SmallTMmaIdentityRows>
 __launch_bounds__(256, 6) __global__
-    void q4_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
+    void q4_small_t_mma_kernel(const __hip_bfloat16* __restrict__ x,
                                const std::uint8_t* __restrict__ codes,
                                const std::uint8_t* __restrict__ scales,
-                               __nv_bfloat16* __restrict__ out, Epilogue epilogue = {},
+                               __hip_bfloat16* __restrict__ out, Epilogue epilogue = {},
                                RowPolicy row_policy = {}) {
     using Schedule              = Q4DraftSmallTSchedule;
     constexpr int kHidden       = Geometry::kInputRows;
@@ -74,6 +76,9 @@ __launch_bounds__(256, 6) __global__
     constexpr int kCodeRowBytes = kHidden / 2;
     constexpr int kTileCols     = TileCols;
     constexpr int kNt           = kTileCols / 8;
+    // gfx1151 WMMA atoms are 16x16; use div_up(kTileCols,16) 16-column atoms, the final one
+    // overlapping the tile edge when kTileCols is not a multiple of 16 (filtered at store).
+    constexpr int kWmmaNt       = (kTileCols + 15) / 16;
     static_assert(kTileCols >= 8 && kTileCols <= 32 && (kTileCols % 8) == 0);
     static_assert(ActiveCols >= 2 && ActiveCols <= kTileCols && ActiveCols > kTileCols - 8);
     static_assert((kHidden % kGroupK) == 0);
@@ -82,11 +87,11 @@ __launch_bounds__(256, 6) __global__
     union SharedStorage {
         struct {
             std::uint8_t codes[kRowsPerCta][kGroupK / 2];
-            __nv_bfloat16 activations[kWarps][kTileCols * kTileK];
+            __hip_bfloat16 activations[kWarps][kTileCols * kTileK];
             std::uint16_t scales[kRowsPerCta][kWarps];
         } staging;
 
-        float partial[kWarps * kNt * 32 * 4];
+        float partial[kWarps * kWmmaNt * 32 * 8];
     };
 
     __shared__ __align__(16) SharedStorage shared;
@@ -135,10 +140,13 @@ __launch_bounds__(256, 6) __global__
         }
     };
 
-    const int b_rin     = lane & 7;
-    const int b_koff    = ((lane >> 3) & 1) << 3;
     const int warp_koff = k_split * kTileK;
-    float acc[kNt][4]   = {};
+    float acc[kWmmaNt][8] = {};
+#pragma unroll
+    for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+        for (int r = 0; r < 8; ++r) { acc[ni][r] = 0.0f; }
+    }
 
     stage_weight(0);
     stage_x(0);
@@ -149,35 +157,54 @@ __launch_bounds__(256, 6) __global__
 #pragma unroll
     for (int group_index = 0; group_index < kGroups; ++group_index) {
         const int group_k0      = group_index * kGroupK;
-        float group_acc[kNt][4] = {};
+        float group_acc[kWmmaNt][8] = {};
+#pragma unroll
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { group_acc[ni][r] = 0.0f; }
+        }
 
 #pragma unroll
         for (int ks = 0; ks < 4; ++ks) {
-            const int byte_col = warp_koff / 2 + ks * 8 + lid;
-            const unsigned af0 = q4_small_t_bf16_pair(code_shared[gid][byte_col]);
-            const unsigned af1 = q4_small_t_bf16_pair(code_shared[gid + 8][byte_col]);
-            const unsigned af2 = q4_small_t_bf16_pair(code_shared[gid][byte_col + 4]);
-            const unsigned af3 = q4_small_t_bf16_pair(code_shared[gid + 8][byte_col + 4]);
+            // gfx1151 WMMA A fragment: active lane l holds row m = l>>1 and the full 16-K
+            // window. Each code_shared byte decodes to 2 bf16 weights for two adjacent K.
+            const int m                = lane >> 1;
+            const int base_byte        = warp_koff / 2 + ks * 8;
+            const unsigned char* base  = &code_shared[m][base_byte];
+            const bool a_active        = wmma_a_lane_active(lane);
+            unsigned a_frag[8];
 #pragma unroll
-            for (int nt = 0; nt < kNt; ++nt) {
-                unsigned bf0, bf1;
-                const int br = nt * 8 + b_rin;
-                ldmatrix_x2(bf0, bf1,
-                            smem_addr(&x_shared[k_split][br * kTileK + q4_small_t_swizzle_64(
-                                                                           br, ks * 16 + b_koff)]));
-                mma_bf16(group_acc[nt][0], group_acc[nt][1], group_acc[nt][2], group_acc[nt][3],
-                         af0, af1, af2, af3, bf0, bf1);
+            for (int j = 0; j < 8; ++j) {
+                const unsigned pair = q4_small_t_bf16_pair(base[j]);
+                a_frag[j]           = a_active ? pair : 0u;
+            }
+#pragma unroll
+            for (int ni = 0; ni < kWmmaNt; ++ni) {
+                unsigned b_frag[8];
+                const int col = ni * 16 + (lane & 15);
+                wmma_load_b_bf16(b_frag, x_shared[k_split], col, ks * 16, kTileK,
+                                 q4_small_t_swizzle_64);
+                WmmaC8& c  = *reinterpret_cast<WmmaC8*>(group_acc[ni]);
+                WmmaA16I a = *reinterpret_cast<WmmaA16I*>(a_frag);
+                WmmaA16I b = *reinterpret_cast<WmmaA16I*>(b_frag);
+                c          = wmma_bf16(a, b, c);
             }
         }
 
-        const float top_scale = __half2float(__ushort_as_half(scale_shared[gid][k_split]));
-        const float bot_scale = __half2float(__ushort_as_half(scale_shared[gid + 8][k_split]));
+        // WMMA C layout: lane l holds rows r + 8*(l>=16) at column l&15. Each of those rows
+        // has its OWN per-64-K scale, so scale per register (per row), not per lane.
+        const int rb = 8 * (lane >= 16 ? 1 : 0);
+        float row_scale[8];
 #pragma unroll
-        for (int nt = 0; nt < kNt; ++nt) {
-            acc[nt][0] = fmaf(group_acc[nt][0], top_scale, acc[nt][0]);
-            acc[nt][1] = fmaf(group_acc[nt][1], top_scale, acc[nt][1]);
-            acc[nt][2] = fmaf(group_acc[nt][2], bot_scale, acc[nt][2]);
-            acc[nt][3] = fmaf(group_acc[nt][3], bot_scale, acc[nt][3]);
+        for (int r = 0; r < 8; ++r) {
+            row_scale[r] = __half2float(__ushort_as_half(scale_shared[rb + r][k_split]));
+        }
+#pragma unroll
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                acc[ni][r] = fmaf(group_acc[ni][r], row_scale[r], acc[ni][r]);
+            }
         }
 
         if (group_index + 1 < kGroups) {
@@ -194,25 +221,27 @@ __launch_bounds__(256, 6) __global__
     auto* partial = shared.partial;
     if ((k_split & 1) != 0) {
 #pragma unroll
-        for (int nt = 0; nt < kNt; ++nt) {
-            store_vec(partial + ((k_split * kNt + nt) * 32 + lane) * 4,
-                      make_float4(acc[nt][0], acc[nt][1], acc[nt][2], acc[nt][3]));
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                partial[((k_split * kWmmaNt + ni) * 32 + lane) * 8 + r] = acc[ni][r];
+            }
         }
     }
     __syncthreads();
 
     if ((k_split & 1) == 0) {
 #pragma unroll
-        for (int nt = 0; nt < kNt; ++nt) {
-            const float4 partner =
-                load_vec<float4>(partial + (((k_split + 1) * kNt + nt) * 32 + lane) * 4);
-            acc[nt][0] += partner.x;
-            acc[nt][1] += partner.y;
-            acc[nt][2] += partner.z;
-            acc[nt][3] += partner.w;
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                acc[ni][r] += partial[(((k_split + 1) * kWmmaNt + ni) * 32 + lane) * 8 + r];
+            }
             if (k_split != 0) {
-                store_vec(partial + ((k_split * kNt + nt) * 32 + lane) * 4,
-                          make_float4(acc[nt][0], acc[nt][1], acc[nt][2], acc[nt][3]));
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    partial[((k_split * kWmmaNt + ni) * 32 + lane) * 8 + r] = acc[ni][r];
+                }
             }
         }
     }
@@ -220,33 +249,39 @@ __launch_bounds__(256, 6) __global__
 
     if (k_split == 0) {
 #pragma unroll
-        for (int nt = 0; nt < kNt; ++nt) {
-            float4 sum = make_float4(acc[nt][0], acc[nt][1], acc[nt][2], acc[nt][3]);
+        for (int ni = 0; ni < kWmmaNt; ++ni) {
+            float sum[8];
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { sum[r] = acc[ni][r]; }
 #pragma unroll
             for (int split = 2; split < kWarps; split += 2) {
-                const float4 value =
-                    load_vec<float4>(partial + ((split * kNt + nt) * 32 + lane) * 4);
-                sum.x += value.x;
-                sum.y += value.y;
-                sum.z += value.z;
-                sum.w += value.w;
-            }
-            const int col0 = nt * 8 + 2 * lid;
-            if constexpr (std::is_same_v<Epilogue, Q4SmallTMmaStoreEpilogue>) {
-                if (col0 < ActiveCols) {
-                    out[static_cast<std::int64_t>(col0) * Geometry::kOutputRows + row0 + gid] =
-                        __float2bfloat16_rn(sum.x);
-                    out[static_cast<std::int64_t>(col0) * Geometry::kOutputRows + row0 + gid + 8] =
-                        __float2bfloat16_rn(sum.z);
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    sum[r] += partial[((split * kWmmaNt + ni) * 32 + lane) * 8 + r];
                 }
-                if (col0 + 1 < ActiveCols) {
-                    out[static_cast<std::int64_t>(col0 + 1) * Geometry::kOutputRows + row0 + gid] =
-                        __float2bfloat16_rn(sum.y);
-                    out[static_cast<std::int64_t>(col0 + 1) * Geometry::kOutputRows + row0 + gid +
-                        8] = __float2bfloat16_rn(sum.w);
+            }
+            // WMMA C layout: lane l holds (row r + 8*(l>=16), col = lane&15).
+            const int row_lo     = row0 + (lane < 16 ? 0 : 8);
+            const int local_col  = ni * 16 + (lane & 15);
+            const int col        = local_col;
+            if constexpr (std::is_same_v<Epilogue, Q4SmallTMmaStoreEpilogue>) {
+                if (local_col >= kTileCols) { continue; }
+                if (col < ActiveCols) {
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        out[static_cast<std::int64_t>(col) * Geometry::kOutputRows + row_lo + r] =
+                            __float2bfloat16_rn(sum[r]);
+                    }
                 }
             } else {
-                epilogue.template store<ActiveCols>(row0 + gid, col0, sum);
+                // A fused (e.g. SwiGLU) epilogue combines a gate/up row-half pair. Exchange
+                // the partner across the warp converged (all 32 lanes) BEFORE the per-column
+                // guard, so a narrow tile width or partial column range never traps.
+                float partner[8];
+#pragma unroll
+                for (int r = 0; r < 8; ++r) { partner[r] = __shfl_sync(0xffffffffull, sum[r], lane ^ 16); }
+                if (local_col >= kTileCols) { continue; }
+                epilogue.template store_wmma<ActiveCols>(row_lo, col, sum, partner);
             }
         }
     }

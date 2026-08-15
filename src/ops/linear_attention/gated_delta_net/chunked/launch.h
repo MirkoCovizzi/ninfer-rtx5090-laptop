@@ -1,10 +1,11 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/layout.h"
 #include "ops/linear_attention/gated_delta_net/common.h"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -12,8 +13,8 @@
 
 #define NINFER_GATED_DELTA_NET_PROPAGATE(expr)                                                     \
     do {                                                                                           \
-        const cudaError_t ninfer_gated_delta_net_error = (expr);                                   \
-        if (ninfer_gated_delta_net_error != cudaSuccess) { return ninfer_gated_delta_net_error; }  \
+        const hipError_t ninfer_gated_delta_net_error = (expr);                                   \
+        if (ninfer_gated_delta_net_error != hipSuccess) { return ninfer_gated_delta_net_error; }  \
     } while (0)
 
 namespace ninfer::ops::detail::gated_delta_net::chunked {
@@ -54,16 +55,16 @@ struct prepare_wy_wu_config {
     std::int32_t H_v  = 0;
     std::int32_t L    = 0;
 
-    const __nv_bfloat16* k = nullptr;
-    const __nv_bfloat16* v = nullptr;
+    const __hip_bfloat16* k = nullptr;
+    const __hip_bfloat16* v = nullptr;
     const float* g_in      = nullptr;
     const float* beta      = nullptr;
 
-    __nv_bfloat16* W    = nullptr;
-    __nv_bfloat16* U    = nullptr;
+    __hip_bfloat16* W    = nullptr;
+    __hip_bfloat16* U    = nullptr;
     float* g_cumsum_out = nullptr;
 
-    cudaStream_t stream = nullptr;
+    hipStream_t stream = nullptr;
 };
 
 struct state_passing_config {
@@ -71,17 +72,17 @@ struct state_passing_config {
     std::int32_t H_v  = 0;
     std::int32_t L    = 0;
 
-    const __nv_bfloat16* W = nullptr;
-    const __nv_bfloat16* U = nullptr;
-    const __nv_bfloat16* k = nullptr;
+    const __hip_bfloat16* W = nullptr;
+    const __hip_bfloat16* U = nullptr;
+    const __hip_bfloat16* k = nullptr;
     const float* g_cumsum  = nullptr;
     const float* state_in  = nullptr;
 
-    __nv_bfloat16* v_new   = nullptr;
-    __nv_bfloat16* h_chunk = nullptr;
+    __hip_bfloat16* v_new   = nullptr;
+    __hip_bfloat16* h_chunk = nullptr;
     float* state_out       = nullptr;
 
-    cudaStream_t stream = nullptr;
+    hipStream_t stream = nullptr;
 };
 
 struct chunk_output_config {
@@ -89,17 +90,17 @@ struct chunk_output_config {
     std::int32_t H_v  = 0;
     std::int32_t L    = 0;
 
-    const __nv_bfloat16* q       = nullptr;
-    const __nv_bfloat16* k       = nullptr;
-    const __nv_bfloat16* v_new   = nullptr;
+    const __hip_bfloat16* q       = nullptr;
+    const __hip_bfloat16* k       = nullptr;
+    const __hip_bfloat16* v_new   = nullptr;
     const float* g_cumsum        = nullptr;
-    const __nv_bfloat16* h_chunk = nullptr;
+    const __hip_bfloat16* h_chunk = nullptr;
 
-    __nv_bfloat16* attn_out = nullptr;
+    __hip_bfloat16* attn_out = nullptr;
 
     float scale = 0.0f;
 
-    cudaStream_t stream = nullptr;
+    hipStream_t stream = nullptr;
 };
 
 struct stage_validator {
@@ -108,48 +109,48 @@ struct stage_validator {
     std::int32_t H_v;
     std::int32_t T;
 
-    cudaError_t check_shape() const {
+    hipError_t check_shape() const {
         if (T <= 0 || !are_head_counts_valid(H_qk, H_v)) {
             std::fprintf(stderr, "%s: invalid shape (H_qk=%d H_v=%d T=%d)\n", name, H_qk, H_v, T);
-            return cudaErrorInvalidValue;
+            return hipErrorInvalidValue;
         }
-        return cudaSuccess;
+        return hipSuccess;
     }
 
-    cudaError_t check_full_chunks() const {
+    hipError_t check_full_chunks() const {
         if ((T % kChunkSize) != 0) {
             std::fprintf(stderr,
                          "%s: Gated DeltaNet chunked path requires T to be a multiple of %d; "
                          "route tail tokens through AR instead (T=%lld)\n",
                          name, kChunkSize, static_cast<long long>(T));
-            return cudaErrorInvalidValue;
+            return hipErrorInvalidValue;
         }
-        return cudaSuccess;
+        return hipSuccess;
     }
 
-    cudaError_t check_grid(std::int64_t grid_x, std::int64_t grid_y,
+    hipError_t check_grid(std::int64_t grid_x, std::int64_t grid_y,
                            std::int64_t grid_z = 1) const {
         if (grid_x > static_cast<std::int64_t>(0xffffffff)) {
             std::fprintf(stderr, "%s: grid.x too large (%lld)\n", name,
                          static_cast<long long>(grid_x));
-            return cudaErrorInvalidConfiguration;
+            return hipErrorInvalidConfiguration;
         }
         if (grid_y > static_cast<std::int64_t>(0xffff)) {
             std::fprintf(stderr, "%s: grid.y too large (%lld)\n", name,
                          static_cast<long long>(grid_y));
-            return cudaErrorInvalidConfiguration;
+            return hipErrorInvalidConfiguration;
         }
         if (grid_z > static_cast<std::int64_t>(0xffff)) {
             std::fprintf(stderr, "%s: grid.z too large (%lld)\n", name,
                          static_cast<long long>(grid_z));
-            return cudaErrorInvalidConfiguration;
+            return hipErrorInvalidConfiguration;
         }
-        return cudaSuccess;
+        return hipSuccess;
     }
 };
 
-cudaError_t launch_prepare_wy_wu(const prepare_wy_wu_config& cfg);
-cudaError_t launch_state_passing(const state_passing_config& cfg);
-cudaError_t launch_output(const chunk_output_config& cfg);
+hipError_t launch_prepare_wy_wu(const prepare_wy_wu_config& cfg);
+hipError_t launch_state_passing(const state_passing_config& cfg);
+hipError_t launch_output(const chunk_output_config& cfg);
 
 } // namespace ninfer::ops::detail::gated_delta_net::chunked

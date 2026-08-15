@@ -8,72 +8,72 @@
 namespace ninfer {
 namespace {
 
-std::string cuda_error_message(const char* prefix, cudaError_t err) {
-    return std::string(prefix) + ": " + cudaGetErrorName(err) + ": " + cudaGetErrorString(err);
+std::string hip_error_message(const char* prefix, hipError_t err) {
+    return std::string(prefix) + ": " + hipGetErrorName(err) + ": " + hipGetErrorString(err);
 }
 
-void log_cuda_error(const char* op, cudaError_t err) noexcept {
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "CUDA cleanup failed during %s: %s: %s\n", op, cudaGetErrorName(err),
-                     cudaGetErrorString(err));
+void log_hip_error(const char* op, hipError_t err) noexcept {
+    if (err != hipSuccess) {
+        std::fprintf(stderr, "HIP cleanup failed during %s: %s: %s\n", op, hipGetErrorName(err),
+                     hipGetErrorString(err));
     }
 }
 
-void destroy_stream(cudaStream_t& stream) noexcept {
+void destroy_stream(hipStream_t& stream) noexcept {
     if (stream != nullptr) {
-        log_cuda_error("cudaStreamDestroy", cudaStreamDestroy(stream));
+        log_hip_error("hipStreamDestroy", hipStreamDestroy(stream));
         stream = nullptr;
     }
 }
 
-void destroy_event(cudaEvent_t& event) noexcept {
+void destroy_event(hipEvent_t& event) noexcept {
     if (event != nullptr) {
-        log_cuda_error("cudaEventDestroy", cudaEventDestroy(event));
+        log_hip_error("hipEventDestroy", hipEventDestroy(event));
         event = nullptr;
     }
 }
 
 } // namespace
 
-void cuda_check(cudaError_t err, const char* expr, const char* file, int line) {
-    if (err == cudaSuccess) { return; }
-    std::fprintf(stderr, "%s:%d: CUDA_CHECK(%s) failed: %s: %s\n", file, line, expr,
-                 cudaGetErrorName(err), cudaGetErrorString(err));
+void hip_check(hipError_t err, const char* expr, const char* file, int line) {
+    if (err == hipSuccess) { return; }
+    std::fprintf(stderr, "%s:%d: HIP_CHECK(%s) failed: %s: %s\n", file, line, expr,
+                 hipGetErrorName(err), hipGetErrorString(err));
     std::abort();
 }
 
 DeviceContext::DeviceContext(int device_id) : device(device_id) {
     int count       = 0;
-    cudaError_t err = cudaGetDeviceCount(&count);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaGetDeviceCount failed", err));
+    hipError_t err = hipGetDeviceCount(&count);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipGetDeviceCount failed", err));
     }
-    if (count <= 0) { throw std::runtime_error("no CUDA devices available"); }
-    if (device_id < 0 || device_id >= count) { throw std::runtime_error("invalid CUDA device id"); }
+    if (count <= 0) { throw std::runtime_error("no HIP devices available"); }
+    if (device_id < 0 || device_id >= count) { throw std::runtime_error("invalid HIP device id"); }
 
-    err = cudaSetDevice(device_id);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
-    }
-
-    err = cudaGetDeviceProperties(&props, device_id);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaGetDeviceProperties failed", err));
+    err = hipSetDevice(device_id);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipSetDevice failed", err));
     }
 
-    cudaStream_t compute = nullptr;
-    cudaStream_t load    = nullptr;
-    err                  = cudaStreamCreateWithFlags(&compute, cudaStreamNonBlocking);
-    if (err != cudaSuccess) {
+    err = hipGetDeviceProperties(&props, device_id);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipGetDeviceProperties failed", err));
+    }
+
+    hipStream_t compute = nullptr;
+    hipStream_t load    = nullptr;
+    err                  = hipStreamCreateWithFlags(&compute, hipStreamNonBlocking);
+    if (err != hipSuccess) {
         throw std::runtime_error(
-            cuda_error_message("cudaStreamCreateWithFlags(stream) failed", err));
+            hip_error_message("hipStreamCreateWithFlags(stream) failed", err));
     }
 
-    err = cudaStreamCreateWithFlags(&load, cudaStreamNonBlocking);
-    if (err != cudaSuccess) {
+    err = hipStreamCreateWithFlags(&load, hipStreamNonBlocking);
+    if (err != hipSuccess) {
         destroy_stream(compute);
         throw std::runtime_error(
-            cuda_error_message("cudaStreamCreateWithFlags(load_stream) failed", err));
+            hip_error_message("hipStreamCreateWithFlags(load_stream) failed", err));
     }
 
     stream      = compute;
@@ -82,7 +82,7 @@ DeviceContext::DeviceContext(int device_id) : device(device_id) {
 
 DeviceContext::~DeviceContext() {
     if (stream != nullptr || load_stream != nullptr) {
-        log_cuda_error("cudaSetDevice", cudaSetDevice(device));
+        log_hip_error("hipSetDevice", hipSetDevice(device));
     }
     destroy_stream(load_stream);
     destroy_stream(stream);
@@ -99,7 +99,7 @@ DeviceContext& DeviceContext::operator=(DeviceContext&& other) noexcept {
     if (this == &other) { return *this; }
 
     if (stream != nullptr || load_stream != nullptr) {
-        log_cuda_error("cudaSetDevice", cudaSetDevice(device));
+        log_hip_error("hipSetDevice", hipSetDevice(device));
     }
     destroy_stream(load_stream);
     destroy_stream(stream);
@@ -118,44 +118,44 @@ int DeviceContext::sm() const noexcept { return props.major * 10 + props.minor; 
 
 std::size_t DeviceContext::total_vram() const noexcept { return props.totalGlobalMem; }
 
-void DeviceContext::synchronize() const { CUDA_CHECK(cudaStreamSynchronize(stream)); }
+void DeviceContext::synchronize() const { HIP_CHECK(hipStreamSynchronize(stream)); }
 
-CudaEventTimer::CudaEventTimer(const DeviceContext& ctx) : stream_(ctx.stream) {
-    cudaError_t err = cudaSetDevice(ctx.device);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaSetDevice(timer) failed", err));
+HipEventTimer::HipEventTimer(const DeviceContext& ctx) : stream_(ctx.stream) {
+    hipError_t err = hipSetDevice(ctx.device);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipSetDevice(timer) failed", err));
     }
 
-    cudaEvent_t start = nullptr;
-    cudaEvent_t stop  = nullptr;
-    err               = cudaEventCreate(&start);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaEventCreate(start) failed", err));
+    hipEvent_t start = nullptr;
+    hipEvent_t stop  = nullptr;
+    err               = hipEventCreate(&start);
+    if (err != hipSuccess) {
+        throw std::runtime_error(hip_error_message("hipEventCreate(start) failed", err));
     }
 
-    err = cudaEventCreate(&stop);
-    if (err != cudaSuccess) {
+    err = hipEventCreate(&stop);
+    if (err != hipSuccess) {
         destroy_event(start);
-        throw std::runtime_error(cuda_error_message("cudaEventCreate(stop) failed", err));
+        throw std::runtime_error(hip_error_message("hipEventCreate(stop) failed", err));
     }
 
     start_ = start;
     stop_  = stop;
 }
 
-CudaEventTimer::~CudaEventTimer() {
+HipEventTimer::~HipEventTimer() {
     destroy_event(stop_);
     destroy_event(start_);
 }
 
-CudaEventTimer::CudaEventTimer(CudaEventTimer&& other) noexcept
+HipEventTimer::HipEventTimer(HipEventTimer&& other) noexcept
     : stream_(other.stream_), start_(other.start_), stop_(other.stop_) {
     other.stream_ = nullptr;
     other.start_  = nullptr;
     other.stop_   = nullptr;
 }
 
-CudaEventTimer& CudaEventTimer::operator=(CudaEventTimer&& other) noexcept {
+HipEventTimer& HipEventTimer::operator=(HipEventTimer&& other) noexcept {
     if (this == &other) { return *this; }
 
     destroy_event(stop_);
@@ -171,19 +171,19 @@ CudaEventTimer& CudaEventTimer::operator=(CudaEventTimer&& other) noexcept {
     return *this;
 }
 
-void CudaEventTimer::start() { CUDA_CHECK(cudaEventRecord(start_, stream_)); }
+void HipEventTimer::start() { HIP_CHECK(hipEventRecord(start_, stream_)); }
 
-void CudaEventTimer::record_stop() { CUDA_CHECK(cudaEventRecord(stop_, stream_)); }
+void HipEventTimer::record_stop() { HIP_CHECK(hipEventRecord(stop_, stream_)); }
 
-float CudaEventTimer::elapsed_ms() const {
+float HipEventTimer::elapsed_ms() const {
     float ms = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&ms, start_, stop_));
+    HIP_CHECK(hipEventElapsedTime(&ms, start_, stop_));
     return ms;
 }
 
-float CudaEventTimer::stop_ms() {
+float HipEventTimer::stop_ms() {
     record_stop();
-    CUDA_CHECK(cudaEventSynchronize(stop_));
+    HIP_CHECK(hipEventSynchronize(stop_));
     return elapsed_ms();
 }
 

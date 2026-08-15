@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Public Qwen3.6 GDN projection/convolution Snapshot and ReplaySSM Record benchmark.
 //
 // The timed body is exactly one selected gdn_input_proj_conv_*() public Op call.
@@ -9,7 +10,7 @@
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -379,8 +380,8 @@ public:
                                                 {0x53, 0x55, 0x3400})),
           conv_weight_(bench::make_bf16(static_cast<std::size_t>(kChannels) * 4)),
           flush_(flush_bytes) {
-        CUDA_CHECK(cudaMemset(flush_.p, 0xa5, flush_.bytes));
-        CUDA_CHECK(cudaDeviceSynchronize());
+        HIP_CHECK(hipMemset(flush_.p, 0xa5, flush_.bytes));
+        HIP_CHECK(hipDeviceSynchronize());
     }
 
     [[nodiscard]] Tensor conv_weight() const {
@@ -406,7 +407,7 @@ public:
     void launch(Form form, const Tensor& x, Tensor& conv_states, const Tensor& initial,
                 const Tensor& snapshot_base, const Tensor& valid_columns, Tensor& conv_record,
                 Tensor& query, Tensor& key, Tensor& value, Tensor& z, WorkspaceArena& workspace,
-                cudaStream_t stream) {
+                hipStream_t stream) {
         Tensor convolution_weight = conv_weight();
         if (form == Form::Record) {
             ops::gdn_input_proj_conv_record(x, qk_.weight, value_z_.weight, convolution_weight,
@@ -419,8 +420,8 @@ public:
         }
     }
 
-    void flush(cudaStream_t stream) {
-        CUDA_CHECK(cudaMemsetAsync(flush_.p, 0xa5, flush_.bytes, stream));
+    void flush(hipStream_t stream) {
+        HIP_CHECK(hipMemsetAsync(flush_.p, 0xa5, flush_.bytes, stream));
     }
 
 private:
@@ -436,8 +437,8 @@ public:
         : parent_(bench::make_nvfp4_weight(kChannels + kZRows, kHidden)),
           conv_weight_(bench::make_bf16(static_cast<std::size_t>(kChannels) * 4)),
           flush_(flush_bytes), policy_(policy) {
-        CUDA_CHECK(cudaMemset(flush_.p, 0xa5, flush_.bytes));
-        CUDA_CHECK(cudaDeviceSynchronize());
+        HIP_CHECK(hipMemset(flush_.p, 0xa5, flush_.bytes));
+        HIP_CHECK(hipDeviceSynchronize());
     }
 
     [[nodiscard]] Tensor conv_weight() const {
@@ -465,7 +466,7 @@ public:
     void launch(Form form, const Tensor& x, Tensor& conv_states, const Tensor& initial,
                 const Tensor& snapshot_base, const Tensor& valid_columns, Tensor& conv_record,
                 Tensor& query, Tensor& key, Tensor& value, Tensor& z, WorkspaceArena& workspace,
-                cudaStream_t stream) {
+                hipStream_t stream) {
         Tensor convolution_weight = conv_weight();
         if (form == Form::Record) {
             ops::gdn_input_proj_conv_record(x, parent_.weight, convolution_weight, conv_states,
@@ -478,8 +479,8 @@ public:
         }
     }
 
-    void flush(cudaStream_t stream) {
-        CUDA_CHECK(cudaMemsetAsync(flush_.p, 0xa5, flush_.bytes, stream));
+    void flush(hipStream_t stream) {
+        HIP_CHECK(hipMemsetAsync(flush_.p, 0xa5, flush_.bytes, stream));
     }
 
 private:
@@ -495,8 +496,8 @@ public:
         : parent_(bench::make_row_split_weight(QType::W8G32_F16S, 12288, 2048, 2048,
                                                {0x03, 0x00, 0x3c00})),
           conv_weight_(bench::make_bf16(static_cast<std::size_t>(8192) * 4)), flush_(flush_bytes) {
-        CUDA_CHECK(cudaMemset(flush_.p, 0xa5, flush_.bytes));
-        CUDA_CHECK(cudaDeviceSynchronize());
+        HIP_CHECK(hipMemset(flush_.p, 0xa5, flush_.bytes));
+        HIP_CHECK(hipDeviceSynchronize());
     }
 
     [[nodiscard]] Tensor conv_weight() const {
@@ -520,7 +521,7 @@ public:
     void launch(Form form, const Tensor& x, Tensor& conv_states, const Tensor& initial,
                 const Tensor& snapshot_base, const Tensor& valid_columns, Tensor& conv_record,
                 Tensor& query, Tensor& key, Tensor& value, Tensor& z, WorkspaceArena& workspace,
-                cudaStream_t stream) {
+                hipStream_t stream) {
         Tensor convolution_weight = conv_weight();
         if (form == Form::Record) {
             ops::gdn_input_proj_conv_record(x, parent_.weight, convolution_weight, conv_states,
@@ -533,8 +534,8 @@ public:
         }
     }
 
-    void flush(cudaStream_t stream) {
-        CUDA_CHECK(cudaMemsetAsync(flush_.p, 0xa5, flush_.bytes, stream));
+    void flush(hipStream_t stream) {
+        HIP_CHECK(hipMemsetAsync(flush_.p, 0xa5, flush_.bytes, stream));
     }
 
 private:
@@ -586,7 +587,7 @@ public:
             valid_columns_.copy_from_host(options.valid_columns.data(), valid_columns_.bytes);
             valid_ = Tensor(valid_columns_.p, DType::I32, {batch_});
         }
-        CUDA_CHECK(cudaDeviceSynchronize());
+        HIP_CHECK(hipDeviceSynchronize());
     }
 
     [[nodiscard]] const char* profile() const noexcept { return fixture_.profile(); }
@@ -595,11 +596,11 @@ public:
 
     [[nodiscard]] std::size_t workspace_bytes() const noexcept { return workspace_bytes_; }
 
-    void prepare(CacheState cache, cudaStream_t stream) {
+    void prepare(CacheState cache, hipStream_t stream) {
         if (cache == CacheState::Cold) { fixture_.flush(stream); }
     }
 
-    void launch(cudaStream_t stream) {
+    void launch(hipStream_t stream) {
         fixture_.launch(form_, x_, conv_states_, initial_, snapshot_base_, valid_,
                         conv_record_tensor_, query_tensor_, key_tensor_, value_tensor_, z_tensor_,
                         workspace_, stream);
@@ -638,52 +639,52 @@ private:
 class BodyTimedGraph {
 public:
     BodyTimedGraph() {
-        CUDA_CHECK(cudaEventCreate(&body_start_));
-        CUDA_CHECK(cudaEventCreate(&body_stop_));
-        CUDA_CHECK(cudaEventCreateWithFlags(&completion_, cudaEventDisableTiming));
+        HIP_CHECK(hipEventCreate(&body_start_));
+        HIP_CHECK(hipEventCreate(&body_stop_));
+        HIP_CHECK(hipEventCreateWithFlags(&completion_, hipEventDisableTiming));
     }
 
     ~BodyTimedGraph() {
-        if (exec_ != nullptr) { cudaGraphExecDestroy(exec_); }
-        if (graph_ != nullptr) { cudaGraphDestroy(graph_); }
-        if (body_start_ != nullptr) { cudaEventDestroy(body_start_); }
-        if (body_stop_ != nullptr) { cudaEventDestroy(body_stop_); }
-        if (completion_ != nullptr) { cudaEventDestroy(completion_); }
+        if (exec_ != nullptr) { hipGraphExecDestroy(exec_); }
+        if (graph_ != nullptr) { hipGraphDestroy(graph_); }
+        if (body_start_ != nullptr) { hipEventDestroy(body_start_); }
+        if (body_stop_ != nullptr) { hipEventDestroy(body_stop_); }
+        if (completion_ != nullptr) { hipEventDestroy(completion_); }
     }
 
     BodyTimedGraph(const BodyTimedGraph&)            = delete;
     BodyTimedGraph& operator=(const BodyTimedGraph&) = delete;
 
     template <class Launch>
-    void capture(cudaStream_t stream, Launch&& launch) {
-        CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
-        CUDA_CHECK(cudaEventRecordWithFlags(body_start_, stream, cudaEventRecordExternal));
+    void capture(hipStream_t stream, Launch&& launch) {
+        HIP_CHECK(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal));
+        HIP_CHECK(hipEventRecordWithFlags(body_start_, stream, hipEventRecordExternal));
         launch(stream);
-        CUDA_CHECK(cudaEventRecordWithFlags(body_stop_, stream, cudaEventRecordExternal));
-        CUDA_CHECK(cudaStreamEndCapture(stream, &graph_));
-        CUDA_CHECK(cudaGraphInstantiate(&exec_, graph_, 0));
+        HIP_CHECK(hipEventRecordWithFlags(body_stop_, stream, hipEventRecordExternal));
+        HIP_CHECK(hipStreamEndCapture(stream, &graph_));
+        HIP_CHECK(hipGraphInstantiate(&exec_, graph_, 0));
         std::size_t nodes = 0;
-        CUDA_CHECK(cudaGraphGetNodes(graph_, nullptr, &nodes));
+        HIP_CHECK(hipGraphGetNodes(graph_, nullptr, &nodes));
         if (nodes < 3) { throw std::runtime_error("GDN conv capture produced an empty graph"); }
     }
 
-    void launch(cudaStream_t stream) const { CUDA_CHECK(cudaGraphLaunch(exec_, stream)); }
+    void launch(hipStream_t stream) const { HIP_CHECK(hipGraphLaunch(exec_, stream)); }
 
-    double launch_body_timed(cudaStream_t stream) const {
+    double launch_body_timed(hipStream_t stream) const {
         launch(stream);
-        CUDA_CHECK(cudaEventRecord(completion_, stream));
-        CUDA_CHECK(cudaEventSynchronize(completion_));
+        HIP_CHECK(hipEventRecord(completion_, stream));
+        HIP_CHECK(hipEventSynchronize(completion_));
         float milliseconds = 0.0F;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, body_start_, body_stop_));
+        HIP_CHECK(hipEventElapsedTime(&milliseconds, body_start_, body_stop_));
         return static_cast<double>(milliseconds) * 1000.0;
     }
 
 private:
-    cudaGraph_t graph_      = nullptr;
-    cudaGraphExec_t exec_   = nullptr;
-    cudaEvent_t body_start_ = nullptr;
-    cudaEvent_t body_stop_  = nullptr;
-    cudaEvent_t completion_ = nullptr;
+    hipGraph_t graph_      = nullptr;
+    hipGraphExec_t exec_   = nullptr;
+    hipEvent_t body_start_ = nullptr;
+    hipEvent_t body_stop_  = nullptr;
+    hipEvent_t completion_ = nullptr;
 };
 
 Stats summarize(std::vector<double> samples) {
@@ -699,43 +700,43 @@ Stats summarize(std::vector<double> samples) {
 }
 
 template <class Fixture>
-Stats measure_eager(BenchmarkState<Fixture>& state, CacheState cache, cudaStream_t stream,
+Stats measure_eager(BenchmarkState<Fixture>& state, CacheState cache, hipStream_t stream,
                     int warmup, int repeat) {
-    cudaEvent_t start = nullptr;
-    cudaEvent_t stop  = nullptr;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
+    hipEvent_t start = nullptr;
+    hipEvent_t stop  = nullptr;
+    HIP_CHECK(hipEventCreate(&start));
+    HIP_CHECK(hipEventCreate(&stop));
     for (int index = 0; index < warmup; ++index) {
         state.prepare(cache, stream);
         state.launch(stream);
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
     for (int index = 0; index < repeat; ++index) {
         state.prepare(cache, stream);
-        CUDA_CHECK(cudaEventRecord(start, stream));
+        HIP_CHECK(hipEventRecord(start, stream));
         state.launch(stream);
-        CUDA_CHECK(cudaEventRecord(stop, stream));
-        CUDA_CHECK(cudaEventSynchronize(stop));
+        HIP_CHECK(hipEventRecord(stop, stream));
+        HIP_CHECK(hipEventSynchronize(stop));
         float milliseconds = 0.0F;
-        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+        HIP_CHECK(hipEventElapsedTime(&milliseconds, start, stop));
         samples.push_back(static_cast<double>(milliseconds) * 1000.0);
     }
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
+    HIP_CHECK(hipEventDestroy(start));
+    HIP_CHECK(hipEventDestroy(stop));
     return summarize(std::move(samples));
 }
 
 template <class Fixture>
 Stats measure_graph(BenchmarkState<Fixture>& state, const BodyTimedGraph& graph, CacheState cache,
-                    cudaStream_t stream, int warmup, int repeat) {
+                    hipStream_t stream, int warmup, int repeat) {
     for (int index = 0; index < warmup; ++index) {
         state.prepare(cache, stream);
         graph.launch(stream);
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(repeat));
@@ -748,20 +749,20 @@ Stats measure_graph(BenchmarkState<Fixture>& state, const BodyTimedGraph& graph,
 
 template <class Fixture>
 std::vector<Result> run_point(Fixture& fixture, Form form, std::int32_t tokens,
-                              const Options& options, cudaStream_t stream) {
+                              const Options& options, hipStream_t stream) {
     BenchmarkState<Fixture> state(fixture, form, tokens, options);
 
     // Match production graph lifecycle: materialize once, capture, instantiate,
     // and prime one replay before the configured measurements.
     state.prepare(CacheState::Warm, stream);
     state.launch(stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     BodyTimedGraph graph;
     if (options.execution != Execution::Eager) {
-        graph.capture(stream, [&](cudaStream_t launch_stream) { state.launch(launch_stream); });
+        graph.capture(stream, [&](hipStream_t launch_stream) { state.launch(launch_stream); });
         graph.launch(stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
     }
 
     std::vector<Result> results;
@@ -796,9 +797,9 @@ void write_csv(const std::string& path, const std::vector<Result>& results, cons
     std::ofstream stream(output);
     if (!stream) { throw std::runtime_error("failed to open CSV output"); }
     int runtime = 0;
-    CUDA_CHECK(cudaRuntimeGetVersion(&runtime));
+    HIP_CHECK(hipRuntimeGetVersion(&runtime));
     stream << "profile,form,tokens,batch,execution,timed_scope,cache,median_us,min_us,p95_us,"
-              "workspace_bytes,warmup,repeat,flush_bytes,build_type,gpu,cuda_runtime\n";
+              "workspace_bytes,warmup,repeat,flush_bytes,build_type,gpu,hip_runtime\n";
     for (const Result& result : results) {
         stream << result.profile << ',' << form_name(result.form) << ',' << result.tokens << ','
                << result.batch << ',' << execution_name(result.execution)
@@ -816,7 +817,7 @@ void write_csv(const std::string& path, const std::vector<Result>& results, cons
 }
 
 template <class Fixture>
-void run_fixture(Fixture& fixture, const Options& options, cudaStream_t stream,
+void run_fixture(Fixture& fixture, const Options& options, hipStream_t stream,
                  std::vector<Result>& results) {
     for (std::int32_t tokens : selected_tokens(options.tokens)) {
         for (const Form form : selected_forms(options.form, tokens)) {

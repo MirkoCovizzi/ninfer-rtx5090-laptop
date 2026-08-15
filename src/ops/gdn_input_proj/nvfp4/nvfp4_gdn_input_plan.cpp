@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_plan.h"
 
 #include "ops/linear/nvfp4/nvfp4_config.h"
@@ -22,7 +23,7 @@ Nvfp4GdnInputRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                cudaStream_t stream) {
+                hipStream_t stream) {
     constexpr std::int32_t kChunk   = kNvfp4LastSmallT;
     constexpr std::int32_t kQkvRows = 10240;
     constexpr std::int32_t kZRows   = 6144;
@@ -60,7 +61,7 @@ std::size_t nvfp4_gdn_input_workspace_capacity_bytes(LinearPolicy policy, std::i
 }
 
 void nvfp4_gdn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                              LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
+                              LinearPolicy policy, WorkspaceArena* workspace, hipStream_t stream) {
     if (resolve_route(policy, x.ne[1]) == Nvfp4GdnInputRoute::A16) {
         launch_a16(x, weight, qkv, z, stream);
         return;

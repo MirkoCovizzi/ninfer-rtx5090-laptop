@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "core/paged_kv_cache.h"
 
 #include "core/device.h"
@@ -164,7 +165,7 @@ PagedKVAllocation PagedKVPool::reserve(std::uint32_t page_entitlement) {
     return allocation;
 }
 
-void PagedKVPool::zero_pages(std::span<const std::int32_t> page_ids, cudaStream_t stream) {
+void PagedKVPool::zero_pages(std::span<const std::int32_t> page_ids, hipStream_t stream) {
     if (page_ids.empty()) { return; }
 
     std::vector<std::int32_t> sorted(page_ids.begin(), page_ids.end());
@@ -180,10 +181,10 @@ void PagedKVPool::zero_pages(std::span<const std::int32_t> page_ids, cudaStream_
         for (const Tensor& plane : planes_) {
             auto* base = static_cast<unsigned char*>(plane.data);
             if (spec_.plane_order == PagedKVPlaneOrder::PageMajor) {
-                CUDA_CHECK(cudaMemsetAsync(base + static_cast<std::int64_t>(first) * plane.nb[3], 0,
+                HIP_CHECK(hipMemsetAsync(base + static_cast<std::int64_t>(first) * plane.nb[3], 0,
                                            static_cast<std::size_t>(count) * plane.nb[3], stream));
             } else {
-                CUDA_CHECK(cudaMemset2DAsync(base + static_cast<std::int64_t>(first) * plane.nb[2],
+                HIP_CHECK(hipMemset2DAsync(base + static_cast<std::int64_t>(first) * plane.nb[2],
                                              plane.nb[3], 0,
                                              static_cast<std::size_t>(count) * plane.nb[2],
                                              static_cast<std::size_t>(plane.ne[3]), stream));
@@ -344,7 +345,7 @@ void PagedKVAllocation::cancel_unmapped_entitlement() noexcept {
     page_entitlement_ = mapped;
 }
 
-void PagedKVAllocation::materialize_pages(std::uint32_t pages, cudaStream_t stream) {
+void PagedKVAllocation::materialize_pages(std::uint32_t pages, hipStream_t stream) {
     if (!valid() || pages < mapped_page_count() || pages > page_entitlement_) {
         throw std::invalid_argument("Paged KV materialize extent is outside entitlement");
     }
@@ -358,7 +359,7 @@ void PagedKVAllocation::materialize_pages(std::uint32_t pages, cudaStream_t stre
     if (bound_row_ >= 0) { publish_range(old_count, count, stream); }
 }
 
-void PagedKVAllocation::materialize_tokens(std::uint32_t tokens, cudaStream_t stream) {
+void PagedKVAllocation::materialize_tokens(std::uint32_t tokens, hipStream_t stream) {
     materialize_pages(pages_for_tokens(tokens), stream);
 }
 
@@ -375,7 +376,7 @@ void PagedKVAllocation::trim_pages(std::uint32_t pages) {
 
 void PagedKVAllocation::trim_tokens(std::uint32_t tokens) { trim_pages(pages_for_tokens(tokens)); }
 
-void PagedKVAllocation::bind_row(std::int32_t row, cudaStream_t stream) {
+void PagedKVAllocation::bind_row(std::int32_t row, hipStream_t stream) {
     if (!valid()) { throw std::logic_error("Cannot bind an empty Paged KV allocation"); }
     if (bound_row_ >= 0) { throw std::logic_error("Paged KV allocation is already bound"); }
     pool_->acquire_row(row);
@@ -383,20 +384,20 @@ void PagedKVAllocation::bind_row(std::int32_t row, cudaStream_t stream) {
     publish_mapping(stream);
 }
 
-void PagedKVAllocation::publish_mapping(cudaStream_t stream) const {
+void PagedKVAllocation::publish_mapping(hipStream_t stream) const {
     if (bound_row_ < 0) { throw std::logic_error("Paged KV allocation is not bound"); }
     publish_range(0, mapped_page_count(), stream);
 }
 
 void PagedKVAllocation::publish_range(std::uint32_t first_page, std::uint32_t page_count,
-                                      cudaStream_t stream) const {
+                                      hipStream_t stream) const {
     if (page_count == 0) { return; }
     Tensor row         = pool_->block_table_row(bound_row_);
     auto* destination  = static_cast<std::int32_t*>(row.data) + first_page;
     const auto* source = page_ids_.data() + first_page;
-    CUDA_CHECK(cudaMemcpyAsync(destination, source,
+    HIP_CHECK(hipMemcpyAsync(destination, source,
                                static_cast<std::size_t>(page_count) * sizeof(std::int32_t),
-                               cudaMemcpyHostToDevice, stream));
+                               hipMemcpyHostToDevice, stream));
 }
 
 void PagedKVAllocation::unbind_row() noexcept {

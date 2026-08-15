@@ -29,7 +29,7 @@ void require_shape(const Tensor& t, std::int32_t n0, std::int32_t n1, const char
 } // namespace
 
 void mtp_pack_fc_input(const Tensor& embedding_norm, const Tensor& hidden_norm, Tensor& out,
-                       cudaStream_t stream) {
+                       hipStream_t stream) {
     constexpr const char* op = "mtp_pack_fc_input";
     require_bf16_contiguous_nonnull(embedding_norm, op, "embedding_norm");
     require_bf16_contiguous_nonnull(hidden_norm, op, "hidden_norm");
@@ -46,7 +46,7 @@ void mtp_pack_fc_input(const Tensor& embedding_norm, const Tensor& hidden_norm, 
 }
 
 void mtp_split_attn_in(const Tensor& attn_in, Tensor& q, Tensor& k, Tensor& gate, Tensor& v,
-                       cudaStream_t stream) {
+                       hipStream_t stream) {
     constexpr const char* op = "mtp_split_attn_in";
     require_bf16_contiguous_nonnull(attn_in, op, "attn_in");
     require_bf16_contiguous_nonnull(q, op, "q");

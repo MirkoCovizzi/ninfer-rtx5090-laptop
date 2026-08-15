@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
 
 #include <cmath>

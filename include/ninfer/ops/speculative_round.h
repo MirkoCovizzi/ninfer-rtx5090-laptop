@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 #include "ninfer/ops/sampling.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -39,7 +40,7 @@ namespace ninfer::ops {
  */
 void speculative_prepare_verify_inputs(const Tensor& anchors, const Tensor& drafts,
                                        const Tensor& base_positions, const Tensor& current_extents,
-                                       Tensor& verify_ids, Tensor& positions, cudaStream_t stream);
+                                       Tensor& verify_ids, Tensor& positions, hipStream_t stream);
 
 /**
  * Prepare only the target verification ids when the caller already owns the matching position
@@ -48,7 +49,7 @@ void speculative_prepare_verify_inputs(const Tensor& anchors, const Tensor& draf
  */
 void speculative_prepare_verify_ids(const Tensor& anchors, const Tensor& drafts,
                                     const Tensor& current_extents, Tensor& verify_ids,
-                                    cudaStream_t stream);
+                                    hipStream_t stream);
 
 /**
  * Op: speculative_accept_greedy_drafts
@@ -91,7 +92,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
                                       Tensor& lengths, Tensor& anchors, Tensor& licensed_tokens,
                                       Tensor& licensed_counts, Tensor& accepted,
                                       std::int32_t token_domain, const SamplingConfig* configs,
-                                      WorkspaceArena& workspace, cudaStream_t stream);
+                                      WorkspaceArena& workspace, hipStream_t stream);
 
 /**
  * Op: speculative_select_accepted_hidden
@@ -105,7 +106,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   and uses no workspace or other state.
  */
 void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& selectors, Tensor& out,
-                                        cudaStream_t stream);
+                                        hipStream_t stream);
 
 /**
  * Op: proposal_remap_token_ids
@@ -119,6 +120,6 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
  *   state side effect.
  */
 void proposal_remap_token_ids(Tensor& proposal_tokens, const std::int32_t* id_map,
-                              std::int32_t count, cudaStream_t stream);
+                              std::int32_t count, hipStream_t stream);
 
 } // namespace ninfer::ops

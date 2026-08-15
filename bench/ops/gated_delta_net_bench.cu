@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Production and stage-attribution benchmark for the Gated DeltaNet Op.
 //
 // Complete running-state, snapshot, and pre-normalized chunked-pipeline measurements call the
@@ -14,7 +15,7 @@
 #include "ninfer_bench_common.h"
 #include "ops/linear_attention/gated_delta_net/chunked/launch.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -401,11 +402,11 @@ struct Operands {
 };
 
 template <class Launch>
-GraphMeasurement measure_graph(Launch& launch, DeviceBuffer& flush, cudaStream_t stream,
+GraphMeasurement measure_graph(Launch& launch, DeviceBuffer& flush, hipStream_t stream,
                                const Options& options) {
     // Resolve lazy CUDA function attributes and reject an invalid case before capture.
     launch(stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     TimedGraph graph;
     graph.capture(stream, launch);
@@ -556,7 +557,7 @@ std::string running_implementation(std::int32_t tokens) {
 }
 
 BenchRow run_running(const Options& options, std::int32_t tokens, DeviceBuffer& flush,
-                     cudaStream_t stream) {
+                     hipStream_t stream) {
     const Problem problem{options.qk_heads, options.value_heads, tokens};
     Operands operands(problem, false);
 
@@ -581,7 +582,7 @@ BenchRow run_running(const Options& options, std::int32_t tokens, DeviceBuffer& 
     const std::size_t workspace_bytes = ops::gated_delta_net_workspace_capacity_bytes(
         problem.qk_heads, problem.value_heads, true, tokens, tokens);
     WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 1));
-    auto launch = [&](cudaStream_t launch_stream) {
+    auto launch = [&](hipStream_t launch_stream) {
         ops::gated_delta_net(q, k, v, g, beta, gated_delta_net_scale(), true, workspace, ssm_in,
                              ssm_out, out, launch_stream);
     };
@@ -608,7 +609,7 @@ BenchRow run_running(const Options& options, std::int32_t tokens, DeviceBuffer& 
 }
 
 BenchRow run_snapshot(const Options& options, std::int32_t tokens, DeviceBuffer& flush,
-                      cudaStream_t stream) {
+                      hipStream_t stream) {
     const Problem problem{options.qk_heads, options.value_heads, tokens, options.batch};
     Operands operands(problem, false);
 
@@ -672,7 +673,7 @@ BenchRow run_snapshot(const Options& options, std::int32_t tokens, DeviceBuffer&
     }
 
     const bool composed = options.qk_norm == "composed";
-    auto launch         = [&](cudaStream_t launch_stream) {
+    auto launch         = [&](hipStream_t launch_stream) {
         if (composed) {
             ops::l2norm(q, kQkNormEpsilon, q_norm, launch_stream);
             ops::l2norm(k, kQkNormEpsilon, k_norm, launch_stream);
@@ -707,7 +708,7 @@ BenchRow run_snapshot(const Options& options, std::int32_t tokens, DeviceBuffer&
 }
 
 std::vector<BenchRow> run_chunked(const Options& options, std::int32_t tokens, DeviceBuffer& flush,
-                                  cudaStream_t stream) {
+                                  hipStream_t stream) {
     const Problem problem{options.qk_heads, options.value_heads, tokens};
     Operands operands(problem, true);
 
@@ -733,7 +734,7 @@ std::vector<BenchRow> run_chunked(const Options& options, std::int32_t tokens, D
                              problem.value_heads});
 
     WorkspaceArena pipeline_workspace(DeviceSpan{workspace.p, workspace.bytes});
-    auto pipeline = [&](cudaStream_t launch_stream) {
+    auto pipeline = [&](hipStream_t launch_stream) {
         ops::gated_delta_net(q, k, v, g, beta, gated_delta_net_scale(), false, pipeline_workspace,
                              ssm_in, ssm_out, out, launch_stream);
     };
@@ -772,37 +773,37 @@ std::vector<BenchRow> run_chunked(const Options& options, std::int32_t tokens, D
     prepare.H_qk         = problem.qk_heads;
     prepare.H_v          = problem.value_heads;
     prepare.L            = tokens;
-    prepare.k            = static_cast<const __nv_bfloat16*>(k.data);
-    prepare.v            = static_cast<const __nv_bfloat16*>(v.data);
+    prepare.k            = static_cast<const __hip_bfloat16*>(k.data);
+    prepare.v            = static_cast<const __hip_bfloat16*>(v.data);
     prepare.g_in         = static_cast<const float*>(g.data);
     prepare.beta         = static_cast<const float*>(beta.data);
-    prepare.W            = static_cast<__nv_bfloat16*>(W.data);
-    prepare.U            = static_cast<__nv_bfloat16*>(U.data);
+    prepare.W            = static_cast<__hip_bfloat16*>(W.data);
+    prepare.U            = static_cast<__hip_bfloat16*>(U.data);
     prepare.g_cumsum_out = static_cast<float*>(g_cumsum.data);
 
     chunked_detail::state_passing_config state{};
     state.H_qk      = problem.qk_heads;
     state.H_v       = problem.value_heads;
     state.L         = tokens;
-    state.W         = static_cast<const __nv_bfloat16*>(W.data);
-    state.U         = static_cast<const __nv_bfloat16*>(U.data);
-    state.k         = static_cast<const __nv_bfloat16*>(k.data);
+    state.W         = static_cast<const __hip_bfloat16*>(W.data);
+    state.U         = static_cast<const __hip_bfloat16*>(U.data);
+    state.k         = static_cast<const __hip_bfloat16*>(k.data);
     state.g_cumsum  = static_cast<const float*>(g_cumsum.data);
     state.state_in  = static_cast<const float*>(ssm_in.data);
-    state.v_new     = static_cast<__nv_bfloat16*>(v_new.data);
-    state.h_chunk   = static_cast<__nv_bfloat16*>(h_chunk.data);
+    state.v_new     = static_cast<__hip_bfloat16*>(v_new.data);
+    state.h_chunk   = static_cast<__hip_bfloat16*>(h_chunk.data);
     state.state_out = static_cast<float*>(ssm_out.data);
 
     chunked_detail::chunk_output_config output{};
     output.H_qk     = problem.qk_heads;
     output.H_v      = problem.value_heads;
     output.L        = tokens;
-    output.q        = static_cast<const __nv_bfloat16*>(q.data);
-    output.k        = static_cast<const __nv_bfloat16*>(k.data);
-    output.v_new    = static_cast<const __nv_bfloat16*>(v_new.data);
+    output.q        = static_cast<const __hip_bfloat16*>(q.data);
+    output.k        = static_cast<const __hip_bfloat16*>(k.data);
+    output.v_new    = static_cast<const __hip_bfloat16*>(v_new.data);
     output.g_cumsum = static_cast<const float*>(g_cumsum.data);
-    output.h_chunk  = static_cast<const __nv_bfloat16*>(h_chunk.data);
-    output.attn_out = static_cast<__nv_bfloat16*>(out.data);
+    output.h_chunk  = static_cast<const __hip_bfloat16*>(h_chunk.data);
+    output.attn_out = static_cast<__hip_bfloat16*>(out.data);
     output.scale    = gated_delta_net_scale();
 
     const auto append_stage = [&](const char* implementation, const TrafficBytes& traffic,
@@ -826,21 +827,21 @@ std::vector<BenchRow> run_chunked(const Options& options, std::int32_t tokens, D
         });
     };
 
-    auto launch_prepare = [&](cudaStream_t launch_stream) {
+    auto launch_prepare = [&](hipStream_t launch_stream) {
         prepare.stream = launch_stream;
-        CUDA_CHECK(chunked_detail::launch_prepare_wy_wu(prepare));
+        HIP_CHECK(chunked_detail::launch_prepare_wy_wu(prepare));
     };
     append_stage("chunked.prepare_wy_wu", chunked_prepare_traffic(problem), launch_prepare);
 
-    auto launch_state = [&](cudaStream_t launch_stream) {
+    auto launch_state = [&](hipStream_t launch_stream) {
         state.stream = launch_stream;
-        CUDA_CHECK(chunked_detail::launch_state_passing(state));
+        HIP_CHECK(chunked_detail::launch_state_passing(state));
     };
     append_stage("chunked.state_passing", chunked_state_traffic(problem), launch_state);
 
-    auto launch_output = [&](cudaStream_t launch_stream) {
+    auto launch_output = [&](hipStream_t launch_stream) {
         output.stream = launch_stream;
-        CUDA_CHECK(chunked_detail::launch_output(output));
+        HIP_CHECK(chunked_detail::launch_output(output));
     };
     append_stage("chunked.output", chunked_output_traffic(problem), launch_output);
 
@@ -877,7 +878,7 @@ void print_csv_header() {
 void print_row(const BenchRow& row, const Options& options) {
     if (options.csv) {
         std::printf("%s,%s,%s,BF16,%d,%d,%d,%d,%d,%d,%d,%zu,%.0f,%.0f,%.0f,%zu,"
-                    "cold_l2,cuda_graph,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,",
+                    "cold_l2,hip_graph,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,",
                     row.state_form, row.normalization, row.implementation.c_str(),
                     gated_delta_net_detail::kStateDim, options.qk_heads, options.value_heads,
                     row.tokens, options.batch, row.full_chunks, row.tail_tokens,
@@ -911,7 +912,7 @@ void print_row(const BenchRow& row, const Options& options) {
                 traffic_gbps(row), row.implementation.c_str());
 }
 
-void print_banner(const Options& options, const cudaDeviceProp& device) {
+void print_banner(const Options& options, const hipDeviceProp_t& device) {
     if (options.csv) {
         print_csv_header();
         return;
@@ -931,7 +932,7 @@ void print_banner(const Options& options, const cudaDeviceProp& device) {
 } // namespace
 
 int main(int argc, char** argv) {
-    cudaStream_t stream = nullptr;
+    hipStream_t stream = nullptr;
     try {
         const Options options = parse_options(argc, argv);
         if (options.help) {
@@ -940,13 +941,13 @@ int main(int argc, char** argv) {
         }
 
         int device_count = 0;
-        if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
             std::printf("SKIP: no usable CUDA device\n");
             return 0;
         }
-        cudaDeviceProp device{};
-        CUDA_CHECK(cudaGetDeviceProperties(&device, 0));
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipDeviceProp_t device{};
+        HIP_CHECK(hipGetDeviceProperties(&device, 0));
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(options.flush_bytes);
         print_banner(options, device);
 
@@ -963,11 +964,11 @@ int main(int argc, char** argv) {
             }
         }
 
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
-        if (stream != nullptr) { cudaStreamDestroy(stream); }
+        if (stream != nullptr) { hipStreamDestroy(stream); }
         std::fprintf(stderr, "ninfer_gated_delta_net_bench: %s\n", error.what());
         return 1;
     }

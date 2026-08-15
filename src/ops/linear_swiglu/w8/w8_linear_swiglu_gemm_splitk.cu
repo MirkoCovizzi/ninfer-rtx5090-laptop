@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/w8/w8_linear_swiglu_kernels.h"
 
 #include "core/device.h"
@@ -18,7 +19,7 @@ constexpr int kHidden       = 2048;
 constexpr int kRowsPerCta   = 8;
 constexpr int kFirstExactT  = 2;
 constexpr int kLastExactT   = 48;
-using ProjectionLauncher    = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+using ProjectionLauncher    = void (*)(const Tensor&, const Weight&, Tensor&, hipStream_t);
 
 struct W8SwiGluExactTRows {
     static constexpr int kOutputRowsPerCta = kRowsPerCta;
@@ -31,24 +32,22 @@ struct W8SwiGluExactTRows {
 };
 
 struct W8SwiGluExactTEpilogue {
-    __nv_bfloat16* out;
+    __hip_bfloat16* out;
     int rows;
 
+    // WMMA store: one column per lane, 8 rows; gate is this row-half's value, up is the
+    // partner row-half (fetched via warp shuffle in the kernel). Fuses silu(gate) * up.
     template <int ActiveCols>
-    __device__ __forceinline__ void store_pair(int row, int col0, float4 projected) const {
-        if (col0 < ActiveCols) {
-            out[static_cast<std::int64_t>(col0) * rows + row] =
-                __float2bfloat16_rn(silu(projected.x) * projected.z);
-        }
-        if (col0 + 1 < ActiveCols) {
-            out[static_cast<std::int64_t>(col0 + 1) * rows + row] =
-                __float2bfloat16_rn(silu(projected.y) * projected.w);
+    __device__ __forceinline__ void store_wmma(int row, int col, float gate, float up) const {
+        if (col < ActiveCols) {
+            out[static_cast<std::int64_t>(col) * rows + row] =
+                __float2bfloat16_rn(silu(gate) * up);
         }
     }
 };
 
 template <int ActiveCols>
-void launch_active_cols(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_active_cols(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     constexpr int TileCols = ActiveCols <= 8    ? 8
                              : ActiveCols <= 16 ? 16
                              : ActiveCols <= 24 ? 24
@@ -61,13 +60,13 @@ void launch_active_cols(const Tensor& x, const Weight& w, Tensor& out, cudaStrea
     using Schedule =
         std::conditional_t<(ActiveCols <= 32), W8SmallTMmaDefaultSchedule<TileCols, ActiveCols>,
                            W8SmallTMmaSchedule<4, TileCols, 3, ScaleAccess>>;
-    const W8ContiguousOutput ignored_output{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
-    const W8SwiGluExactTEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
+    const W8ContiguousOutput ignored_output{static_cast<__hip_bfloat16*>(out.data), kIntermediate};
+    const W8SwiGluExactTEpilogue epilogue{static_cast<__hip_bfloat16*>(out.data), kIntermediate};
     const W8SwiGluExactTRows row_policy{kIntermediate};
     w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule, W8ContiguousOutput,
                           W8SwiGluExactTEpilogue, W8SwiGluExactTRows, true>
         <<<kIntermediate / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const __hip_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
             static_cast<const std::uint8_t*>(w.scales), ignored_output, epilogue, row_policy);
 }
 
@@ -83,12 +82,12 @@ constexpr auto kLaunchers =
 } // namespace
 
 void w8_linear_swiglu_splitk_exact_t_launch(const Tensor& x, const Weight& w, Tensor& out,
-                                            cudaStream_t stream) {
+                                            hipStream_t stream) {
     if (x.ne[1] < kFirstExactT || x.ne[1] > kLastExactT) {
         throw std::invalid_argument("W8 LinearSwiGLU exact split-K requires T=2..48");
     }
     kLaunchers[x.ne[1] - kFirstExactT](x, w, out, stream);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace ninfer::ops::detail

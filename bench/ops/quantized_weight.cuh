@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -125,18 +126,18 @@ inline PackedQuantizedWeight make_row_split_weight(QType qtype, std::int32_t n, 
         scale_offset,
         scale_bytes,
     };
-    CUDA_CHECK(cudaMemset(result.storage.p, 0, result.storage.bytes));
-    CUDA_CHECK(cudaMemset(result.storage.p, fill.low_byte, low_bytes));
+    HIP_CHECK(hipMemset(result.storage.p, 0, result.storage.bytes));
+    HIP_CHECK(hipMemset(result.storage.p, fill.low_byte, low_bytes));
     if (high_bytes != 0) {
-        CUDA_CHECK(cudaMemset(static_cast<std::uint8_t*>(result.storage.p) + high_offset,
+        HIP_CHECK(hipMemset(static_cast<std::uint8_t*>(result.storage.p) + high_offset,
                               fill.high_byte, high_bytes));
     }
     detail::fill_f16_kernel<<<detail::launch_grid(groups), 256>>>(
         reinterpret_cast<std::uint16_t*>(static_cast<std::uint8_t*>(result.storage.p) +
                                          scale_offset),
         groups, fill.scale_f16);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
 
     Weight& weight          = result.weight;
     weight.payload          = result.storage.p;
@@ -189,13 +190,13 @@ inline PackedQuantizedWeight make_nvfp4_weight(std::int32_t n, std::int32_t k) {
         scale_offset,
         scale_bytes,
     };
-    CUDA_CHECK(cudaMemset(result.storage.p, 0, result.storage.bytes));
-    CUDA_CHECK(cudaMemset(result.storage.p, 0x22, code_bytes));
-    CUDA_CHECK(
-        cudaMemset(static_cast<std::uint8_t*>(result.storage.p) + scale_offset, 0x38, scale_bytes));
+    HIP_CHECK(hipMemset(result.storage.p, 0, result.storage.bytes));
+    HIP_CHECK(hipMemset(result.storage.p, 0x22, code_bytes));
+    HIP_CHECK(
+        hipMemset(static_cast<std::uint8_t*>(result.storage.p) + scale_offset, 0x38, scale_bytes));
     constexpr float kWeightDivisor = 0.125F;
-    CUDA_CHECK(cudaMemcpy(static_cast<std::uint8_t*>(result.storage.p) + divisor_offset,
-                          &kWeightDivisor, sizeof(kWeightDivisor), cudaMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(static_cast<std::uint8_t*>(result.storage.p) + divisor_offset,
+                          &kWeightDivisor, sizeof(kWeightDivisor), hipMemcpyHostToDevice));
 
     Weight& weight              = result.weight;
     weight.payload              = result.storage.p;

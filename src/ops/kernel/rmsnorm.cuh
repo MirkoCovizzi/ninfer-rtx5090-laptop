@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // ninfer::ops - RMSNorm kernels over contiguous BF16 rows.
@@ -5,7 +6,8 @@
 #include "ops/common/math.cuh"
 #include "ops/common/warp.cuh"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
@@ -30,8 +32,8 @@ __device__ __forceinline__ float rmsnorm_epilogue(float x, float inv, float weig
 // than part of the row geometry.
 template <RmsEpilogue Epilogue, int Block>
 __launch_bounds__(Block) __global__
-    void rmsnorm_warp_bf16x2_kernel(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                    const __nv_bfloat162* z, __nv_bfloat162* out, std::int32_t d,
+    void rmsnorm_warp_bf16x2_kernel(const __hip_bfloat162* x, const __hip_bfloat162* weight,
+                                    const __hip_bfloat162* z, __hip_bfloat162* out, std::int32_t d,
                                     std::int64_t rows, float eps) {
     static_assert(Block % kWarpSize == 0);
     constexpr int kWarpsPerBlock   = Block / kWarpSize;
@@ -43,7 +45,7 @@ __launch_bounds__(Block) __global__
 
     const int pairs             = d / 2;
     const std::int64_t row_base = row * static_cast<std::int64_t>(pairs);
-    __nv_bfloat162 values[kMaxPairsPerLane];
+    __hip_bfloat162 values[kMaxPairsPerLane];
     float sum = 0.0f;
 
 #pragma unroll
@@ -82,8 +84,8 @@ __launch_bounds__(Block) __global__
 // Algorithm assumptions: exactly two BF16x2 values per lane; one warp owns one logical row.
 template <RmsEpilogue Epilogue, int Block>
 __launch_bounds__(Block) __global__
-    void rmsnorm_d128_bf16x2_kernel(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                    const __nv_bfloat162* z, __nv_bfloat162* out, std::int64_t rows,
+    void rmsnorm_d128_bf16x2_kernel(const __hip_bfloat162* x, const __hip_bfloat162* weight,
+                                    const __hip_bfloat162* z, __hip_bfloat162* out, std::int64_t rows,
                                     float eps) {
     static_assert(Block % kWarpSize == 0);
     constexpr int kWarpsPerBlock = Block / kWarpSize;
@@ -96,8 +98,8 @@ __launch_bounds__(Block) __global__
     const std::int64_t row_base = row * kPairsPerRow;
     const int pair0             = lane;
     const int pair1             = lane + kWarpSize;
-    const __nv_bfloat162 value0 = x[row_base + pair0];
-    const __nv_bfloat162 value1 = x[row_base + pair1];
+    const __hip_bfloat162 value0 = x[row_base + pair0];
+    const __hip_bfloat162 value1 = x[row_base + pair1];
     const float2 x0             = __bfloat1622float2(value0);
     const float2 x1             = __bfloat1622float2(value1);
     float sum                   = x0.x * x0.x + x0.y * x0.y + x1.x * x1.x + x1.y * x1.y;
@@ -125,8 +127,8 @@ __launch_bounds__(Block) __global__
 // values per lane. The launcher admits only widths evenly divisible by the CTA vector span.
 template <RmsEpilogue Epilogue, int Block, int MaxPairsPerThread>
 __launch_bounds__(Block) __global__
-    void rmsnorm_cta_bf16x2_kernel(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                   const __nv_bfloat162* z, __nv_bfloat162* out, std::int32_t d,
+    void rmsnorm_cta_bf16x2_kernel(const __hip_bfloat162* x, const __hip_bfloat162* weight,
+                                   const __hip_bfloat162* z, __hip_bfloat162* out, std::int32_t d,
                                    std::int64_t rows, float eps) {
     static_assert(Block % kWarpSize == 0);
     const std::int64_t row = static_cast<std::int64_t>(blockIdx.x);
@@ -135,7 +137,7 @@ __launch_bounds__(Block) __global__
     const int pairs             = d / 2;
     const int pairs_per_thread  = pairs / Block;
     const std::int64_t row_base = row * static_cast<std::int64_t>(pairs);
-    __nv_bfloat162 values[MaxPairsPerThread];
+    __hip_bfloat162 values[MaxPairsPerThread];
     float sum = 0.0f;
 
 #pragma unroll
@@ -177,8 +179,8 @@ __launch_bounds__(Block) __global__
 // Algorithm assumptions: exactly two BF16x2 values per thread; one 512-thread CTA owns one row.
 template <RmsEpilogue Epilogue>
 __launch_bounds__(512) __global__
-    void rmsnorm_d2048_bf16x2_kernel(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                     const __nv_bfloat162* z, __nv_bfloat162* out,
+    void rmsnorm_d2048_bf16x2_kernel(const __hip_bfloat162* x, const __hip_bfloat162* weight,
+                                     const __hip_bfloat162* z, __hip_bfloat162* out,
                                      std::int64_t rows, float eps) {
     constexpr int kBlock       = 512;
     constexpr int kPairsPerRow = 1024;
@@ -188,8 +190,8 @@ __launch_bounds__(512) __global__
     const std::int64_t row_base = row * kPairsPerRow;
     const int pair0             = static_cast<int>(threadIdx.x);
     const int pair1             = pair0 + kBlock;
-    const __nv_bfloat162 value0 = x[row_base + pair0];
-    const __nv_bfloat162 value1 = x[row_base + pair1];
+    const __hip_bfloat162 value0 = x[row_base + pair0];
+    const __hip_bfloat162 value1 = x[row_base + pair1];
     const float2 x0             = __bfloat1622float2(value0);
     const float2 x1             = __bfloat1622float2(value1);
     const float local_sum       = x0.x * x0.x + x0.y * x0.y + x1.x * x1.x + x1.y * x1.y;
@@ -221,8 +223,8 @@ __launch_bounds__(512) __global__
 // implementation over another family of shape-specific paths.
 template <RmsEpilogue Epilogue>
 __launch_bounds__(256) __global__
-    void rmsnorm_generic_kernel(const __nv_bfloat16* x, const __nv_bfloat16* weight,
-                                const __nv_bfloat16* z, __nv_bfloat16* out, std::int32_t d,
+    void rmsnorm_generic_kernel(const __hip_bfloat16* x, const __hip_bfloat16* weight,
+                                const __hip_bfloat16* z, __hip_bfloat16* out, std::int32_t d,
                                 std::int64_t rows, float eps) {
     const std::int64_t row = static_cast<std::int64_t>(blockIdx.x);
     if (row >= rows) { return; }

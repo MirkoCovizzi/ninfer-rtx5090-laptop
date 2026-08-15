@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "ops/common/mma.cuh"
@@ -12,9 +13,6 @@
 
 namespace ninfer::ops::detail::gated_delta_net::chunked::state_passing {
 
-using ninfer::ops::mma_tf32_bits;
-using ninfer::ops::ldmatrix_x2;
-using ninfer::ops::ldmatrix_x2_t;
 using ninfer::ops::smem_addr;
 using ninfer::ops::exp2_approx;
 
@@ -90,20 +88,20 @@ struct SnapView {
 // prepare_wy_wu stores W's private workspace in the native-BF16 fragment
 // order {0,4,1,5,2,6,3,7} within each group of eight logical columns.
 struct Bf16WView {
-    __nv_bfloat16* __restrict__ base;
+    __hip_bfloat16* __restrict__ base;
 
     __device__ __forceinline__ int swizzled_col(int row, int col) const {
         return (col & ~63) + ((((col & 63) >> 3) ^ (row & 7)) << 3) + (col & 7);
     }
 
-    __device__ __forceinline__ __nv_bfloat16* ptr(int row, int col) const {
+    __device__ __forceinline__ __hip_bfloat16* ptr(int row, int col) const {
         return &base[row * kStateDim + swizzled_col(row, col)];
     }
 };
 
 template <int THREADS>
 __device__ __forceinline__ void issue_load_w_bf16(Bf16WView view,
-                                                  const __nv_bfloat16* gmem_base_row0,
+                                                  const __hip_bfloat16* gmem_base_row0,
                                                   int64_t gmem_row_stride, int tid) {
     constexpr int ELEMS_PER_COPY = 8;
     constexpr int COPIES_PER_ROW = kStateDim / ELEMS_PER_COPY;
@@ -122,7 +120,7 @@ __device__ __forceinline__ void issue_load_w_bf16(Bf16WView view,
 // ordered {0,4,1,5,2,6,3,7}. ldmatrix.x2.trans then packs token columns
 // {t,t+4} into the two halves of each register, matching the TF32 A fragment.
 struct Bf16KView {
-    __nv_bfloat16* __restrict__ base;
+    __hip_bfloat16* __restrict__ base;
 
     __device__ __forceinline__ int physical_row(int logical_row) const {
         const int row8 = logical_row & 7;
@@ -133,19 +131,19 @@ struct Bf16KView {
         return (col & ~63) + ((((col & 63) >> 3) ^ (physical_row_ & 7)) << 3) + (col & 7);
     }
 
-    __device__ __forceinline__ __nv_bfloat16* logical_ptr(int row, int col) const {
+    __device__ __forceinline__ __hip_bfloat16* logical_ptr(int row, int col) const {
         const int row_phys = physical_row(row);
         return &base[row_phys * kStateDim + swizzled_col(row_phys, col)];
     }
 
-    __device__ __forceinline__ __nv_bfloat16* physical_ptr(int row, int col) const {
+    __device__ __forceinline__ __hip_bfloat16* physical_ptr(int row, int col) const {
         return &base[row * kStateDim + swizzled_col(row, col)];
     }
 };
 
 template <int THREADS>
 __device__ __forceinline__ void issue_load_k_bf16(Bf16KView view,
-                                                  const __nv_bfloat16* gmem_base_row0,
+                                                  const __hip_bfloat16* gmem_base_row0,
                                                   int64_t gmem_row_stride, int tid) {
     constexpr int ELEMS_PER_COPY = 8;
     constexpr int COPIES_PER_ROW = kStateDim / ELEMS_PER_COPY;
@@ -159,22 +157,16 @@ __device__ __forceinline__ void issue_load_k_bf16(Bf16KView view,
     }
 }
 
-__device__ __forceinline__ void unpack_bf16x2_to_fp32_bits(unsigned packed, unsigned& low,
-                                                           unsigned& high) {
-    low  = packed << 16;
-    high = packed & 0xffff0000U;
-}
-
 // The narrow geometry targets two 128-register CTAs per SM. The wide geometry
 // uses one 512-thread CTA; both expose 16 resident warps without local spills.
 template <int NStrip>
 __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS) __global__
-    void state_passing_kernel(const __nv_bfloat16* __restrict__ W_in,
-                              const __nv_bfloat16* __restrict__ U_in,
-                              const __nv_bfloat16* __restrict__ k_in,
+    void state_passing_kernel(const __hip_bfloat16* __restrict__ W_in,
+                              const __hip_bfloat16* __restrict__ U_in,
+                              const __hip_bfloat16* __restrict__ k_in,
                               const float* __restrict__ g_cumsum, const float* state_in,
-                              __nv_bfloat16* __restrict__ v_new,
-                              __nv_bfloat16* __restrict__ h_chunk, float* state_out,
+                              __hip_bfloat16* __restrict__ v_new,
+                              __hip_bfloat16* __restrict__ h_chunk, float* state_out,
                               head_map qk_map, int chunks) {
     using D                         = kernel_dims<NStrip>;
     using L                         = smem_layout<NStrip>;
@@ -189,7 +181,6 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
     constexpr int M_TILES_MM1_PW = BT_PER_WARP / MMA_M;
     constexpr int M_TILES_H_PW   = S_PER_WARP / MMA_M;
     constexpr int M_TILES_H_GLOB = kStateDim / MMA_M;
-    constexpr int K_TILES_MM2    = BT / MMA_K;
 
     static_assert(M_TILES_H_PW >= 1, "S_PER_WARP must yield >= 1 M-tile per warp");
     static_assert(M_TILES_MM1_PW >= 1, "BT_PER_WARP must yield >= 1 M-tile per warp");
@@ -199,7 +190,6 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
 
     constexpr int SNAP_K_ROWS           = L::SNAP_K_ROWS;
     constexpr int N_SNAP_ITERS          = L::N_SNAP_ITERS;
-    constexpr int K_TILES_PER_SNAP_ITER = SNAP_K_ROWS / MMA_K;
 
     static_assert(N_SNAP_ITERS == BT_SPLITS, "design assumes one snap iter per s_idx");
 
@@ -212,9 +202,9 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
     // Smem partition. U and vd alias (`uvd_smem`) in disjoint phases. snap
     // is per-sit so the chunk-start unified scatter feeds every sit's MM1.
     extern __shared__ float smem[];
-    auto* const W_smem     = reinterpret_cast<__nv_bfloat16*>(smem); // W_LOAD_BF16
+    auto* const W_smem     = reinterpret_cast<__hip_bfloat16*>(smem); // W_LOAD_BF16
     float* const uvd_smem  = smem + W_STORAGE_FLT;                   // UVD_FLT
-    auto* const k_smem     = reinterpret_cast<__nv_bfloat16*>(uvd_smem + UVD_FLT);
+    auto* const k_smem     = reinterpret_cast<__hip_bfloat16*>(uvd_smem + UVD_FLT);
     float* const snap_smem = uvd_smem + UVD_FLT + K_STORAGE_FLT; // SNAP_FLT * N_SNAP_BUF
     float* const g_smem    = snap_smem + SNAP_FLT * N_SNAP_BUF;  // BT
 
@@ -368,42 +358,33 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
                     const int k_off    = kvec * 4;
                     float4 val         = snap.vec4_at(d_local, k_off);
                     const int d_global = d_off + d_local;
-                    __nv_bfloat16* out =
+                    __hip_bfloat16* out =
                         &h_chunk[hc_base + (int64_t)d_global * kStateDim + k_row_off + k_off];
                     store_vec(out, __floats2bfloat162_rn(val.x, val.y));
                     store_vec(out + 2, __floats2bfloat162_rn(val.z, val.w));
                 }
             }
 
-            // W's producer-interleaved BF16 layout lets ldmatrix.x2 form the
-            // four exact FP32/TF32 A operands. The FP32 state snapshot uses
-            // ldmatrix.x2 as a b16 transport for the two B operand bit patterns.
-            const int lane_in_8   = lane & 7;
-            const int matrix_half = (lane >> 3) & 1;
+            // Scalar matmul1: vnew = W @ h_state, contracted over all 128 state
+            // elements (split across the per-sit snap slices). Each lane owns
+            // the (token, value) element it will store in Phase D; the BF16 W and
+            // the FP32 state snapshot are read directly from shared memory
+            // (gfx1151 has no fp32/tf32 WMMA, so the fp32 MMA is evaluated as
+            // scalar FMA over the snappy slice).
 #pragma unroll
-            for (int kt = 0; kt < K_TILES_PER_SNAP_ITER; ++kt) {
-                const int W_k_local = k_row_off + kt * MMA_K;
-                const int snap_k    = kt * MMA_K;
-
-                const int b_row       = warp_d_local + lane_in_8;
-                const int b_col       = snap_k + matrix_half * 4;
-                const unsigned b_addr = smem_addr(&snap.at(b_row, b_col));
-                unsigned ub0, ub1;
-                ldmatrix_x2(ub0, ub1, b_addr);
-
+            for (int m_mm1 = 0; m_mm1 < M_TILES_MM1_PW; ++m_mm1) {
+                const int row_base = s_idx * BT_PER_WARP + m_mm1 * MMA_M;
 #pragma unroll
-                for (int m_mm1 = 0; m_mm1 < M_TILES_MM1_PW; ++m_mm1) {
-                    const int row_base    = s_idx * BT_PER_WARP + m_mm1 * MMA_M;
-                    const int a_row       = row_base + matrix_half * 8 + lane_in_8;
-                    const unsigned a_addr = smem_addr(W_view.ptr(a_row, W_k_local));
-                    unsigned packed0, packed1;
-                    ldmatrix_x2(packed0, packed1, a_addr);
-                    unsigned ua0, ua1, ua2, ua3;
-                    unpack_bf16x2_to_fp32_bits(packed0, ua0, ua2);
-                    unpack_bf16x2_to_fp32_bits(packed1, ua1, ua3);
-
-                    mma_tf32_bits(vnew_frag[m_mm1][0], vnew_frag[m_mm1][1], vnew_frag[m_mm1][2],
-                                  vnew_frag[m_mm1][3], ua0, ua1, ua2, ua3, ub0, ub1);
+                for (int e = 0; e < 4; ++e) {
+                    const int token = row_base + (e >= 2 ? 8 : 0) + lane_g;
+                    const int value = warp_d_local + 2 * lane_t + (e & 1);
+                    float acc       = vnew_frag[m_mm1][e];
+#pragma unroll
+                    for (int kk = 0; kk < SNAP_K_ROWS; ++kk) {
+                        acc += __bfloat162float(*W_view.ptr(token, k_row_off + kk)) *
+                               snap.at(value, kk);
+                    }
+                    vnew_frag[m_mm1][e] = acc;
                 }
             }
         }
@@ -426,7 +407,7 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
         const float g_C = g_smem[BT - 1];
         float gamma_C   = 0.0f;
         if (lane == 0) { gamma_C = exp2_approx(g_C * kLog2E); }
-        gamma_C = __shfl_sync(0xffffffffU, gamma_C, 0);
+        gamma_C = __shfl_sync(0xffffffffffffffffull, gamma_C, 0);
 
 #pragma unroll
         for (int m_mm1 = 0; m_mm1 < M_TILES_MM1_PW; ++m_mm1) {
@@ -441,16 +422,16 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
                 dec_bot = exp2_approx((g_C - g_smem[row_g1]) * kLog2E);
             }
             const int decay_src_lane = lane & ~3;
-            dec_top                  = __shfl_sync(0xffffffffU, dec_top, decay_src_lane);
-            dec_bot                  = __shfl_sync(0xffffffffU, dec_bot, decay_src_lane);
+            dec_top                  = __shfl_sync(0xffffffffffffffffull, dec_top, decay_src_lane);
+            dec_bot                  = __shfl_sync(0xffffffffffffffffull, dec_bot, decay_src_lane);
 
             const float v0 = vnew_frag[m_mm1][0];
             const float v1 = vnew_frag[m_mm1][1];
             const float v2 = vnew_frag[m_mm1][2];
             const float v3 = vnew_frag[m_mm1][3];
 
-            const __nv_bfloat162 out0 = __floats2bfloat162_rn(v0, v1);
-            const __nv_bfloat162 out1 = __floats2bfloat162_rn(v2, v3);
+            const __hip_bfloat162 out0 = __floats2bfloat162_rn(v0, v1);
+            const __hip_bfloat162 out1 = __floats2bfloat162_rn(v2, v3);
             store_vec(&v_new[vn_base + (int64_t)row_g0 * vn_stride + col_d0], out0);
             store_vec(&v_new[vn_base + (int64_t)row_g1 * vn_stride + col_d0], out1);
 
@@ -471,30 +452,22 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
         cp_wait<0>();
         __syncthreads();
 
-        // === Phase E: matmul2 over the full chunk of k ===
+        // === Phase E: matmul2 over the full chunk of k (scalar) ===
+        // h_frag += k @ v_decay: h[state, value] += sum_s k[s, state] * vd[s, value].
+        // The BF16 K operand and the FP32 v_decay are read directly from shared
+        // memory over the 64-token contraction.
 #pragma unroll
-        for (int kt = 0; kt < K_TILES_MM2; ++kt) {
-            const int k_off_local = kt * MMA_K;
-
-            const int row_t0 = k_off_local + lane_t;
-            const int row_t1 = row_t0 + 4;
-            const int col_g  = warp_d_local + lane_g;
-            const float b0   = vd_view.at(row_t0, col_g);
-            const float b1   = vd_view.at(row_t1, col_g);
-
+        for (int m = 0; m < M_TILES_H_PW; ++m) {
 #pragma unroll
-            for (int m = 0; m < M_TILES_H_PW; ++m) {
-                const int col_a_base = s_idx * S_PER_WARP + m * MMA_M;
-                const int a_row      = k_off_local + (lane & 7);
-                const int a_col      = col_a_base + ((lane >> 3) & 1) * 8;
-                unsigned packed0, packed1;
-                ldmatrix_x2_t(packed0, packed1, smem_addr(k_view.physical_ptr(a_row, a_col)));
-                unsigned ua0, ua1, ua2, ua3;
-                unpack_bf16x2_to_fp32_bits(packed0, ua0, ua2);
-                unpack_bf16x2_to_fp32_bits(packed1, ua1, ua3);
-
-                mma_tf32_bits(h_frag[m][0], h_frag[m][1], h_frag[m][2], h_frag[m][3], ua0, ua1, ua2,
-                              ua3, __float_as_uint(b0), __float_as_uint(b1));
+            for (int e = 0; e < 4; ++e) {
+                const int state_row = s_idx * S_PER_WARP + m * MMA_M + lane_g + (e >= 2 ? 8 : 0);
+                const int value     = warp_d_local + 2 * lane_t + (e & 1);
+                float acc           = h_frag[m][e];
+#pragma unroll
+                for (int s = 0; s < BT; ++s) {
+                    acc += __bfloat162float(*k_view.logical_ptr(s, state_row)) * vd_view.at(s, value);
+                }
+                h_frag[m][e] = acc;
             }
         }
 

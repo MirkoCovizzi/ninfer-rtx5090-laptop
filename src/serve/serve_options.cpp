@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
 
@@ -71,7 +72,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8] [--spec mtp|dflash --draft-tokens N] "
            "[--default-max-tokens N] "
-           "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
+           "[--vision] [--no-hip-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -197,8 +198,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             default_max_tokens_explicit = true;
         } else if (arg == "--vision") {
             options.enable_vision = true;
-        } else if (arg == "--no-cuda-graph") {
-            options.use_cuda_graph = false;
+        } else if (arg == "--no-hip-graph") {
+            options.use_hip_graph = false;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {

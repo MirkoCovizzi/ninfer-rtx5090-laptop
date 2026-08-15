@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/arena.h"
@@ -5,7 +6,7 @@
 #include "core/tensor.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -51,9 +52,9 @@ inline std::size_t nvfp4_w4a4_workspace_capacity_bytes(std::int32_t tokens,
 }
 
 void launch_nvfp4_w4a4_quantize(const Tensor& x, const Weight& weight, Nvfp4W4a4Workspace workspace,
-                                cudaStream_t stream);
+                                hipStream_t stream);
 
 void launch_nvfp4_w4a4(const Tensor& x, const Weight& weight, Tensor& out,
-                       Nvfp4W4a4Workspace workspace, cudaStream_t stream);
+                       Nvfp4W4a4Workspace workspace, hipStream_t stream);
 
 } // namespace ninfer::ops::detail

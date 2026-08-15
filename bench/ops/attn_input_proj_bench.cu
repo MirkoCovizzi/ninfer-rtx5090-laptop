@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Public-Op benchmark for every registered Attention input-projection contract.
 // Production dispatch is owned exclusively by attn_input_proj().
 
@@ -8,8 +9,8 @@
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -170,7 +171,7 @@ const char* policy_name(ops::LinearPolicy policy) {
 
 template <class Launch>
 bench::ColdTiming measure_public(Launch&& launch, CacheState cache, DeviceBuffer& flush,
-                                 cudaStream_t stream, int warmup, int repeat) {
+                                 hipStream_t stream, int warmup, int repeat) {
     return cache == CacheState::Cold
                ? bench::measure_cold_launch(std::forward<Launch>(launch), flush, stream, warmup,
                                             repeat)
@@ -179,20 +180,20 @@ bench::ColdTiming measure_public(Launch&& launch, CacheState cache, DeviceBuffer
 
 template <class Launch>
 void profile_public(Launch&& launch, const char* format, const char* policy, CacheState cache,
-                    DeviceBuffer& flush, cudaStream_t stream, int warmup) {
+                    DeviceBuffer& flush, hipStream_t stream, int warmup) {
     for (int index = 0; index < warmup; ++index) { launch(stream); }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
     if (cache == CacheState::Cold) {
         bench::flush_l2(flush, stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
     }
     std::printf("PROFILE entry=attn_input_proj format=%s policy=%s dispatch=public cache=%s\n",
                 format, policy, cache_name(cache));
     std::fflush(stdout);
-    CUDA_CHECK(cudaProfilerStart());
+    HIP_CHECK(hipProfilerStart());
     launch(stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaProfilerStop());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipProfilerStop());
 }
 
 void report(const Result& result) {
@@ -221,7 +222,7 @@ std::uint64_t tensor_bytes(std::int32_t rows, std::int32_t tokens) {
     return static_cast<std::uint64_t>(rows) * static_cast<std::uint64_t>(tokens) * 2ULL;
 }
 
-void run_q4q5(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
+void run_q4q5(const Options& options, DeviceBuffer& flush, hipStream_t stream,
               std::vector<Result>& results) {
     constexpr std::int32_t hidden      = 5120;
     constexpr std::int32_t q_rows      = 6144;
@@ -243,7 +244,7 @@ void run_q4q5(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
         Tensor tg(gate.p, DType::BF16, {q_rows, tokens});
         Tensor tk(k.p, DType::BF16, {kv_rows, tokens});
         Tensor tv(v.p, DType::BF16, {kv_rows, tokens});
-        const auto launch = [&](cudaStream_t launch_stream) {
+        const auto launch = [&](hipStream_t launch_stream) {
             ops::attn_input_proj(x, qk.weight, gv.weight, tq, tg, tk, tv, launch_stream);
         };
         const CacheState profile_cache =
@@ -271,7 +272,7 @@ template <class WeightFixture>
 void run_four_output(const Options& options, const char* format, QType qtype,
                      ops::LinearPolicy policy, bool implicit_a16_entry, std::int32_t hidden,
                      std::int32_t q_rows, std::int32_t kv_rows, std::int32_t parent_rows,
-                     WeightFixture& fixture, DeviceBuffer& flush, cudaStream_t stream,
+                     WeightFixture& fixture, DeviceBuffer& flush, hipStream_t stream,
                      std::vector<Result>& results) {
     const std::int32_t min_tokens = *std::min_element(options.tokens.begin(), options.tokens.end());
     const std::int32_t max_tokens = *std::max_element(options.tokens.begin(), options.tokens.end());
@@ -289,7 +290,7 @@ void run_four_output(const Options& options, const char* format, QType qtype,
         Tensor tg(gate.p, DType::BF16, {q_rows, tokens});
         Tensor tk(k.p, DType::BF16, {kv_rows, tokens});
         Tensor tv(v.p, DType::BF16, {kv_rows, tokens});
-        const auto launch = [&](cudaStream_t launch_stream) {
+        const auto launch = [&](hipStream_t launch_stream) {
             if (implicit_a16_entry) {
                 ops::attn_input_proj(x, fixture.weight, tq, tg, tk, tv, launch_stream);
             } else {
@@ -319,7 +320,7 @@ void run_four_output(const Options& options, const char* format, QType qtype,
     }
 }
 
-void run_w8_qkv(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
+void run_w8_qkv(const Options& options, DeviceBuffer& flush, hipStream_t stream,
                 std::vector<Result>& results) {
     constexpr std::int32_t hidden      = 2048;
     constexpr std::int32_t q_rows      = 4096;
@@ -337,7 +338,7 @@ void run_w8_qkv(const Options& options, DeviceBuffer& flush, cudaStream_t stream
         Tensor tq(q.p, DType::BF16, {q_rows, tokens});
         Tensor tk(k.p, DType::BF16, {kv_rows, tokens});
         Tensor tv(v.p, DType::BF16, {kv_rows, tokens});
-        const auto launch = [&](cudaStream_t launch_stream) {
+        const auto launch = [&](hipStream_t launch_stream) {
             ops::attn_input_proj(x, weight.weight, tq, tk, tv, launch_stream);
         };
         const CacheState profile_cache =
@@ -386,13 +387,13 @@ bool selected(Format configured, Format candidate) {
 int main(int argc, char** argv) {
     try {
         int devices = 0;
-        if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+        if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
             std::printf("SKIP: no usable CUDA device\n");
             return 0;
         }
         const Options options = parse_options(argc, argv);
-        cudaStream_t stream   = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream   = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(kFlushBytes);
         std::vector<Result> results;
 
@@ -417,7 +418,7 @@ int main(int argc, char** argv) {
                             1024, 14336, weight, flush, stream, results);
         }
         write_csv(options, results);
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_attn_input_proj_bench: %s\n", error.what());

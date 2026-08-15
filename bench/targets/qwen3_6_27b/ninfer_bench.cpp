@@ -2,8 +2,8 @@
 
 #include "ninfer/engine.h"
 
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 
 #include <exception>
 #include <filesystem>
@@ -25,30 +25,30 @@ std::string command_line(int argc, char** argv) {
     return out.str();
 }
 
-std::string cuda_version_string(int version) {
+std::string hip_version_string(int version) {
     if (version <= 0) { return {}; }
     return std::to_string(version / 1000) + "." + std::to_string((version % 1000) / 10);
 }
 
-void fill_cuda_environment(ninfer::bench::BenchEnvironment& env, int device) {
+void fill_hip_environment(ninfer::bench::BenchEnvironment& env, int device) {
     env.device_id       = device;
     int runtime_version = 0;
-    if (cudaRuntimeGetVersion(&runtime_version) == cudaSuccess) {
-        env.cuda_runtime_version = cuda_version_string(runtime_version);
+    if (hipRuntimeGetVersion(&runtime_version) == hipSuccess) {
+        env.hip_runtime_version = hip_version_string(runtime_version);
     }
     int driver_version = 0;
-    if (cudaDriverGetVersion(&driver_version) == cudaSuccess) {
-        env.cuda_driver_version = cuda_version_string(driver_version);
+    if (hipDriverGetVersion(&driver_version) == hipSuccess) {
+        env.hip_driver_version = hip_version_string(driver_version);
     }
-    cudaDeviceProp properties{};
-    if (cudaGetDeviceProperties(&properties, device) == cudaSuccess) {
+    hipDeviceProp_t properties{};
+    if (hipGetDeviceProperties(&properties, device) == hipSuccess) {
         env.gpu_name = properties.name;
     }
 }
 
-void require_cuda(cudaError_t status, const char* operation) {
-    if (status != cudaSuccess) {
-        throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
+void require_hip(hipError_t status, const char* operation) {
+    if (status != hipSuccess) {
+        throw std::runtime_error(std::string(operation) + ": " + hipGetErrorString(status));
     }
 }
 
@@ -99,7 +99,7 @@ ninfer::bench::RepTiming run_repetition(ninfer::Engine& engine,
 
 void prime_decode_graph(ninfer::Engine& engine, ninfer::bench::BenchEnvironment& env,
                         const std::vector<ninfer::TokenId>& corpus) {
-    if (!env.use_cuda_graph || env.decode_graph_prime_output_tokens == 0) { return; }
+    if (!env.use_hip_graph || env.decode_graph_prime_output_tokens == 0) { return; }
     const int decode_tokens = static_cast<int>(env.decode_graph_prime_output_tokens - 1);
     const ninfer::bench::BenchTest prime{ninfer::bench::TestKind::Decode, 0, decode_tokens,
                                          "decode-graph-prime"};
@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
         }
         ninfer::bench::validate_prompt_lengths(tests, corpus.size());
         const std::uint32_t max_context = ninfer::bench::resolve_max_context(
-            tests, options.max_context, options.mtp_draft_tokens, options.use_cuda_graph);
+            tests, options.max_context, options.mtp_draft_tokens, options.use_hip_graph);
 
         ninfer::EngineOptions engine_options;
         engine_options.artifact_path = options.artifact_path;
@@ -159,7 +159,7 @@ int main(int argc, char** argv) {
                                                        : ninfer::SpeculativeBackend::Mtp;
         engine_options.speculative.draft_tokens  = options.mtp_draft_tokens;
         engine_options.speculative.proposal_head = options.proposal_head;
-        engine_options.use_cuda_graph            = options.use_cuda_graph;
+        engine_options.use_hip_graph            = options.use_hip_graph;
 
         ninfer::bench::BenchEnvironment env;
         env.artifact_path            = options.artifact_path;
@@ -169,12 +169,12 @@ int main(int argc, char** argv) {
         env.kv_cache                 = options.kv_cache;
         env.mtp_draft_tokens         = options.mtp_draft_tokens;
         env.proposal_head            = options.proposal_head;
-        env.use_cuda_graph           = options.use_cuda_graph;
+        env.use_hip_graph           = options.use_hip_graph;
         env.repetitions              = options.repetitions;
         env.warmup                   = options.warmup;
         env.corpus_path              = options.corpus_path;
         env.corpus_tokens            = corpus.size();
-        if (options.use_cuda_graph && has_decode_tests(tests)) {
+        if (options.use_hip_graph && has_decode_tests(tests)) {
             env.decode_graph_prime_output_tokens =
                 ninfer::bench::decode_graph_prime_output_tokens(options.mtp_draft_tokens);
         }
@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
                   << " (max_context=" << max_context
                   << ", kv_cache=" << ninfer::bench::kv_cache_name(options.kv_cache) << ")\n";
         ninfer::Engine engine(std::move(engine_options));
-        fill_cuda_environment(env, options.device);
+        fill_hip_environment(env, options.device);
         env.load   = engine.load_summary();
         env.memory = engine.memory_summary();
 
@@ -205,15 +205,15 @@ int main(int argc, char** argv) {
             }
             result.reps.reserve(static_cast<std::size_t>(options.repetitions));
             if (options.profile_measured) {
-                require_cuda(cudaDeviceSynchronize(), "profile pre-boundary synchronize");
-                require_cuda(cudaProfilerStart(), "cudaProfilerStart");
+                require_hip(hipDeviceSynchronize(), "profile pre-boundary synchronize");
+                require_hip(hipProfilerStart(), "hipProfilerStart");
             }
             for (int repetition = 0; repetition < options.repetitions; ++repetition) {
                 result.reps.push_back(run_repetition(engine, test, corpus));
             }
             if (options.profile_measured) {
-                require_cuda(cudaDeviceSynchronize(), "profile post-boundary synchronize");
-                require_cuda(cudaProfilerStop(), "cudaProfilerStop");
+                require_hip(hipDeviceSynchronize(), "profile post-boundary synchronize");
+                require_hip(hipProfilerStop(), "hipProfilerStop");
             }
             const ninfer::MemorySummary memory    = engine.memory_summary();
             result.workspace_peak_bytes           = memory.workspace_logical_peak_bytes;

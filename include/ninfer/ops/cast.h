@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -28,6 +29,6 @@ namespace ninfer::ops {
  * Workspace:
  *   None. The Op has no state side effect beyond writing destination.
  */
-void cast_fp32_to_bf16(const Tensor& source, Tensor& destination, cudaStream_t stream);
+void cast_fp32_to_bf16(const Tensor& source, Tensor& destination, hipStream_t stream);
 
 } // namespace ninfer::ops

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // ninfer::ops - argmax wrapper: public api validation and launcher dispatch.
 #include "ninfer/ops/argmax.h"
 
@@ -34,7 +35,7 @@ std::int64_t numel_allow_zero(const Tensor& t, const char* label) {
 
 } // namespace
 
-void argmax(const Tensor& logits, Tensor& out, std::int32_t valid_rows, cudaStream_t stream) {
+void argmax(const Tensor& logits, Tensor& out, std::int32_t valid_rows, hipStream_t stream) {
     if (logits.dtype != DType::BF16) { throw std::invalid_argument("argmax: logits must be BF16"); }
     if (out.dtype != DType::I32) { throw std::invalid_argument("argmax: out must be I32"); }
 

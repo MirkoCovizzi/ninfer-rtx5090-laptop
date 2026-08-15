@@ -37,11 +37,11 @@ PagedKVBatchLayerView DFlashPersistentState::full_batch_layer(std::uint32_t laye
     return full.batch_layer_view(layer);
 }
 
-void DFlashPersistentState::save_turn_checkpoint(std::int32_t lane, cudaStream_t stream) {
+void DFlashPersistentState::save_turn_checkpoint(std::int32_t lane, hipStream_t stream) {
     turn_checkpoint_local.copy_lane_from(local, lane, stream);
 }
 
-void DFlashPersistentState::restore_turn_checkpoint(std::int32_t lane, cudaStream_t stream) {
+void DFlashPersistentState::restore_turn_checkpoint(std::int32_t lane, hipStream_t stream) {
     local.copy_lane_from(turn_checkpoint_local, lane, stream);
 }
 

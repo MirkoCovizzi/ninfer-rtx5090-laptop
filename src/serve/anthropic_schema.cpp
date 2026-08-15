@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "serve/anthropic_schema.h"
 
 #include <array>

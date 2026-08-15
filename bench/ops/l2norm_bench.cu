@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Performance bench for the warp-row L2Norm domain. The registered 35B geometry is
 // [D,heads,T]=[128,16,T], with T=1..6 for decode/verification and T=1024 for prefill.
 //
@@ -6,7 +7,7 @@
 #include "ninfer/ops/l2norm.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -18,7 +19,7 @@ using namespace ninfer::bench;
 namespace {
 
 template <int Block>
-__global__ void l2norm_payload_control(const __nv_bfloat162* x, __nv_bfloat162* out, int d,
+__global__ void l2norm_payload_control(const __hip_bfloat162* x, __hip_bfloat162* out, int d,
                                        std::int64_t rows) {
     constexpr int kWarpsPerBlock = Block / 32;
     const int lane               = static_cast<int>(threadIdx.x) & 31;
@@ -41,13 +42,13 @@ void run(int d, int heads, int tokens, bool control) {
 
     const double bytes  = 2.0 * static_cast<double>(n) * 2.0;
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             if (control) {
                 constexpr int block = 512;
                 const unsigned grid = static_cast<unsigned>((rows + block / 32 - 1) / (block / 32));
                 l2norm_payload_control<block>
-                    <<<grid, block, 0, stream>>>(static_cast<const __nv_bfloat162*>(x.p),
-                                                 static_cast<__nv_bfloat162*>(out.p), d, rows);
+                    <<<grid, block, 0, stream>>>(static_cast<const __hip_bfloat162*>(x.p),
+                                                 static_cast<__hip_bfloat162*>(out.p), d, rows);
             } else {
                 ops::l2norm(tx, 1.0e-6f, tout, stream);
             }
@@ -64,7 +65,7 @@ void run(int d, int heads, int tokens, bool control) {
 
 int main(int argc, char** argv) {
     int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

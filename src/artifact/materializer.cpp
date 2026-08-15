@@ -1,6 +1,7 @@
+#include "hip/hip_runtime.h"
 #include "artifact/materializer.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <chrono>
@@ -34,23 +35,23 @@ std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment, const char*
 class Slot {
 public:
     explicit Slot(std::size_t bytes) : buffer(bytes) {
-        CUDA_CHECK(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+        HIP_CHECK(hipEventCreateWithFlags(&event, hipEventDisableTiming));
     }
 
     ~Slot() {
-        if (pending) { (void)cudaEventSynchronize(event); }
-        if (event != nullptr) { (void)cudaEventDestroy(event); }
+        if (pending) { (void)hipEventSynchronize(event); }
+        if (event != nullptr) { (void)hipEventDestroy(event); }
     }
 
     void wait() {
         if (pending) {
-            CUDA_CHECK(cudaEventSynchronize(event));
+            HIP_CHECK(hipEventSynchronize(event));
             pending = false;
         }
     }
 
     PinnedHostBuffer buffer;
-    cudaEvent_t event = nullptr;
+    hipEvent_t event = nullptr;
     bool pending      = false;
 };
 
@@ -217,12 +218,12 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
                 const std::uint64_t copy_end   = std::min(chunk_end, range.source_end);
                 if (copy_begin < copy_end) {
                     const auto amount = static_cast<std::size_t>(copy_end - copy_begin);
-                    CUDA_CHECK(cudaMemcpyAsync(
+                    HIP_CHECK(hipMemcpyAsync(
                         range.destination +
                             static_cast<std::size_t>(copy_begin - range.source_begin),
                         static_cast<std::byte*>(slot.buffer.data()) +
                             static_cast<std::size_t>(copy_begin - source),
-                        amount, cudaMemcpyHostToDevice, device.load_stream));
+                        amount, hipMemcpyHostToDevice, device.load_stream));
                     copied =
                         checked_add(copied, amount, "artifact copied byte count overflows u64");
                 }
@@ -233,7 +234,7 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
                 }
             }
             next_range = range_index;
-            CUDA_CHECK(cudaEventRecord(slot.event, device.load_stream));
+            HIP_CHECK(hipEventRecord(slot.event, device.load_stream));
             slot.pending = true;
 
             if (progress != nullptr && progress->callback && copied != last_published &&
@@ -244,7 +245,7 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
         }
     }
     for (const auto& slot : slots) { slot->wait(); }
-    CUDA_CHECK(cudaStreamSynchronize(device.load_stream));
+    HIP_CHECK(hipStreamSynchronize(device.load_stream));
     if (copied != total || next_range != ranges.size()) {
         throw ArtifactError("direct materialization did not cover every tensor byte");
     }

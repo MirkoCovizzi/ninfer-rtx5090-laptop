@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_pair/w8/w8_pair_kernels.h"
 
 #include "core/device.h"
@@ -5,8 +6,9 @@
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
 
 #include <cstdint>
 #include <stdexcept>
@@ -21,14 +23,14 @@ constexpr int kValuesPerLane = 8;
 
 template <int RowsPerCta>
 __global__ __launch_bounds__(RowsPerCta * 32, 2) void w8_pair_k2048_decode_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ first_codes,
+    const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ first_codes,
     const std::uint8_t* __restrict__ first_scales, const std::uint8_t* __restrict__ second_codes,
-    const std::uint8_t* __restrict__ second_scales, __nv_bfloat16* __restrict__ first_out,
-    __nv_bfloat16* __restrict__ second_out) {
+    const std::uint8_t* __restrict__ second_scales, __hip_bfloat16* __restrict__ first_out,
+    __hip_bfloat16* __restrict__ second_out) {
     constexpr int kValuesPerPhase = 32 * kValuesPerLane;
     constexpr int kGroupsPerPhase = kValuesPerPhase / 32;
     constexpr int kPhases         = kHidden / kValuesPerPhase;
-    constexpr unsigned kMask      = 0xffffffffu;
+    constexpr unsigned long long kMask = 0xffffffffull;
 
     const int lane       = static_cast<int>(threadIdx.x) & 31;
     const int warp       = static_cast<int>(threadIdx.x) >> 5;
@@ -94,7 +96,7 @@ __global__ __launch_bounds__(RowsPerCta * 32, 2) void w8_pair_k2048_decode_kerne
 
 template <int RowsPerCta>
 void launch_decode(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
-                   Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+                   Tensor& first_out, Tensor& second_out, hipStream_t stream) {
     if (x.ne[0] != kHidden || x.ne[1] != 1 || first_out.ne[0] != kRows || first_out.ne[1] != 1 ||
         second_out.ne[0] != kRows || second_out.ne[1] != 1 || first_weight.n != kRows ||
         first_weight.k != kHidden || second_weight.n != kRows || second_weight.k != kHidden) {
@@ -102,32 +104,32 @@ void launch_decode(const Tensor& x, const Weight& first_weight, const Weight& se
     }
     static_assert((kRows % RowsPerCta) == 0);
     w8_pair_k2048_decode_kernel<RowsPerCta><<<kRows / RowsPerCta, RowsPerCta * 32, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const __hip_bfloat16*>(x.data),
         static_cast<const std::uint8_t*>(first_weight.qdata),
         static_cast<const std::uint8_t*>(first_weight.scales),
         static_cast<const std::uint8_t*>(second_weight.qdata),
         static_cast<const std::uint8_t*>(second_weight.scales),
-        static_cast<__nv_bfloat16*>(first_out.data), static_cast<__nv_bfloat16*>(second_out.data));
-    CUDA_CHECK(cudaGetLastError());
+        static_cast<__hip_bfloat16*>(first_out.data), static_cast<__hip_bfloat16*>(second_out.data));
+    HIP_CHECK(hipGetLastError());
 }
 
 } // namespace
 
 void w8_pair_decode_r4_launch(const Tensor& x, const Weight& first_weight,
                               const Weight& second_weight, Tensor& first_out, Tensor& second_out,
-                              cudaStream_t stream) {
+                              hipStream_t stream) {
     launch_decode<4>(x, first_weight, second_weight, first_out, second_out, stream);
 }
 
 void w8_pair_decode_r8_launch(const Tensor& x, const Weight& first_weight,
                               const Weight& second_weight, Tensor& first_out, Tensor& second_out,
-                              cudaStream_t stream) {
+                              hipStream_t stream) {
     launch_decode<8>(x, first_weight, second_weight, first_out, second_out, stream);
 }
 
 void w8_pair_decode_r16_launch(const Tensor& x, const Weight& first_weight,
                                const Weight& second_weight, Tensor& first_out, Tensor& second_out,
-                               cudaStream_t stream) {
+                               hipStream_t stream) {
     launch_decode<16>(x, first_weight, second_weight, first_out, second_out, stream);
 }
 

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gated_rmsnorm.h"
 #include "ops/norm_test_common.h"
 
@@ -66,7 +67,7 @@ int run_case(const char* label, const Shape& shape, std::uint32_t seed, float in
     Tensor gate_tensor   = tensor_for(device_gate.data, shape);
     Tensor output_tensor = tensor_for(output_data, shape);
     ops::gated_rmsnorm(input_tensor, weight_tensor, gate_tensor, kEps, output_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     int failures = verify_reduction(label, from_device_bf16(output_data, count), reference,
                                     gated_rmsnorm_bf16_criterion());
@@ -80,7 +81,7 @@ int run_case(const char* label, const Shape& shape, std::uint32_t seed, float in
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

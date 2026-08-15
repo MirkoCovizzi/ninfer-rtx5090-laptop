@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Q4G64 RowSplit x BF16 SIMT GEMM.
@@ -18,8 +19,9 @@
 #include "ops/common/warp.cuh"
 #include "ops/linear/q4/q4_rowsplit_storage.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <type_traits>
@@ -111,7 +113,7 @@ __device__ __forceinline__ void q4_simt_issue_stage(uint4* __restrict__ shared_c
 
 template <class Schedule, bool FullStage, bool FullCols>
 __device__ __forceinline__ void
-q4_simt_consume_stage(const __nv_bfloat16* __restrict__ x, std::int32_t k, int col0,
+q4_simt_consume_stage(const __hip_bfloat16* __restrict__ x, std::int32_t k, int col0,
                       int active_cols, int stage, int active_groups,
                       const uint4* __restrict__ shared_codes,
                       const std::uint32_t* __restrict__ shared_scales, int lane,
@@ -161,7 +163,7 @@ q4_simt_consume_stage(const __nv_bfloat16* __restrict__ x, std::int32_t k, int c
 struct Q4SimtStoreEpilogue {
     template <bool SplitOutput, int SplitRow, int Cols>
     __device__ __forceinline__ void
-    operator()(__nv_bfloat16* out, __nv_bfloat16* out_tail, std::int32_t out_ld,
+    operator()(__hip_bfloat16* out, __hip_bfloat16* out_tail, std::int32_t out_ld,
                std::int32_t out_tail_ld, std::int32_t row, std::int32_t col0,
                std::int32_t active_cols, const float (&values)[Cols]) const {
 #pragma unroll
@@ -188,13 +190,13 @@ template <class Schedule, bool Full, bool SplitOutput = false, int SplitRow = 0,
 __global__ __launch_bounds__(
     Schedule::kThreads,
     Schedule::
-        kLaunchBoundsMinBlocks) void q4_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x,
+        kLaunchBoundsMinBlocks) void q4_rowsplit_gemm_simt_kernel(const __hip_bfloat16* __restrict__ x,
                                                                   const std::
                                                                       uint8_t* __restrict__ codes,
                                                                   const std::
                                                                       uint8_t* __restrict__ scales,
-                                                                  __nv_bfloat16* __restrict__ out,
-                                                                  __nv_bfloat16* __restrict__ out_tail,
+                                                                  __hip_bfloat16* __restrict__ out,
+                                                                  __hip_bfloat16* __restrict__ out_tail,
                                                                   std::int32_t out_ld,
                                                                   std::int32_t out_tail_ld,
                                                                   std::int32_t rows, std::int32_t k,

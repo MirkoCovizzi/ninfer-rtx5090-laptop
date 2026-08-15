@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "serve/generation_service.h"
 
 #include "product/media_acquire/acquire.h"
@@ -260,7 +261,7 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
     engine_options.prefill_chunk        = options_.prefill_chunk;
     engine_options.kv_cache             = options_.kv_cache;
     engine_options.enable_vision        = options_.enable_vision;
-    engine_options.use_cuda_graph       = options_.use_cuda_graph;
+    engine_options.use_hip_graph       = options_.use_hip_graph;
     engine_options.speculative          = options_.speculative;
     engine_options.load_progress        = std::move(load_progress);
     engine_              = std::make_unique<ninfer::Engine>(std::move(engine_options));

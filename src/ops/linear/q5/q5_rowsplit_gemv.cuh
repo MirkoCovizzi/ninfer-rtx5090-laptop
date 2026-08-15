@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // Shared Q5 row-split decode (T=1) GEMV core.
@@ -23,9 +24,10 @@
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 
@@ -52,7 +54,7 @@ q5_gemv_issue_tile(uint4* __restrict__ s_nib, uint4* __restrict__ s_hi, uint4* _
 }
 
 // Unpack + accumulate one staged 16-group tile. x is read from x2 (shared or global).
-__device__ __forceinline__ float q5_gemv_consume_tile(const __nv_bfloat162* __restrict__ x2,
+__device__ __forceinline__ float q5_gemv_consume_tile(const __hip_bfloat162* __restrict__ x2,
                                                       const uint4* __restrict__ s_nib,
                                                       const uint4* __restrict__ s_hi,
                                                       const uint4* __restrict__ s_sc, int tile,
@@ -87,7 +89,7 @@ __device__ __forceinline__ float q5_gemv_consume_tile(const __nv_bfloat162* __re
 // kStageX : stage the activation vector into shared (false when x is too large).
 struct Q5GemvStoreEpilogue {
     template <bool SplitOutput, int SplitRow>
-    __device__ __forceinline__ void operator()(__nv_bfloat16* out, __nv_bfloat16* out_tail, int row,
+    __device__ __forceinline__ void operator()(__hip_bfloat16* out, __hip_bfloat16* out_tail, int row,
                                                float value) const {
         if constexpr (SplitOutput) {
             if (row < SplitRow) {
@@ -105,10 +107,10 @@ template <int kN, int kK, int kRowsPerBlock, int kStages, bool kStageX, bool kRe
           bool kSplitOutput = false, int kSplitRow = 0, class Epilogue = Q5GemvStoreEpilogue,
           bool TriggerPdl = false, bool JoinPdl = false>
 __global__ void
-q5_rowsplit_gemv_kernel(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+q5_rowsplit_gemv_kernel(const __hip_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
                         const std::uint8_t* __restrict__ high_bits,
-                        const std::uint8_t* __restrict__ scales, __nv_bfloat16* __restrict__ out,
-                        __nv_bfloat16* __restrict__ out_tail, Epilogue epilogue = {}) {
+                        const std::uint8_t* __restrict__ scales, __hip_bfloat16* __restrict__ out,
+                        __hip_bfloat16* __restrict__ out_tail, Epilogue epilogue = {}) {
     constexpr int kGroupK              = 64;
     constexpr int kGroups              = kK / kGroupK;
     constexpr int kGroupsPerTile       = 16;
@@ -129,7 +131,7 @@ q5_rowsplit_gemv_kernel(const __nv_bfloat16* __restrict__ x, const std::uint8_t*
     }
 
     // __align__(16) so the uint4 staging below is well-defined by construction.
-    __shared__ __align__(16) __nv_bfloat16 x_sh[kStageX ? kK : 1];
+    __shared__ __align__(16) __hip_bfloat16 x_sh[kStageX ? kK : 1];
     __shared__ uint4 s_nib[kRowsPerBlock][kStages][32];
     __shared__ uint4 s_hi[kRowsPerBlock][kStages][8];
     __shared__ uint4 s_sc[kRowsPerBlock][kStages][2];
@@ -154,8 +156,8 @@ q5_rowsplit_gemv_kernel(const __nv_bfloat16* __restrict__ x, const std::uint8_t*
     const std::uint8_t* high_row =
         high_bits + static_cast<std::int64_t>(row) * kGroups * kHighBytesPerGroup;
     const std::uint8_t* scale_row = scales + static_cast<std::int64_t>(row) * kGroups * 2;
-    const auto* x2                = kStageX ? reinterpret_cast<const __nv_bfloat162*>(x_sh)
-                                            : reinterpret_cast<const __nv_bfloat162*>(x);
+    const auto* x2                = kStageX ? reinterpret_cast<const __hip_bfloat162*>(x_sh)
+                                            : reinterpret_cast<const __hip_bfloat162*>(x);
 
     // Prime up to kPrefetch tiles; empty commits keep the group count uniform so the
     // constant pipe_wait<kPrefetch>() in the loop is always valid.
@@ -201,10 +203,10 @@ q5_rowsplit_gemv_kernel(const __nv_bfloat16* __restrict__ x, const std::uint8_t*
 
 // One block per kRowsPerBlock rows; kRowsPerBlock warps per block.
 template <int kN, int kK, int kRowsPerBlock, int kStages = 2, bool kStageX = true>
-inline void q5_rowsplit_gemv_launch_kernel(const __nv_bfloat16* x, const std::uint8_t* codes,
+inline void q5_rowsplit_gemv_launch_kernel(const __hip_bfloat16* x, const std::uint8_t* codes,
                                            const std::uint8_t* high_bits,
-                                           const std::uint8_t* scales, __nv_bfloat16* out,
-                                           cudaStream_t stream) {
+                                           const std::uint8_t* scales, __hip_bfloat16* out,
+                                           hipStream_t stream) {
     constexpr int kBlockThreads = kRowsPerBlock * 32;
     const int grid              = kN / kRowsPerBlock;
     q5_rowsplit_gemv_kernel<kN, kK, kRowsPerBlock, kStages, kStageX, false>
@@ -213,9 +215,9 @@ inline void q5_rowsplit_gemv_launch_kernel(const __nv_bfloat16* x, const std::ui
 
 template <int kN, int kK, int kRowsPerBlock, int kStages = 2, bool kStageX = true>
 inline void
-q5_rowsplit_gemv_residual_launch_kernel(const __nv_bfloat16* x, const std::uint8_t* codes,
+q5_rowsplit_gemv_residual_launch_kernel(const __hip_bfloat16* x, const std::uint8_t* codes,
                                         const std::uint8_t* high_bits, const std::uint8_t* scales,
-                                        __nv_bfloat16* residual_out, cudaStream_t stream) {
+                                        __hip_bfloat16* residual_out, hipStream_t stream) {
     constexpr int kBlockThreads = kRowsPerBlock * 32;
     const int grid              = kN / kRowsPerBlock;
     q5_rowsplit_gemv_kernel<kN, kK, kRowsPerBlock, kStages, kStageX, true>

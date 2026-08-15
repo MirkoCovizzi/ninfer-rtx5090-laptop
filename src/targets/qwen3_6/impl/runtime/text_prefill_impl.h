@@ -5,7 +5,7 @@
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scalar.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <stdexcept>
@@ -109,7 +109,7 @@ void mtp_bridge_multimodal(PrefillContext& state, const PreparedPromptData& prom
 
     Tensor bridge_token = state.execution.io.mtp->target_input_ids.slice(0, 0, 1);
     const TokenId token = prompt.token_ids[state.text_kv_base];
-    CUDA_CHECK(cudaMemcpyAsync(bridge_token.data, &token, sizeof(token), cudaMemcpyHostToDevice,
+    HIP_CHECK(hipMemcpyAsync(bridge_token.data, &token, sizeof(token), hipMemcpyHostToDevice,
                                state.execution.device.stream));
 
     Tensor visual_embedding;
@@ -145,8 +145,8 @@ void sample_from_hidden(PrefillContext& state, const Tensor& hidden, std::int32_
     state.execution.work.reset();
     Tensor logits = state.execution.io.logits.slice(1, 0, 1);
     ops::linear(hidden, state.execution.model.output_head, logits, state.execution.device.stream);
-    CUDA_CHECK(cudaMemcpyAsync(state.execution.io.pos.data, &absolute_position,
-                               sizeof(absolute_position), cudaMemcpyHostToDevice,
+    HIP_CHECK(hipMemcpyAsync(state.execution.io.pos.data, &absolute_position,
+                               sizeof(absolute_position), hipMemcpyHostToDevice,
                                state.execution.device.stream));
     ops::sample(logits, state.execution.io.token, TextConfig::token_domain, state.sampling,
                 state.execution.io.pos, purpose, state.execution.work,

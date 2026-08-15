@@ -1,8 +1,9 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 namespace ninfer::ops {
 
@@ -23,6 +24,6 @@ enum class GeluMode {
  * arithmetic is implementation-defined. The Op mutates only x and uses no workspace or persistent
  * state.
  */
-void gelu(Tensor& x, GeluMode mode, cudaStream_t stream);
+void gelu(Tensor& x, GeluMode mode, hipStream_t stream);
 
 } // namespace ninfer::ops

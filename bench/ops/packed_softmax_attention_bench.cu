@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Public-Op benchmark for plain/uniform and packed dense Softmax Attention.
 // Tile selection and launch decomposition remain private to vision_attention().
 
@@ -6,8 +7,8 @@
 #include "core/device.h"
 #include "ninfer_bench_common.h"
 
-#include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -219,11 +220,11 @@ public:
         for (std::size_t index = 0; index < segment_lengths_.size(); ++index) {
             cumulative[index + 1] = cumulative[index] + segment_lengths_[index];
         }
-        CUDA_CHECK(cudaMemcpy(cu_seqlens_.p, cumulative.data(), cu_seqlens_.bytes,
-                              cudaMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(cu_seqlens_.p, cumulative.data(), cu_seqlens_.bytes,
+                              hipMemcpyHostToDevice));
     }
 
-    void launch(Entry entry, cudaStream_t stream) {
+    void launch(Entry entry, hipStream_t stream) {
         if (entry == Entry::Uniform) {
             ops::vision_attention(q_tensor_, k_tensor_, v_tensor_, segment_lengths_.front(),
                                   output_tensor_, stream);
@@ -281,10 +282,10 @@ const char* execution_name(Execution execution) {
 const char* cache_name(CacheState cache) { return cache == CacheState::Cold ? "cold" : "warm"; }
 
 bench::ColdTiming measure(Case& data, Entry entry, Execution execution, CacheState cache,
-                          bench::TimedGraph* graph, DeviceBuffer& flush, cudaStream_t stream,
+                          bench::TimedGraph* graph, DeviceBuffer& flush, hipStream_t stream,
                           int warmup, int repeat) {
     if (execution == Execution::Eager) {
-        const auto launch = [&](cudaStream_t launch_stream) { data.launch(entry, launch_stream); };
+        const auto launch = [&](hipStream_t launch_stream) { data.launch(entry, launch_stream); };
         return cache == CacheState::Cold
                    ? bench::measure_cold_launch(launch, flush, stream, warmup, repeat)
                    : bench::measure_launch(launch, stream, warmup, repeat);
@@ -326,34 +327,34 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
 }
 
 void profile(Case& data, Entry entry, const Options& options, DeviceBuffer& flush,
-             cudaStream_t stream) {
+             hipStream_t stream) {
     const Execution execution = options.execution;
     const CacheState cache = options.cache == CacheMode::Cold ? CacheState::Cold : CacheState::Warm;
     bench::TimedGraph graph;
     if (execution == Execution::Graph) {
         data.launch(entry, stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         graph.capture(stream,
-                      [&](cudaStream_t launch_stream) { data.launch(entry, launch_stream); });
+                      [&](hipStream_t launch_stream) { data.launch(entry, launch_stream); });
         for (int index = 0; index < options.warmup; ++index) { graph.launch(stream); }
     } else {
         for (int index = 0; index < options.warmup; ++index) { data.launch(entry, stream); }
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
     if (cache == CacheState::Cold) {
         bench::flush_l2(flush, stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
     }
     std::printf("PROFILE entry=%s dispatch=public execution=%s cache=%s\n", entry_name(entry),
                 execution_name(execution), cache_name(cache));
     std::fflush(stdout);
-    CUDA_CHECK(cudaProfilerStart());
+    HIP_CHECK(hipProfilerStart());
     if (execution == Execution::Graph)
         graph.launch(stream);
     else
         data.launch(entry, stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    CUDA_CHECK(cudaProfilerStop());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipProfilerStop());
 }
 
 } // namespace
@@ -361,19 +362,19 @@ void profile(Case& data, Entry entry, const Options& options, DeviceBuffer& flus
 int main(int argc, char** argv) {
     try {
         int devices = 0;
-        if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+        if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
             std::printf("SKIP: no usable CUDA device\n");
             return 0;
         }
         const Options options = parse_options(argc, argv);
-        cudaStream_t stream   = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream   = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         DeviceBuffer flush(kFlushBytes);
         Case data(options.segment_lengths);
 
         if (options.profile) {
             profile(data, options.entry, options, flush, stream);
-            CUDA_CHECK(cudaStreamDestroy(stream));
+            HIP_CHECK(hipStreamDestroy(stream));
             return 0;
         }
 
@@ -386,9 +387,9 @@ int main(int argc, char** argv) {
             bench::TimedGraph graph;
             if (options.execution != Execution::Eager) {
                 data.launch(entry, stream);
-                CUDA_CHECK(cudaStreamSynchronize(stream));
+                HIP_CHECK(hipStreamSynchronize(stream));
                 graph.capture(
-                    stream, [&](cudaStream_t launch_stream) { data.launch(entry, launch_stream); });
+                    stream, [&](hipStream_t launch_stream) { data.launch(entry, launch_stream); });
             }
             for (const Execution execution : {Execution::Eager, Execution::Graph}) {
                 if ((options.execution == Execution::Eager && execution != Execution::Eager) ||
@@ -416,7 +417,7 @@ int main(int argc, char** argv) {
             }
         }
         write_csv(options, results);
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_packed_softmax_attention_bench: %s\n", error.what());

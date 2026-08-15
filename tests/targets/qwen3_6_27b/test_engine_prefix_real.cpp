@@ -346,7 +346,7 @@ int verify_loaded_product(const ninfer::Engine& engine) {
         memory.sequence.capacity_bytes == 0 || memory.sequence.used_bytes == 0 ||
         memory.sequence.used_bytes > memory.sequence.capacity_bytes ||
         memory.workspace.capacity_bytes == 0 || memory.request_transient.capacity_bytes == 0 ||
-        memory.request_transient.used_bytes != 0 || memory.cuda_graph_allowance_bytes == 0) {
+        memory.request_transient.used_bytes != 0 || memory.hip_graph_allowance_bytes == 0) {
         std::cerr << "Engine construction has incomplete materialized backing\n";
         return 1;
     }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "targets/qwen3_6/impl/runtime/prefix_identity.h"
 
 #include <algorithm>

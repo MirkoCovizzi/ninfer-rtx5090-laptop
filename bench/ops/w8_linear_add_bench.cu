@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Cold-cache benchmark and candidate tuner for the Qwen3.6-35B-A3B W8 LinearAdd Op.
 
 #include "ninfer/ops/linear_add.h"
@@ -9,7 +10,7 @@
 #include "ops/linear_add/w8/w8_linear_add_kernels.h"
 #include "ops/linear_add/w8/w8_linear_add_plan.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -150,8 +151,8 @@ int main(int argc, char** argv) {
         const std::int32_t min_t =
             *std::min_element(options.t_sweep.begin(), options.t_sweep.end());
 
-        cudaStream_t stream = nullptr;
-        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        hipStream_t stream = nullptr;
+        HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
         ninfer::DeviceBuffer flush(kFlushBytes);
         ninfer::DeviceBuffer input =
             bench::make_bf16(static_cast<std::size_t>(options.hidden) * max_t);
@@ -171,7 +172,7 @@ int main(int argc, char** argv) {
 
             if (options.profile) {
                 ops::linear_add(x, packed.weight, out, workspace, stream);
-                CUDA_CHECK(cudaStreamSynchronize(stream));
+                HIP_CHECK(hipStreamSynchronize(stream));
                 std::printf("profile T=%d route=%s\n", t,
                             ops::detail::w8_linear_add_schedule_name(plan.schedule));
                 continue;
@@ -184,41 +185,41 @@ int main(int argc, char** argv) {
                        packed.storage.bytes);
             };
             run(ops::detail::w8_linear_add_schedule_name(plan.schedule),
-                [&](cudaStream_t candidate_stream) {
+                [&](hipStream_t candidate_stream) {
                     ops::linear_add(x, packed.weight, out, workspace, candidate_stream);
                 });
             if (options.production_only) { continue; }
 
             if (t == 1 && options.hidden == 6144) {
-                run("decode_r4", [&](cudaStream_t candidate_stream) {
+                run("decode_r4", [&](hipStream_t candidate_stream) {
                     ops::detail::w8_linear_add_decode_r4_launch(x, packed.weight, out,
                                                                 candidate_stream);
                 });
-                run("decode_r8", [&](cudaStream_t candidate_stream) {
+                run("decode_r8", [&](hipStream_t candidate_stream) {
                     ops::detail::w8_linear_add_decode_r8_launch(x, packed.weight, out,
                                                                 candidate_stream);
                 });
-                run("decode_r16", [&](cudaStream_t candidate_stream) {
+                run("decode_r16", [&](hipStream_t candidate_stream) {
                     ops::detail::w8_linear_add_decode_r16_launch(x, packed.weight, out,
                                                                  candidate_stream);
                 });
             }
-            run("simt_r8_c4", [&](cudaStream_t candidate_stream) {
+            run("simt_r8_c4", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_add_simt_r8_c4_launch(full_for(t, 4), x, packed.weight, out,
                                                              candidate_stream);
             });
-            run("simt_r8_c8", [&](cudaStream_t candidate_stream) {
+            run("simt_r8_c8", [&](hipStream_t candidate_stream) {
                 ops::detail::w8_linear_add_simt_r8_c8_launch(full_for(t, 8), x, packed.weight, out,
                                                              candidate_stream);
             });
             if (t >= 2 && t <= 48) {
-                run("splitk_mma_exact_t", [&](cudaStream_t candidate_stream) {
+                run("splitk_mma_exact_t", [&](hipStream_t candidate_stream) {
                     ops::detail::w8_linear_add_splitk_mma_launch(x, packed.weight, out,
                                                                  candidate_stream);
                 });
             }
 #define RUN_MMA(NAME, TILE_ROWS, TILE_COLS)                                                        \
-    run(#NAME, [&](cudaStream_t candidate_stream) {                                                \
+    run(#NAME, [&](hipStream_t candidate_stream) {                                                \
         ops::detail::w8_linear_add_##NAME##_launch(full_for(t, TILE_COLS, TILE_ROWS), x,           \
                                                    packed.weight, out, candidate_stream);          \
     })
@@ -246,9 +247,9 @@ int main(int argc, char** argv) {
 #undef RUN_MMA
         }
 
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         write_csv(options, results);
-        CUDA_CHECK(cudaStreamDestroy(stream));
+        HIP_CHECK(hipStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "ninfer_w8_linear_add_bench: %s\n", error.what());

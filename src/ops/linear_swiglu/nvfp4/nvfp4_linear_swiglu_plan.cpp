@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 
 #include "core/layout.h"
@@ -106,7 +107,7 @@ std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
 
 void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor& out,
                                   LinearPolicy policy, WorkspaceArena& workspace,
-                                  cudaStream_t stream) {
+                                  hipStream_t stream) {
     switch (resolve_route(policy, x.ne[1])) {
     case Nvfp4LinearSwiGluRoute::DecodeFusedA16:
         nvfp4_linear_swiglu_decode_launch(x, weight, out, stream);
@@ -124,7 +125,7 @@ void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor&
         const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
         launch_nvfp4_linear_swiglu_w4a4_tma(
             scratch.codes, scratch.scales, static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(out.data),
+            static_cast<const std::uint8_t*>(weight.scales), static_cast<__hip_bfloat16*>(out.data),
             x.ne[1], alpha, stream);
         return;
     }

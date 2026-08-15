@@ -4,7 +4,7 @@
 
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -46,7 +46,7 @@ void run_pack(int hidden, int tokens) {
 
     const double bytes  = 4.0 * input_elements * sizeof(std::uint16_t);
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             ops::mtp_pack_fc_input(embedding_tensor, hidden_tensor, output_tensor, stream);
         },
         bytes);
@@ -73,7 +73,7 @@ void run_split(int tokens) {
 
     const double bytes  = 2.0 * input_elements * sizeof(std::uint16_t);
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             ops::mtp_split_attn_in(input_tensor, query_tensor, key_tensor, gate_tensor,
                                    value_tensor, stream);
         },
@@ -87,7 +87,7 @@ void run_split(int tokens) {
 
 int main(int argc, char** argv) {
     int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

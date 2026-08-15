@@ -1,14 +1,16 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
-#include <cuda_bf16.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
 
 #include <cstdint>
 
 namespace ninfer::ops {
 
 struct alignas(8) Bf16x4 {
-    __nv_bfloat162 lo;
-    __nv_bfloat162 hi;
+    __hip_bfloat162 lo;
+    __hip_bfloat162 hi;
 };
 
 __global__ void cast_fp32_to_bf16_x4_kernel(const float4* source, Bf16x4* destination,
@@ -22,7 +24,7 @@ __global__ void cast_fp32_to_bf16_x4_kernel(const float4* source, Bf16x4* destin
     }
 }
 
-__global__ void cast_fp32_to_bf16_x2_kernel(const float2* source, __nv_bfloat162* destination,
+__global__ void cast_fp32_to_bf16_x2_kernel(const float2* source, __hip_bfloat162* destination,
                                             std::int64_t pairs) {
     const std::int64_t start  = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
@@ -32,7 +34,7 @@ __global__ void cast_fp32_to_bf16_x2_kernel(const float2* source, __nv_bfloat162
     }
 }
 
-__global__ void cast_fp32_to_bf16_scalar_kernel(const float* source, __nv_bfloat16* destination,
+__global__ void cast_fp32_to_bf16_scalar_kernel(const float* source, __hip_bfloat16* destination,
                                                 std::int64_t count) {
     const std::int64_t start  = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 // Contract test for the Anthropic Messages serving layer: request parsing
 // (system field, string + block content, tool_use/tool_result round-trip,
 // tool_choice/thinking/sampling mapping, unsupported-content rejection),

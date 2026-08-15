@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 // SM120 BF16 GDN gating projection for the two exact registered geometries:
@@ -16,8 +17,9 @@
 #include "ops/common/rowsplit_mma.cuh"
 #include "ops/common/warp.cuh"
 
-#include <cuda_bf16.h>
-#include <cooperative_groups.h>
+#include <hip/hip_bf16.h>
+#include "ops/common/hip_compat.cuh"
+#include <hip/hip_cooperative_groups.h>
 
 #include <cstdint>
 
@@ -26,7 +28,13 @@ namespace ninfer::ops::detail {
 inline constexpr int kBf16GdnBlockM     = 16;
 inline constexpr int kBf16GdnBlockK     = 64;
 inline constexpr int kBf16GdnWarps      = 16;
-inline constexpr int kBf16GdnStages     = 2;
+// Single-stage synchronous pipeline. HIP's cp_async helpers are synchronous loads, so
+// a double buffer buys no overlap; keeping one stage also halves smem (20 KiB), which
+// is required for the cooperative SplitK launch on gfx1151: with 2 stages (40 KiB) the
+// grid (e.g. 24 blocks at SplitK=8) exceeds the 20-block residency ceiling (1 block per
+// 20-CU WGP), and a plain kStages=1 flip breaks the `it & 1` buffer indexing on
+// multi-tile runs. stage is therefore always 0 below.
+inline constexpr int kBf16GdnStages     = 1;
 inline constexpr int kBf16GdnMFragments = kBf16GdnBlockM / 16;
 
 template <int BlockN>
@@ -34,7 +42,7 @@ inline constexpr int kBf16GdnSmemElements =
     kBf16GdnStages * (BlockN * kBf16GdnBlockK + 2 * kBf16GdnBlockM * kBf16GdnBlockK);
 
 template <int BlockN>
-inline constexpr int kBf16GdnSmemBytes = kBf16GdnSmemElements<BlockN> * sizeof(__nv_bfloat16);
+inline constexpr int kBf16GdnSmemBytes = kBf16GdnSmemElements<BlockN> * sizeof(__hip_bfloat16);
 
 struct Bf16Gdn27Geometry {
     static constexpr int kHeads  = 48;
@@ -58,9 +66,9 @@ __device__ __forceinline__ int bf16_gdn_swizzle(int row, int col) {
 template <class Geometry, int SplitK, bool FullTokens, int Warps, bool NormalizeInput = false,
           int NormTokenCapacity = 0>
 __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_kernel(
-    const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ norm_weight,
-    __nv_bfloat16* __restrict__ normalized_x, float norm_eps,
-    const __nv_bfloat16* __restrict__ a_weight, const __nv_bfloat16* __restrict__ b_weight,
+    const __hip_bfloat16* __restrict__ x, const __hip_bfloat16* __restrict__ norm_weight,
+    __hip_bfloat16* __restrict__ normalized_x, float norm_eps,
+    const __hip_bfloat16* __restrict__ a_weight, const __hip_bfloat16* __restrict__ b_weight,
     const float* __restrict__ A_log, const float* __restrict__ dt_bias, float* __restrict__ partial,
     float* __restrict__ g, float* __restrict__ beta, std::int32_t t) {
     constexpr int kBf16GdnHeads       = Geometry::kHeads;
@@ -77,19 +85,23 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
     constexpr int kThreads       = Warps * 32;
     constexpr int kWarpN         = kBf16GdnBlockN / Warps;
     static_assert(kWarpN % 8 == 0);
-    constexpr int kNFragments = kWarpN / 8;
+    // gfx1151 WMMA atoms are 16x16 (not the legacy m16n8 pair).
+    // Each warp covers WMT x WNT 16x16 atoms; when kWarpN is not a multiple
+    // of 16 the final atom overlaps the neighbouring warp's columns
+    // (duplicate compute, correct results) and the store below emits only
+    // the warp's own columns.
+    constexpr int WMT = kBf16GdnMFragments;
+    constexpr int WNT = (kWarpN + 15) / 16;
 
     extern __shared__ __align__(16) unsigned char smem_raw[];
-    auto* xs  = reinterpret_cast<__nv_bfloat16*>(smem_raw);
+    auto* xs  = reinterpret_cast<__hip_bfloat16*>(smem_raw);
     auto* aws = xs + kBf16GdnStages * kBf16GdnBlockN * kBf16GdnBlockK;
     auto* bws = aws + kBf16GdnStages * kBf16GdnBlockM * kBf16GdnBlockK;
 
-    const int tid      = static_cast<int>(threadIdx.x);
-    const int warp     = tid >> 5;
-    const int lane     = tid & 31;
-    const int gid      = lane >> 2;
-    const int lid      = lane & 3;
-    const int head0    = static_cast<int>(blockIdx.y) * kBf16GdnBlockM;
+    const int tid    = static_cast<int>(threadIdx.x);
+    const int warp   = tid >> 5;
+    const int lane   = tid & 31;
+    const int head0  = static_cast<int>(blockIdx.y) * kBf16GdnBlockM;
     const int token0   = static_cast<int>(blockIdx.x) * kBf16GdnBlockN;
     const int split    = static_cast<int>(blockIdx.z);
     const int kt_begin = split * kTilesPerSplit;
@@ -98,7 +110,7 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
         static_assert(SplitK == 32, "fused input normalization is tuned for split-32");
         static_assert(NormTokenCapacity > 0 && NormTokenCapacity <= 16);
         constexpr int kLocalPairs     = kBf16GdnBlockK / 2;
-        const auto* x2                = reinterpret_cast<const __nv_bfloat162*>(x);
+        const auto* x2                = reinterpret_cast<const __hip_bfloat162*>(x);
         const int token_count         = min(kBf16GdnBlockN, t - token0);
         float sums[NormTokenCapacity] = {};
         // One warp from row tile zero contributes a 64-element norm slice. The existing post-MMA
@@ -128,8 +140,8 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
         }
     }
 
-    float a_acc[kBf16GdnMFragments][kNFragments][4] = {};
-    float b_acc[kBf16GdnMFragments][kNFragments][4] = {};
+    float a_acc[WMT][WNT][8] = {};
+    float b_acc[WMT][WNT][8] = {};
 
     auto stage_load = [&](int stage, int kt) {
         const int k0 = kt * kBf16GdnBlockK;
@@ -140,22 +152,22 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
             const int k_vec       = vec - token_local * (kBf16GdnBlockK / 8);
             const int kk          = k_vec * 8;
             const int token       = token0 + token_local;
-            __nv_bfloat16* dst =
+            __hip_bfloat16* dst =
                 &xs[stage * kBf16GdnBlockN * kBf16GdnBlockK + token_local * kBf16GdnBlockK +
                     bf16_gdn_swizzle(token_local, kk)];
             if constexpr (NormalizeInput) {
                 const bool valid = FullTokens || token < t;
                 if (valid) {
-                    const auto* source = reinterpret_cast<const __nv_bfloat162*>(
+                    const auto* source = reinterpret_cast<const __hip_bfloat162*>(
                         &x[static_cast<std::int64_t>(token) * kBf16GdnHidden + k0 + kk]);
                     const auto* gain =
-                        reinterpret_cast<const __nv_bfloat162*>(&norm_weight[k0 + kk]);
-                    auto* target = reinterpret_cast<__nv_bfloat162*>(dst);
+                        reinterpret_cast<const __hip_bfloat162*>(&norm_weight[k0 + kk]);
+                    auto* target = reinterpret_cast<__hip_bfloat162*>(dst);
 #pragma unroll
                     for (int pair = 0; pair < 4; ++pair) {
                         const float2 value              = __bfloat1622float2(source[pair]);
                         const float2 weight             = __bfloat1622float2(gain[pair]);
-                        const __nv_bfloat162 normalized = __floats2bfloat162_rn(
+                        const __hip_bfloat162 normalized = __floats2bfloat162_rn(
                             value.x * (1.0f + weight.x), value.y * (1.0f + weight.y));
                         target[pair] = normalized;
                     }
@@ -183,9 +195,9 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
             const int row      = vec / (kBf16GdnBlockK / 8);
             const int k_vec    = vec - row * (kBf16GdnBlockK / 8);
             const int kk       = k_vec * 8;
-            __nv_bfloat16* dst = (is_b ? bws : aws) + stage * kBf16GdnBlockM * kBf16GdnBlockK +
+            __hip_bfloat16* dst = (is_b ? bws : aws) + stage * kBf16GdnBlockM * kBf16GdnBlockK +
                                  row * kBf16GdnBlockK + bf16_gdn_swizzle(row, kk);
-            const __nv_bfloat16* weight = is_b ? b_weight : a_weight;
+            const __hip_bfloat16* weight = is_b ? b_weight : a_weight;
             cp_async<16, Cache::cg>(
                 dst, &weight[static_cast<std::int64_t>(head0 + row) * kBf16GdnHidden + k0 + kk]);
         }
@@ -197,52 +209,66 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
         ninfer::ops::cp_commit();
     }
 
-    // ldmatrix fragment lane offsets. A is [M,K], while the token-major x tile
-    // is exactly the column-major B representation expected by mma.
-    const int a_mat    = lane >> 3;
-    const int a_rin    = lane & 7;
-    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
-    const int a_coloff = (a_mat >> 1) << 3;
-    const int x_rin    = lane & 7;
-    const int x_koff   = ((lane >> 3) & 1) << 3;
+    // WMMA fragment loads. A is the [16, BlockK] weight strip: head rows
+    // mi*16 + (lane>>1), K window ki*16, stride kBf16GdnBlockK. The token-major
+    // x tile is the column-major B representation: column warp*kWarpN + ni*16
+    // + (lane&15), K window ki*16.
+    auto load_fragments = [&](int stage, int kcol, unsigned (&xf)[WNT][8],
+                            unsigned (&af)[WMT][8], unsigned (&bf)[WMT][8]) {
+#pragma unroll
+        for (int ni = 0; ni < WNT; ++ni) {
+            const int col = warp * kWarpN + ni * 16 + (lane & 15);
+            // The 16-wide WMMA atom overlaps the neighbouring warp's columns
+            // when kWarpN < 16; for the trailing warp it reaches past the
+            // block's token tile, which xs never stages. Zero those columns so
+            // the duplicated compute contributes nothing (the store already
+            // filters local_col >= kWarpN).
+            if (col < kBf16GdnBlockN) {
+                wmma_load_b_bf16(xf[ni], xs + stage * kBf16GdnBlockN * kBf16GdnBlockK, col, kcol,
+                                 kBf16GdnBlockK, bf16_gdn_swizzle);
+            } else {
+#pragma unroll
+                for (int e = 0; e < 8; ++e) { xf[ni][e] = 0u; }
+            }
+        }
+#pragma unroll
+        for (int mi = 0; mi < WMT; ++mi) {
+            if (!wmma_a_lane_active(lane)) { continue; }
+            const int arow = mi * 16 + (lane >> 1);
+            const __hip_bfloat16* base  = aws + stage * kBf16GdnBlockM * kBf16GdnBlockK;
+            const __hip_bfloat16* bbase = bws + stage * kBf16GdnBlockM * kBf16GdnBlockK;
+            wmma_load_a_bf16(af[mi], base, arow, kcol, kBf16GdnBlockK, bf16_gdn_swizzle);
+            wmma_load_a_bf16(bf[mi], bbase, arow, kcol, kBf16GdnBlockK, bf16_gdn_swizzle);
+        }
+    };
 
 #pragma unroll 1
     for (int it = 0; it < kTilesPerSplit; ++it) {
-        const int stage = it & 1;
+        // Single-stage: the buffer is always stage 0; the trailing barrier + reload
+        // of the next tile keeps the pipeline synchronous and correct for any
+        // kTilesPerSplit (the kStages=1 flip with `it & 1` read/wrote OOB smem on
+        // odd iterations).
+        constexpr int stage = 0;
         ninfer::ops::cp_wait<kBf16GdnStages - 1>();
         __syncthreads();
 
 #pragma unroll
         for (int ki = 0; ki < kKSubtiles; ++ki) {
-            unsigned xf[kNFragments][2];
+            unsigned xf[WNT][8];
+            unsigned af[WMT][8];
+            unsigned bf[WMT][8];
+            load_fragments(stage, ki * 16, xf, af, bf);
 #pragma unroll
-            for (int ni = 0; ni < kNFragments; ++ni) {
-                const int xrow = warp * kWarpN + ni * 8 + x_rin;
-                const int xcol = ki * 16 + x_koff;
-                ldmatrix_x2(xf[ni][0], xf[ni][1],
-                            smem_addr(&xs[stage * kBf16GdnBlockN * kBf16GdnBlockK +
-                                          xrow * kBf16GdnBlockK + bf16_gdn_swizzle(xrow, xcol)]));
-            }
+            for (int mi = 0; mi < WMT; ++mi) {
 #pragma unroll
-            for (int mi = 0; mi < kBf16GdnMFragments; ++mi) {
-                unsigned af[4], bf[4];
-                const int arow         = mi * 16 + a_rowoff;
-                const int acol         = ki * 16 + a_coloff;
-                const int weight_stage = stage * kBf16GdnBlockM * kBf16GdnBlockK;
-                ldmatrix_x4(
-                    af[0], af[1], af[2], af[3],
-                    smem_addr(
-                        &aws[weight_stage + arow * kBf16GdnBlockK + bf16_gdn_swizzle(arow, acol)]));
-                ldmatrix_x4(
-                    bf[0], bf[1], bf[2], bf[3],
-                    smem_addr(
-                        &bws[weight_stage + arow * kBf16GdnBlockK + bf16_gdn_swizzle(arow, acol)]));
-#pragma unroll
-                for (int ni = 0; ni < kNFragments; ++ni) {
-                    mma_bf16(a_acc[mi][ni][0], a_acc[mi][ni][1], a_acc[mi][ni][2], a_acc[mi][ni][3],
-                             af[0], af[1], af[2], af[3], xf[ni][0], xf[ni][1]);
-                    mma_bf16(b_acc[mi][ni][0], b_acc[mi][ni][1], b_acc[mi][ni][2], b_acc[mi][ni][3],
-                             bf[0], bf[1], bf[2], bf[3], xf[ni][0], xf[ni][1]);
+                for (int ni = 0; ni < WNT; ++ni) {
+                    WmmaC8& ca = *reinterpret_cast<WmmaC8*>(a_acc[mi][ni]);
+                    WmmaC8& cb = *reinterpret_cast<WmmaC8*>(b_acc[mi][ni]);
+                    WmmaA16I a = *reinterpret_cast<WmmaA16I*>(af[mi]);
+                    WmmaA16I b = *reinterpret_cast<WmmaA16I*>(bf[mi]);
+                    WmmaA16I x = *reinterpret_cast<WmmaA16I*>(xf[ni]);
+                    ca = wmma_bf16(a, x, ca);
+                    cb = wmma_bf16(b, x, cb);
                 }
             }
         }
@@ -254,14 +280,17 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
     }
 
 #pragma unroll
-    for (int mi = 0; mi < kBf16GdnMFragments; ++mi) {
-        const int row0 = head0 + mi * 16 + gid;
-        const int row1 = row0 + 8;
+    for (int mi = 0; mi < WMT; ++mi) {
+        const int row_base = head0 + mi * 16;
+        const int row_lo   = row_base + (lane >= 16 ? 8 : 0);
 #pragma unroll
-        for (int ni = 0; ni < kNFragments; ++ni) {
-            const int col0 = token0 + warp * kWarpN + ni * 8 + 2 * lid;
-            const int col1 = col0 + 1;
-            auto store     = [&](int token, int row, float av, float bv) {
+        for (int ni = 0; ni < WNT; ++ni) {
+            const int col_base  = token0 + warp * kWarpN + ni * 16;
+            const int local_col = ni * 16 + (lane & 15);
+            const int col       = col_base + (lane & 15);
+            // Skip the overlap columns when kWarpN is not a multiple of 16.
+            if (local_col >= kWarpN) { continue; }
+            auto store = [&](int token, int row, float av, float bv) {
                 if constexpr (SplitK == 1) {
                     const std::int64_t out_i =
                         static_cast<std::int64_t>(token) * kBf16GdnHeads + row;
@@ -275,18 +304,16 @@ __global__ __launch_bounds__(Warps * 32, 1) void bf16_gdn_gating_proj_gemm_mma_k
                 }
             };
             if constexpr (FullTokens) {
-                store(col0, row0, a_acc[mi][ni][0], b_acc[mi][ni][0]);
-                store(col1, row0, a_acc[mi][ni][1], b_acc[mi][ni][1]);
-                store(col0, row1, a_acc[mi][ni][2], b_acc[mi][ni][2]);
-                store(col1, row1, a_acc[mi][ni][3], b_acc[mi][ni][3]);
-            } else {
-                if (col0 < t) {
-                    store(col0, row0, a_acc[mi][ni][0], b_acc[mi][ni][0]);
-                    store(col0, row1, a_acc[mi][ni][2], b_acc[mi][ni][2]);
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    store(col, row_lo + r, a_acc[mi][ni][r], b_acc[mi][ni][r]);
                 }
-                if (col1 < t) {
-                    store(col1, row0, a_acc[mi][ni][1], b_acc[mi][ni][1]);
-                    store(col1, row1, a_acc[mi][ni][3], b_acc[mi][ni][3]);
+            } else {
+                if (col < t) {
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) {
+                        store(col, row_lo + r, a_acc[mi][ni][r], b_acc[mi][ni][r]);
+                    }
                 }
             }
         }

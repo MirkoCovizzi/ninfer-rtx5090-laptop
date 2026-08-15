@@ -4,7 +4,7 @@
 
 #include "ninfer_bench_common.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -39,7 +39,7 @@ void run(int tokens) {
     Tensor proposal_tensor(proposals.p, DType::I32, {tokens});
 
     const Result result = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](hipStream_t stream) {
             ops::proposal_remap_token_ids(proposal_tensor, static_cast<const std::int32_t*>(map.p),
                                           kMapSize, stream);
         },
@@ -53,7 +53,7 @@ void run(int tokens) {
 
 int main(int argc, char** argv) {
     int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

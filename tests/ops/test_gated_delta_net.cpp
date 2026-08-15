@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #include "ninfer/ops/gated_delta_net.h"
 
 #include "ops/gdn_ref.h"
 #include "ops/op_tester.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cmath>
@@ -186,7 +187,7 @@ int inplace_case(const Case& test_case, std::uint32_t seed) {
 
     ops::gated_delta_net(q, k, v, g, beta, scale, test_case.normalize_qk, workspace, state_tensor,
                          out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = std::string(test_case.name) + " inplace";
     int failures            = 0;
@@ -236,7 +237,7 @@ int distinct_state_case(const Case& test_case, std::uint32_t seed) {
 
     ops::gated_delta_net(q, k, v, g, beta, scale, test_case.normalize_qk, workspace,
                          state_in_tensor, state_out_tensor, out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = std::string(test_case.name) + " distinct-state";
     int failures            = 0;
@@ -291,7 +292,7 @@ int snapshot_case(const Case& test_case, int slots, int initial_slot, int snapsh
     ops::gated_delta_net_snapshot(q, k, v, g, beta, scale, test_case.normalize_qk, states_tensor,
                                   Tensor{}, initial_slot_tensor, snapshot_base_slot_tensor,
                                   out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label             = std::string(test_case.name) + " snapshot";
     const std::vector<float> got_states = from_device<float>(states.data(), initial_states.size());
@@ -420,7 +421,7 @@ int batched_snapshot_case(const Case& test_case, const std::vector<int>& initial
     Tensor out_tensor(out.data(), DType::BF16, {kStateDim, test_case.value_heads, width, batch});
     ops::gated_delta_net_snapshot(q, k, v, g, beta, scale, test_case.normalize_qk, states_tensor,
                                   valid_tensor, initial_tensor, bases_tensor, out_tensor, nullptr);
-    cuda_synchronize();
+    hip_synchronize();
 
     const std::string label = std::string(test_case.name) +
                               " batched snapshot B=" + std::to_string(batch) +
@@ -513,7 +514,7 @@ int contract_rejection_cases() {
         try {
             ops::gated_delta_net(q, k, v, g, beta, scale, true, workspace, state, out, nullptr);
         } catch (const std::invalid_argument&) { return true; }
-        cuda_synchronize();
+        hip_synchronize();
         return false;
     };
 
@@ -536,7 +537,7 @@ int contract_rejection_cases() {
 } // namespace
 
 int main() {
-    if (cuda_unavailable()) {
+    if (hip_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }

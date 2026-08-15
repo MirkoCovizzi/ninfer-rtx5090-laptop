@@ -1,9 +1,10 @@
+#include "hip/hip_runtime.h"
 #pragma once
 
 #include "core/arena.h"
 #include "core/tensor.h"
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -43,7 +44,7 @@ namespace ninfer::ops {
  */
 void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_weight,
                      const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g,
-                     Tensor& beta, cudaStream_t stream);
+                     Tensor& beta, hipStream_t stream);
 
 /**
  * Qwen3.6-35B-A3B exact storage domain. `ab_weight` is one contiguous BF16_CTRL [64,2048]
@@ -53,7 +54,7 @@ void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_we
  */
 void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_log,
                      const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g, Tensor& beta,
-                     cudaStream_t stream);
+                     hipStream_t stream);
 
 /**
  * Applies the Qwen3.6 GDN input RMSNorm and control projection as one semantic Op:
@@ -76,12 +77,12 @@ void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_l
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& a_weight, const Weight& b_weight, const Tensor& A_log,
                           const Tensor& dt_bias, WorkspaceArena& ws, Tensor& h, Tensor& g,
-                          Tensor& beta, cudaStream_t stream);
+                          Tensor& beta, hipStream_t stream);
 
 /** Qwen3.6-35B-A3B contiguous-parent storage form of gdn_norm_gating_proj. */
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& ab_weight, const Tensor& A_log, const Tensor& dt_bias,
                           WorkspaceArena& ws, Tensor& h, Tensor& g, Tensor& beta,
-                          cudaStream_t stream);
+                          hipStream_t stream);
 
 } // namespace ninfer::ops

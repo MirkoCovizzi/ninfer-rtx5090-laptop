@@ -22,7 +22,7 @@ static DeviceBuffer make_f32(std::size_t n, std::uint32_t seed) {
         h[i]          = 2.0f * u - 1.0f;
     }
     DeviceBuffer d(n * sizeof(float));
-    cudaMemcpy(d.p, h.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    hipMemcpy(d.p, h.data(), n * sizeof(float), hipMemcpyHostToDevice);
     return d;
 }
 
@@ -49,13 +49,13 @@ static void run(int t, const char* tag) {
     const double bytes = 2.0 * static_cast<double>(kHeads) * static_cast<double>(t) * 2.0 +
                          2.0 * static_cast<double>(kHeads) * static_cast<double>(t) * 4.0;
     const Result r = bench_loop(
-        [&](cudaStream_t s) { ops::gdn_gating(ta, tb, tA_log, tdt_bias, tg, tbeta, s); }, bytes);
+        [&](hipStream_t s) { ops::gdn_gating(ta, tb, tA_log, tdt_bias, tg, tbeta, s); }, bytes);
     print_result(tag, r);
 }
 
 int main(int argc, char** argv) {
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (hipGetDeviceCount(&count) != hipSuccess || count == 0) {
         std::printf("SKIP: no usable CUDA device\n");
         return 0;
     }

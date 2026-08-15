@@ -90,7 +90,14 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
         return WeightsProfile::GroupwiseIntW8Endpoints;
     }
     if (identity.model_id == model_id && identity.weights_id == "nvfp4") {
+#if defined(__HIP_PLATFORM_AMD__)
+        // The NVFP4 profile requires Blackwell e4m3/fp4 tensor cores (SM120) and
+        // TMA; gfx1151 has neither, so the identity is not loadable on HIP.
+        throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
+                                 "' (NVFP4) is not supported on HIP");
+#else
         return WeightsProfile::Nvfp4;
+#endif
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' is not supported by target '" + std::string(target_key) + "'");

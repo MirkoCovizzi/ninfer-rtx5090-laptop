@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 #include "ops/linear/q6/q6_launch.h"
 #include "ops/common/math.h"
 #include "ops/common/token_slices.h"
@@ -56,12 +57,12 @@ using MmaR64C128Schedule =
                               Cache::cg, Q6ScaleLoad::Pair32>;
 
 template <class Cfg, bool Full>
-void launch_schedule(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
-    const auto* xp              = static_cast<const __nv_bfloat16*>(x.data);
+void launch_schedule(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
+    const auto* xp              = static_cast<const __hip_bfloat16*>(x.data);
     const auto* codes           = static_cast<const std::uint8_t*>(w.qdata);
     const auto* high            = static_cast<const std::uint8_t*>(w.qhigh);
     const auto* scales          = static_cast<const std::uint8_t*>(w.scales);
-    auto* outp                  = static_cast<__nv_bfloat16*>(out.data);
+    auto* outp                  = static_cast<__hip_bfloat16*>(out.data);
     const std::int32_t n        = out.ne[0];
     const std::int32_t k        = x.ne[0];
     const std::int32_t t        = x.ne[1];
@@ -71,11 +72,11 @@ void launch_schedule(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t
 
     q6_rowsplit_gemm_mma_kernel<Cfg, Full>
         <<<grid, Cfg::kThreads, 0, stream>>>(xp, codes, high, scales, outp, n, k, t, padded_k);
-    CUDA_CHECK(cudaGetLastError());
+    HIP_CHECK(hipGetLastError());
 }
 
 template <class Schedule>
-void launch_route(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_route(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     const bool full = (out.ne[0] % Schedule::kBlockRows) == 0 &&
                       (x.ne[1] % Schedule::kBlockCols) == 0 && x.ne[0] == w.padded_shape[1] &&
                       (x.ne[0] % Schedule::kBlockK) == 0;
@@ -94,72 +95,72 @@ void launch_route(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t st
 } // namespace
 
 void launch_q6_mma_r64_c16_k128(const Tensor& x, const Weight& w, Tensor& out,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     launch_route<MmaR64C16K128Schedule>(x, w, out, stream);
 }
 
 void launch_q6_mma_r64_c24_k128(const Tensor& x, const Weight& w, Tensor& out,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     launch_route<MmaR64C24K128Schedule>(x, w, out, stream);
 }
 
 void launch_q6_mma_r64_c32_k128(const Tensor& x, const Weight& w, Tensor& out,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     launch_route<MmaR64C32K128Schedule>(x, w, out, stream);
 }
 
 void launch_q6_mma_r64_c40_k128(const Tensor& x, const Weight& w, Tensor& out,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     launch_route<MmaR64C40K128Schedule>(x, w, out, stream);
 }
 
 void launch_q6_mma_r64_c48_k128(const Tensor& x, const Weight& w, Tensor& out,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     launch_route<MmaR64C48K128Schedule>(x, w, out, stream);
 }
 
 void launch_q6_mma_r64_c56_k128(const Tensor& x, const Weight& w, Tensor& out,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     launch_route<MmaR64C56K128Schedule>(x, w, out, stream);
 }
 
-void launch_q6_mma_r64_c64(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_q6_mma_r64_c64(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     launch_route<MmaR64C64Schedule>(x, w, out, stream);
 }
 
 void launch_q6_mma_r64_c64_k128(const Tensor& x, const Weight& w, Tensor& out,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     launch_route<MmaR64C64K128Schedule>(x, w, out, stream);
 }
 
 void launch_q6_mma_r64_c72_k128(const Tensor& x, const Weight& w, Tensor& out,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     launch_route<MmaR64C72K128Schedule>(x, w, out, stream);
 }
 
-void launch_q6_mma_r64_c80(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_q6_mma_r64_c80(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     launch_route<MmaR64C80Schedule>(x, w, out, stream);
 }
 
 void launch_q6_mma_r64_c88_k128(const Tensor& x, const Weight& w, Tensor& out,
-                                cudaStream_t stream) {
+                                hipStream_t stream) {
     launch_route<MmaR64C88K128Schedule>(x, w, out, stream);
 }
 
-void launch_q6_mma_r64_c96(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_q6_mma_r64_c96(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     launch_route<MmaR64C96Schedule>(x, w, out, stream);
 }
 
 void launch_q6_mma_r64_c112_partial(const Tensor& x, const Weight& w, Tensor& out,
-                                    cudaStream_t stream) {
+                                    hipStream_t stream) {
     launch_route<MmaR64C112PartialSchedule>(x, w, out, stream);
 }
 
-void launch_q6_mma_r64_c112(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_q6_mma_r64_c112(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     launch_route<MmaR64C112Schedule>(x, w, out, stream);
 }
 
-void launch_q6_mma_r64_c128(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void launch_q6_mma_r64_c128(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream) {
     launch_route<MmaR64C128Schedule>(x, w, out, stream);
 }
 
