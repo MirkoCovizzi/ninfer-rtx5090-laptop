@@ -42,4 +42,11 @@ void launch_w8_exact_mma_r64_c128(const Tensor&, const Weight&, Tensor&, hipStre
 void launch_w8_exact_mma_r96_c96(const Tensor&, const Weight&, Tensor&, hipStream_t);
 void launch_w8_exact_mma_r128_c80(const Tensor&, const Weight&, Tensor&, hipStream_t);
 
+void launch_w8_gemv_t4_248320x5120(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+void launch_w8_gemv_t4_34816x5120(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+void launch_w8_gemv_t4_14336x5120(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+void launch_w8_gemv_t4_5120x10240(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+void launch_w8_gemv_t4_5120x6144(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+void launch_w8_gemv_t4_5120x17408(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+
 } // namespace ninfer::ops::detail

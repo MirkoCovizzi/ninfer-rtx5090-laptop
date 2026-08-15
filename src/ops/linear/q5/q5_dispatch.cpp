@@ -16,14 +16,12 @@ Q5Launch select_q5_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             return launch_q5_mma_r64_c128;
         case 6144:
             if (t == 1) { return launch_q5_gemv_r16_s2_x; }
-            if (t <= 6) { return launch_q5_simt_split4_exact; }
-            if (t <= 24) { return launch_q5_simt_r8_c8; }
+            if (t <= 24) { return launch_q5_gemv_t4_6144; }
             if (t <= 64) { return launch_q5_mma_r64_c64; }
             return launch_q5_mma_r64_c128;
         case 7168:
             if (t == 1) { return launch_q5_gemv_r16_s2_x; }
-            if (t <= 6) { return launch_q5_simt_split4_exact; }
-            if (t <= 16) { return launch_q5_simt_r8_c4; }
+            if (t <= 24) { return launch_q5_gemv_t4_7168; }
             return launch_q5_mma_r64_c128;
         default:
             break;
@@ -32,16 +30,14 @@ Q5Launch select_q5_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
     case 6144:
         if (n == 5120) {
             if (t == 1) { return launch_q5_simt_r8_c4; }
-            if (t <= 6) { return launch_q5_simt_split2_exact; }
-            if (t <= 24) { return launch_q5_simt_r8_c8; }
+            if (t <= 24) { return launch_q5_gemv_t4_5120x6144; }
             return launch_q5_mma_r64_c128;
         }
         break;
     case 17408:
         if (n == 5120) {
             if (t == 1) { return launch_q5_simt_r8_c4; }
-            if (t <= 6) { return launch_q5_simt_split2_exact; }
-            if (t <= 24) { return launch_q5_simt_r8_c8; }
+            if (t <= 24) { return launch_q5_gemv_t4_5120x17408; }
             return launch_q5_mma_r64_c128;
         }
         break;

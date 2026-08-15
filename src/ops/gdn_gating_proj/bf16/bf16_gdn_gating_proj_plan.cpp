@@ -27,26 +27,50 @@ struct RouteSpec {
     Bf16GdnGatingScheduleId schedule;
 };
 
+// Route ranges respect the platform cooperative ceiling (grid = ceil(T/128)*3*SplitK):
+// gfx1151 admits 60 CTAs at 20 KiB LDS, so split8 is legal through T=256 (48 CTAs),
+// split4 through T=512, split2 through T=1024; beyond that the unsplit (non-cooperative)
+// grid has enough independent work.
+#if defined(__HIP_PLATFORM_AMD__)
 constexpr std::array<RouteSpec, 6> k27Routes{{
     {{1, 1}, Bf16GdnGatingScheduleId::GemvPairedRows},
     {{2, 8}, Bf16GdnGatingScheduleId::SmallTSplit10},
-    // As token tiles double, halve SplitK. This keeps the cooperative grid near 192 CTAs instead
-    // of making T a launch limit. Once the unsplit grid has enough independent work, it also
-    // removes the cooperative-residency constraint.
+    {{9, 256}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
+    {{257, 512}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
+    {{513, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
+    {{1025, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
+}};
+#else
+constexpr std::array<RouteSpec, 6> k27Routes{{
+    {{1, 1}, Bf16GdnGatingScheduleId::GemvPairedRows},
+    {{2, 8}, Bf16GdnGatingScheduleId::SmallTSplit10},
     {{9, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
     {{1025, 2048}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
     {{2049, 4096}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
     {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
 }};
+#endif
 
+// 35B: BN64, 24 KiB LDS, two 16-row tiles; gfx1151 admits 40 CTAs, so split16 is legal
+// through T=64 (grid 32), split8 through T=160, split4 through T=320, split2 through
+// T=1280, unsplit beyond.
+#if defined(__HIP_PLATFORM_AMD__)
 constexpr std::array<RouteSpec, 5> k35Routes{{
-    // The same progression keeps the long-range cooperative routes near 256 CTAs.
+    {{1, 64}, Bf16GdnGatingScheduleId::MmaCooperativeSplit16},
+    {{65, 160}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
+    {{161, 320}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
+    {{321, 1280}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
+    {{1281, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
+}};
+#else
+constexpr std::array<RouteSpec, 5> k35Routes{{
     {{1, 127}, Bf16GdnGatingScheduleId::MmaCooperativeSplit16},
     {{128, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
     {{1025, 2048}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
     {{2049, 4096}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
     {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
 }};
+#endif
 
 template <std::size_t N>
 constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes,

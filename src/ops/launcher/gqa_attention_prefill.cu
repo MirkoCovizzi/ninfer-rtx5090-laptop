@@ -26,24 +26,13 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
         hipFuncSetAttribute(reinterpret_cast<const void*>(gqa_attention_prefill_bf16_kernel<Geometry, Metadata>),
                              hipFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillSmemBytes);
     HIP_CHECK(attr_bf16);
-#if !defined(__HIP_PLATFORM_AMD__)
-    // The i8 prefill kernel needs 92672 B of dynamic LDS, over the 64 KiB/CTA cap on
-    // AMD gfx11 (and over the RTX 5090's 100 KiB ceiling would be the CUDA concern),
-    // so on HIP the INT8 KV path is excluded below; only CUDA raises the attribute.
     static const hipError_t attr_i8 =
         hipFuncSetAttribute(reinterpret_cast<const void*>(gqa_attention_prefill_i8_kernel<Geometry, Metadata>),
                              hipFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillI8SmemBytes);
     HIP_CHECK(attr_i8);
-#endif
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
     if (cache.dtype == DType::I8) {
-#if defined(__HIP_PLATFORM_AMD__)
-        // gqa_attention_prefill_i8_kernel declares 92672 B of dynamic LDS, above the
-        // 64 KiB/CTA limit of gfx11; the INT8 KV path is unsupported on HIP.
-        throw std::runtime_error("gqa_attention prefill: INT8 KV cache unsupported on HIP "
-                                 "(i8 prefill kernel needs 92672 B dynamic LDS > 64 KiB cap)");
-#else
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kGqaPrefillI8Br)),
                                   static_cast<unsigned>(Geometry::QHeads), 1u);
         const Tensor& cache_k_scale = cache.k_scale_pages;
@@ -57,7 +46,6 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
                 static_cast<const __half*>(cache_v_scale.data), metadata,
                 static_cast<const std::int32_t*>(positions.data), scale,
                 static_cast<__hip_bfloat16*>(out.data), tokens);
-#endif  // !__HIP_PLATFORM_AMD__
     } else {
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kGqaPrefillBr)),
                                   static_cast<unsigned>(Geometry::QHeads), 1u);

@@ -18,6 +18,22 @@
 
 namespace ninfer::ops::detail {
 namespace {
+// Dispatch a runtime column count in [1..8] to the matching compile-time
+// ActiveCols and call launch(full_tile_size, active_cols, t0).
+template <class Launch>
+void dispatch_gemv_t_cols(int cols, Launch&& launch) {
+    switch (cols) {
+    case 1: launch(std::integral_constant<int, 4>{}, std::integral_constant<int, 1>{}); return;
+    case 2: launch(std::integral_constant<int, 4>{}, std::integral_constant<int, 2>{}); return;
+    case 3: launch(std::integral_constant<int, 4>{}, std::integral_constant<int, 3>{}); return;
+    case 4: launch(std::integral_constant<int, 4>{}, std::integral_constant<int, 4>{}); return;
+    case 5: launch(std::integral_constant<int, 8>{}, std::integral_constant<int, 5>{}); return;
+    case 6: launch(std::integral_constant<int, 8>{}, std::integral_constant<int, 6>{}); return;
+    case 7: launch(std::integral_constant<int, 8>{}, std::integral_constant<int, 7>{}); return;
+    case 8: launch(std::integral_constant<int, 8>{}, std::integral_constant<int, 8>{}); return;
+    default: throw std::invalid_argument("gemv_t: unsupported column dispatch");
+    }
+}
 
 constexpr int kN                 = 34816;
 constexpr int kK                 = 5120;
@@ -117,22 +133,30 @@ __device__ __forceinline__ void q4_issue_pair_tile(uint4 (*__restrict__ s_code)[
     pipe_commit();
 }
 
+// kTt token columns per launch (kTt == 1 keeps the T=1 path); x is staged once per block
+// when it fits (kStageX), otherwise read from global (L2-resident). kActiveCols lets a
+// single launch cover T < kTt without re-reading the weight matrix.
+template <int kTt = 1, int kActiveCols = kTt, bool kStageX = (kK * kTt * 2 <= 48 * 1024)>
 __global__ void q4_linear_swiglu_gemv_pair_kernel(const __hip_bfloat16* __restrict__ x,
                                                   const std::uint8_t* __restrict__ codes,
                                                   const std::uint8_t* __restrict__ scales,
                                                   __hip_bfloat16* __restrict__ out) {
     constexpr int kStages   = 3;
     constexpr int kPrefetch = kStages - 1;
-    __shared__ __align__(16) __hip_bfloat16 x_sh[kK];
+    static_assert(!kStageX || kK * kTt * 2 <= 48 * 1024, "staged x must fit shared");
+    __shared__ __align__(16) __hip_bfloat16 x_sh[kStageX ? kK * kTt : 1];
     __shared__ uint4 code_tile[kWarpsPerBlock][kStages][2][kVecsPerWarpTile];
     __shared__ uint4 scale_tile[kWarpsPerBlock][kStages][2][2];
 
-    auto* x_sh_v    = reinterpret_cast<uint4*>(x_sh);
-    const auto* x_g = reinterpret_cast<const uint4*>(x);
-    for (int i = static_cast<int>(threadIdx.x); i < kXVecs; i += static_cast<int>(blockDim.x)) {
-        x_sh_v[i] = x_g[i];
+    if constexpr (kStageX) {
+        auto* x_sh_v    = reinterpret_cast<uint4*>(x_sh);
+        const auto* x_g = reinterpret_cast<const uint4*>(x);
+        for (int i = static_cast<int>(threadIdx.x); i < kXVecs * kTt;
+             i += static_cast<int>(blockDim.x)) {
+            x_sh_v[i] = x_g[i];
+        }
+        __syncthreads();
     }
-    __syncthreads();
 
     const int lane    = static_cast<int>(threadIdx.x) & 31;
     const int warp    = static_cast<int>(threadIdx.x) >> 5;
@@ -145,10 +169,16 @@ __global__ void q4_linear_swiglu_gemv_pair_kernel(const __hip_bfloat16* __restri
         codes + static_cast<std::int64_t>(out_row + kIntermediate) * kGroups * kBytesPerGroup;
     const std::uint8_t* up_scale_row =
         scales + static_cast<std::int64_t>(out_row + kIntermediate) * kGroups * 2;
-    const auto* x2 = reinterpret_cast<const __hip_bfloat162*>(x_sh);
+    const auto* x2 = kStageX ? reinterpret_cast<const __hip_bfloat162*>(x_sh)
+                             : reinterpret_cast<const __hip_bfloat162*>(x);
 
-    float gate_acc = 0.0f;
-    float up_acc   = 0.0f;
+    float gate_acc[kActiveCols];
+    float up_acc[kActiveCols];
+#pragma unroll
+    for (int tt = 0; tt < kActiveCols; ++tt) {
+        gate_acc[tt] = 0.0f;
+        up_acc[tt]   = 0.0f;
+    }
 #pragma unroll
     for (int p = 0; p < kPrefetch; ++p) {
         if (p < kTiles) {
@@ -191,22 +221,66 @@ __global__ void q4_linear_swiglu_gemv_pair_kernel(const __hip_bfloat16* __restri
             const int up_packed = static_cast<int>(up_codes[tile_group * kBytesPerGroup + lane]);
             const int up_q0     = sign_extend<4>(up_packed & 0x0f);
             const int up_q1     = sign_extend<4>(up_packed >> 4);
-            const int k0        = (tile * kGroupsPerWarpTile + tile_group) * kGroupK + lane * 2;
-            const float2 xv     = __bfloat1622float2(x2[k0 >> 1]);
-            gate_acc            = fmaf(static_cast<float>(gate_q0) * gate_scale, xv.x, gate_acc);
-            gate_acc            = fmaf(static_cast<float>(gate_q1) * gate_scale, xv.y, gate_acc);
-            up_acc              = fmaf(static_cast<float>(up_q0) * up_scale, xv.x, up_acc);
-            up_acc              = fmaf(static_cast<float>(up_q1) * up_scale, xv.y, up_acc);
+            const int k0 = (tile * kGroupsPerWarpTile + tile_group) * kGroupK + lane * 2;
+            const int xoff = k0 >> 1;
+#pragma unroll
+            for (int tt = 0; tt < kActiveCols; ++tt) {
+                const float2 xv = __bfloat1622float2(x2[static_cast<std::int64_t>(tt) * (kK / 2) + xoff]);
+                gate_acc[tt]    = fmaf(static_cast<float>(gate_q0) * gate_scale, xv.x, gate_acc[tt]);
+                gate_acc[tt]    = fmaf(static_cast<float>(gate_q1) * gate_scale, xv.y, gate_acc[tt]);
+                up_acc[tt]      = fmaf(static_cast<float>(up_q0) * up_scale, xv.x, up_acc[tt]);
+                up_acc[tt]      = fmaf(static_cast<float>(up_q1) * up_scale, xv.y, up_acc[tt]);
+            }
         }
         __syncwarp();
     }
 
-    gate_acc = warp_reduce_sum(gate_acc);
-    up_acc   = warp_reduce_sum(up_acc);
-    if (lane == 0) { out[out_row] = __float2bfloat16(silu(gate_acc) * up_acc); }
+#pragma unroll
+    for (int tt = 0; tt < kActiveCols; ++tt) {
+        const float g = warp_reduce_sum(gate_acc[tt]);
+        const float u = warp_reduce_sum(up_acc[tt]);
+        if (lane == 0) {
+            out[static_cast<std::int64_t>(tt) * kIntermediate + out_row] =
+                __float2bfloat16(silu(g) * u);
+        }
+    }
 }
 
 } // namespace
+
+void q4_linear_swiglu_gemv_t4_pair_launch(const Tensor& x, const Weight& w, Tensor& out,
+                                            hipStream_t stream) {
+    if (w.n != kN || w.k != kK || w.padded_shape[1] != kK) {
+        throw std::invalid_argument("q4 linear_swiglu GEMV-T4 requires weight [34816,5120]");
+    }
+    const int grid = kIntermediate / kPairsPerBlock;
+    const auto* xp = static_cast<const __hip_bfloat16*>(x.data);
+    auto* op       = static_cast<__hip_bfloat16*>(out.data);
+    const int cols = x.ne[1];
+    const auto* codes = static_cast<const std::uint8_t*>(w.qdata);
+    const auto* scales = static_cast<const std::uint8_t*>(w.scales);
+    auto launch = [&](auto full, auto active, int t0) {
+        constexpr int kFull   = decltype(full)::value;
+        constexpr int kActive = decltype(active)::value;
+        q4_linear_swiglu_gemv_pair_kernel<kFull, kActive>
+            <<<grid, kBlockThreads, 0, stream>>>(xp + static_cast<std::int64_t>(t0) * kK, codes,
+                                                 scales,
+                                                 op + static_cast<std::int64_t>(t0) * kIntermediate);
+    };
+    if (cols <= 8) {
+        dispatch_gemv_t_cols(cols, [&](auto full, auto active) { launch(full, active, 0); });
+    } else {
+        int t0 = 0;
+        for (; t0 + 4 <= cols; t0 += 4) {
+            launch(std::integral_constant<int, 4>{}, std::integral_constant<int, 4>{}, t0);
+        }
+        if (t0 < cols) {
+            const int rem = cols - t0;
+            dispatch_gemv_t_cols(rem, [&](auto full, auto active) { launch(full, active, t0); });
+        }
+    }
+    HIP_CHECK(hipGetLastError());
+}
 
 void q4_linear_swiglu_gemv_pair_launch(const Tensor& x, const Weight& w, Tensor& out,
                                        hipStream_t stream) {

@@ -35,4 +35,9 @@ void launch_q4_mma_r64_c120_partial(const Tensor& x, const Weight& w, Tensor& ou
 void launch_q4_mma_r64_c120(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
 void launch_q4_mma_r64_c128(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
 
+void launch_q4_gemv_t4_4096x5120(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+void launch_q4_gemv_t4_6144x5120(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+void launch_q4_gemv_t4_7168x5120(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+void launch_q4_gemv_t4_34816x5120(const Tensor& x, const Weight& w, Tensor& out, hipStream_t stream);
+
 } // namespace ninfer::ops::detail
