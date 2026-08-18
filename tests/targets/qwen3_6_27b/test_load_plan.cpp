@@ -45,7 +45,7 @@ bool valid_divisors(const WeightPlan& weight) {
 
 int verify_groupwise(const std::filesystem::path& path) {
     ninfer::artifact::Reader reader(path);
-    if (Package::resolve_weights(reader.identity()) != WeightsProfile::Qwen36GroupwiseInt) {
+    if (Package::resolve_weights(reader) != WeightsProfile::Qwen36GroupwiseInt) {
         std::cerr << "groupwise identity resolved to the wrong profile\n";
         return 1;
     }
@@ -84,15 +84,16 @@ int verify_groupwise(const std::filesystem::path& path) {
     return 0;
 }
 
-int verify_nvfp4(const std::filesystem::path& path) {
+int verify_nvfp4(const std::filesystem::path& path, WeightsProfile expected_profile,
+                 NumericFormat endpoint_format) {
     ninfer::artifact::Reader reader(path);
-    if (Package::resolve_weights(reader.identity()) != WeightsProfile::Qwen36Nvfp4) {
+    if (Package::resolve_weights(reader) != expected_profile) {
         std::cerr << "NVFP4 identity resolved to the wrong profile\n";
         return 1;
     }
     ninfer::artifact::Binder binder(reader);
     const ArtifactLoadPlan plan =
-        bind_artifact(binder, WeightsProfile::Qwen36Nvfp4, all_features());
+        bind_artifact(binder, expected_profile, all_features());
     if (plan.materialization.object_count != 1307 ||
         plan.materialization.device_objects.size() != 1054 ||
         plan.materialization.host_objects.size() != 6 ||
@@ -106,8 +107,8 @@ int verify_nvfp4(const std::filesystem::path& path) {
                   << " host=" << plan.materialization.host_objects.size() << '\n';
         return 1;
     }
-    if (plan.bindings.token_embedding.format != NumericFormat::W8G32_F16S ||
-        plan.bindings.output_head.format != NumericFormat::W8G32_F16S) {
+    if (plan.bindings.token_embedding.format != endpoint_format ||
+        plan.bindings.output_head.format != endpoint_format) {
         std::cerr << "NVFP4 vocabulary endpoints have the wrong storage profile\n";
         return 1;
     }
@@ -161,15 +162,27 @@ int verify_nvfp4(const std::filesystem::path& path) {
     return 0;
 }
 
-int verify_rejection() {
-    try {
-        (void)Package::resolve_weights({"qwen3.6-27b", "unknown"});
-    } catch (const std::runtime_error& error) {
-        const std::string message = error.what();
-        if (message.find("qwen3.6-27b/unknown") != std::string::npos) { return 0; }
+int verify_qwen38_modern(const std::filesystem::path& path) {
+    ninfer::artifact::Reader reader(path);
+    if (Package::resolve_weights(reader) != WeightsProfile::Qwen38Nvfp4) {
+        std::cerr << "modern Qwen3.8 NVFP4 resolved to the wrong profile\n";
+        return 1;
     }
-    std::cerr << "unknown weights identity was not rejected with the full identity\n";
-    return 1;
+    ninfer::artifact::Binder binder(reader);
+    const ArtifactLoadPlan plan =
+        bind_artifact(binder, WeightsProfile::Qwen38Nvfp4, all_features());
+    if (plan.materialization.object_count != reader.objects().size() ||
+        plan.materialization.device_objects.size() + plan.materialization.host_objects.size() !=
+            reader.objects().size()) {
+        std::cerr << "modern Qwen3.8 NVFP4 materialization plan is incomplete\n";
+        return 1;
+    }
+    if (plan.bindings.token_embedding.format != NumericFormat::FP8_E4M3FN_ROW_BF16S ||
+        plan.bindings.output_head.format != NumericFormat::FP8_E4M3FN_ROW_BF16S) {
+        std::cerr << "modern Qwen3.8 NVFP4 endpoints have the wrong storage profile\n";
+        return 1;
+    }
+    return 0;
 }
 
 int verify_profile_mismatch_rejection() {
@@ -201,14 +214,36 @@ int main() {
         artifact_path("NINFER_QWEN3_6_27B_WEIGHTS", "qwen3_6_27b.ninfer");
     const std::filesystem::path nvfp4 =
         artifact_path("NINFER_QWEN3_6_27B_NVFP4_WEIGHTS", "qwen3_6_27b_nvfp4.ninfer");
-    if (!std::filesystem::is_regular_file(groupwise) || !std::filesystem::is_regular_file(nvfp4)) {
-        std::cerr << "skip: both real 27B artifacts are required: groupwise=" << groupwise
-                  << " nvfp4=" << nvfp4 << '\n';
+    const std::filesystem::path qwen38_legacy = artifact_path(
+        "NINFER_QWEN3_8_27B_LEGACY_NVFP4_WEIGHTS", "qwen3_8_27b_nvfp4_ostfralla.ninfer");
+    const std::filesystem::path qwen38_modern =
+        artifact_path("NINFER_QWEN3_8_27B_NVFP4_WEIGHTS", "qwen3_8_27b_nvfp4.ninfer");
+    bool ran = false;
+    if (const int result = verify_profile_mismatch_rejection(); result != 0) { return result; }
+    if (std::filesystem::is_regular_file(groupwise) && std::filesystem::is_regular_file(nvfp4)) {
+        ran = true;
+        if (const int result = verify_groupwise(groupwise); result != 0) { return result; }
+        if (const int result = verify_nvfp4(nvfp4, WeightsProfile::Qwen36Nvfp4,
+                                            NumericFormat::W8G32_F16S);
+            result != 0) {
+            return result;
+        }
+    }
+    if (std::filesystem::is_regular_file(qwen38_legacy)) {
+        ran = true;
+        if (const int result = verify_nvfp4(qwen38_legacy, WeightsProfile::Qwen38Nvfp4LegacyW8,
+                                            NumericFormat::W8G32_F16S);
+            result != 0) {
+            return result;
+        }
+    }
+    if (std::filesystem::is_regular_file(qwen38_modern)) {
+        ran = true;
+        if (const int result = verify_qwen38_modern(qwen38_modern); result != 0) { return result; }
+    }
+    if (!ran) {
+        std::cerr << "skip: no real 27B artifacts available for load-plan validation\n";
         return 77;
     }
-    if (const int result = verify_rejection(); result != 0) { return result; }
-    if (const int result = verify_profile_mismatch_rejection(); result != 0) { return result; }
-    if (const int result = verify_groupwise(groupwise); result != 0) { return result; }
-    if (const int result = verify_nvfp4(nvfp4); result != 0) { return result; }
     return 0;
 }
