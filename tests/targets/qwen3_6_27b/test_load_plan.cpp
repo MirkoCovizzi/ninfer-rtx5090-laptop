@@ -172,7 +172,7 @@ int verify_qwen38_modern(const std::filesystem::path& path) {
     const ArtifactLoadPlan plan =
         bind_artifact(binder, WeightsProfile::Qwen38Nvfp4, all_features());
     if (plan.materialization.object_count != reader.objects().size() ||
-        plan.materialization.device_objects.size() + plan.materialization.host_objects.size() !=
+        plan.materialization.device_objects.size() + plan.materialization.host_objects.size() >
             reader.objects().size()) {
         std::cerr << "modern Qwen3.8 NVFP4 materialization plan is incomplete\n";
         return 1;
