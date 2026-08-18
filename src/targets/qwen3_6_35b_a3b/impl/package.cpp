@@ -64,7 +64,8 @@ ModelSamplingDefaults Package::sampling_defaults(std::string_view model) {
                              std::string(target_key) + "'");
 }
 
-Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentity& identity) {
+Package::WeightsProfile Package::resolve_weights(const artifact::Reader& reader) {
+    const auto& identity = reader.identity();
     if (identity.model_id == model_id && identity.weights_id == "groupwise-int") {
         return WeightsProfile::GroupwiseInt;
     }

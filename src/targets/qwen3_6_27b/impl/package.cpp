@@ -6,8 +6,10 @@
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 #include "targets/qwen3_6_27b/impl/variant.h"
 
+#include <cstdint>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace ninfer::targets::qwen3_6_27b::detail {
 
@@ -82,7 +84,17 @@ ModelSamplingDefaults Package::sampling_defaults(std::string_view model) {
                              std::string(target_key) + "'");
 }
 
-Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentity& identity) {
+bool endpoint_matches(const artifact::Reader& reader, std::string_view name,
+                      artifact::NumericFormat format, artifact::StorageLayout layout) {
+    const auto* object = reader.find(name);
+    if (object == nullptr) { return false; }
+    const auto* tensor = std::get_if<artifact::TensorDescriptor>(object);
+    return tensor != nullptr && tensor->format == format && tensor->layout == layout &&
+           tensor->shape == std::vector<std::uint64_t>{248320, 5120};
+}
+
+Package::WeightsProfile Package::resolve_weights(const artifact::Reader& reader) {
+    const auto& identity = reader.identity();
     if (identity.model_id == model_id && identity.weights_id == "groupwise-int") {
         return WeightsProfile::Qwen36GroupwiseInt;
     }
@@ -93,7 +105,22 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
         return WeightsProfile::Qwen36Nvfp4;
     }
     if (identity.model_id == qwen3_8_model_id && identity.weights_id == "nvfp4") {
-        return WeightsProfile::Qwen38Nvfp4;
+        const bool legacy_w8 =
+            endpoint_matches(reader, "text/token_embedding", artifact::NumericFormat::W8G32_F16S,
+                             artifact::StorageLayout::RowSplitK128V1) &&
+            endpoint_matches(reader, "text/output_head", artifact::NumericFormat::W8G32_F16S,
+                             artifact::StorageLayout::RowSplitK128V1);
+        const bool current_fp8 = endpoint_matches(
+            reader, "text/token_embedding", artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
+            artifact::StorageLayout::RowScaleV1) &&
+                                 endpoint_matches(
+                                     reader, "text/output_head",
+                                     artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
+                                     artifact::StorageLayout::RowScaleV1);
+        if (legacy_w8) { return WeightsProfile::Qwen38Nvfp4LegacyW8; }
+        if (current_fp8) { return WeightsProfile::Qwen38Nvfp4; }
+        throw std::runtime_error(
+            "unsupported qwen3.8-27b/nvfp4 endpoint storage profile");
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' is not supported by target '" + std::string(target_key) + "'");
