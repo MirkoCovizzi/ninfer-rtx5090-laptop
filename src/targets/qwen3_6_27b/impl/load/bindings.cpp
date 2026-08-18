@@ -41,6 +41,8 @@ NumericFormat endpoint_format(WeightsProfile weights_profile) {
         return NumericFormat::W8G32_F16S;
     case WeightsProfile::Qwen38Nvfp4:
         return NumericFormat::FP8_E4M3FN_ROW_BF16S;
+    case WeightsProfile::Qwen38Nvfp4LegacyW8:
+        return NumericFormat::W8G32_F16S;
     }
     throw std::invalid_argument("qwen3_6_27b: invalid weights profile");
 }
@@ -430,6 +432,9 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
         break;
     case WeightsProfile::Qwen38Nvfp4:
         bind_qwen38_nvfp4_text_layers(binder, out);
+        break;
+    case WeightsProfile::Qwen38Nvfp4LegacyW8:
+        bind_nvfp4_text_layers(binder, out);
         break;
     default:
         throw std::invalid_argument("qwen3_6_27b: invalid weights profile");

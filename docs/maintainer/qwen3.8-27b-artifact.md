@@ -706,7 +706,25 @@ Validation must reject an incomplete or alternate mixed-precision allocation. It
 missing source matrix from the official BF16 checkpoint, silently requantize a preserved FP8 or
 NVFP4 field, or add unused source calibration fields as artifact objects.
 
-## 13. Existing `groupwise-int` artifact
+## 13. Legacy W8-endpoint NVFP4 compatibility artifact
+
+NInfer also accepts the externally published Qwen3.8 NVFP4 artifact whose endpoint tensors use the
+older Qwen3.6-style storage profile. It retains the same artifact identity but is selected as the
+explicit `Qwen38Nvfp4LegacyW8` runtime profile by inspecting both vocabulary endpoints before
+binding. The profile is limited to this exact Qwen3.8 NVFP4 shape and does not act as a generic
+format fallback.
+
+| Role | Format | Layout |
+|---|---|---|
+| `text/token_embedding` | `W8G32_F16S` | `row-split-k128-v1` |
+| `text/output_head` | `W8G32_F16S` | `row-split-k128-v1` |
+| Text NVFP4 parents and BF16 exceptions | legacy Qwen3.6 NVFP4 assignment | registered layouts |
+
+The accepted artifact has 1307 objects, 1301 tensors, 6 frontend resources, and 247 NVFP4 parents.
+The current Qwen3.8 NVFP4 profile remains the separate FP8-endpoint mixed allocation in Section 3.
+An artifact with mixed, missing, or unknown endpoint descriptors is rejected rather than guessed.
+
+## 14. Existing `groupwise-int` artifact
 
 The existing registered peer artifact retains this identity:
 
