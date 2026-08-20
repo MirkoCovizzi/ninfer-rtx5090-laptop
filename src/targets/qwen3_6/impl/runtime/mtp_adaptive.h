@@ -202,7 +202,7 @@ public:
                     all_tails_confident && signals[row]->confident_tail(selected_window_);
             }
             const std::uint32_t preferred_probe =
-                std::min({selected_window_ + 2U, maximum_window_, 7U});
+                std::min(selected_window_ + 2U, maximum_window_);
             const std::uint32_t probe_window = widest_admissible_width(
                 preferred_probe, selected_window_, signals.size(), batch_frontier);
             if (probe_window != 0) {
@@ -212,7 +212,8 @@ public:
                     last_width_execution_round_[batch][probe_window - 1U];
                 const bool probe_due =
                     observed_round == 0 || execution_round_ - observed_round >= 32;
-                if (selected_window_ < 7 && has_continuing_row && all_tails_confident &&
+                if (selected_window_ < maximum_window_ && has_continuing_row &&
+                    all_tails_confident &&
                     probe_due) {
                     best_window = probe_window;
                     best_score = std::max(score(best_window, signals, available, room, frontiers),

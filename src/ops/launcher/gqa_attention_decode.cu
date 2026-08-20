@@ -169,7 +169,19 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 logical_capacity, scale, static_cast<__nv_bfloat16*>(partial_acc.data),
                 static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
     };
-    if constexpr (TokenTile == 6) {
+    if constexpr (TokenTile == 9) {
+        static_assert(Geometry::GroupSize == 6);
+        launch.template operator()<16, 1, 64, true>();
+    } else if constexpr (TokenTile == 7 || TokenTile == 8) {
+        static_assert(Geometry::GroupSize == 6);
+        // Two resident 32-key CTAs win through the calibrated 80K graph envelope; beyond it,
+        // one 64-key CTA avoids the smaller tile's long-range loop overhead.
+        if (implementation_window <= 81920) {
+            launch.template operator()<6, 2, 32, false>();
+        } else {
+            launch.template operator()<12, 1, 64, true>();
+        }
+    } else if constexpr (TokenTile == 6) {
         // Small grids need more warps per CTA. From 2K to 8K, Bc=64 halves key
         // loop iterations; dynamic smem avoids penalizing the long-context path.
         if (implementation_window > 128 && implementation_window <= 160) {
@@ -243,7 +255,11 @@ bool gqa_attention_uses_small_t(std::int32_t tokens) { return tokens >= 1 && tok
 
 std::int32_t gqa_attention_split_capacity(std::int32_t q_heads, std::int32_t tokens,
                                           DType cache_dtype, GqaExecutionEnvelope envelope) {
-    if (tokens < 1 || tokens > 6 || (cache_dtype != DType::BF16 && cache_dtype != DType::I8) ||
+    const bool standard_small_t = tokens >= 1 && tokens <= 6;
+    const bool wide_i8_27b = q_heads == Gqa27Geometry::QHeads && cache_dtype == DType::I8 &&
+                             tokens >= 7 && tokens <= 9;
+    if ((!standard_small_t && !wide_i8_27b) ||
+        (cache_dtype != DType::BF16 && cache_dtype != DType::I8) ||
         envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys) {
         throw std::invalid_argument("gqa_attention split capacity: invalid profile");
     }
@@ -302,9 +318,14 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
                         implementation_window, splits, partial_acc, partial_m, partial_l, stream); \
                 }                                                                                  \
             } else {                                                                               \
-                launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked>(           \
-                    q, input, pos, scale, cache, invocation, logical_capacity, splits,             \
-                    partial_acc, partial_m, partial_l, stream);                                    \
+                if constexpr ((TOKENS) <= 6) {                                                     \
+                    launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked>(       \
+                        q, input, pos, scale, cache, invocation, logical_capacity, splits,         \
+                        partial_acc, partial_m, partial_l, stream);                                \
+                } else {                                                                           \
+                    throw std::invalid_argument(                                                   \
+                        "gqa_attention_small_t_launch: wide-T requires INT8 cache");              \
+                }                                                                                  \
             }                                                                                      \
         };                                                                                         \
         const bool masked = invocation.valid_columns != nullptr;                                   \
@@ -340,6 +361,36 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
     case 6:
         NINFER_GQA_SMALL_T_DISPATCH(6, 4);
         break;
+    case 7:
+        if constexpr (Geometry::QHeads == Gqa27Geometry::QHeads) {
+            if (cache.dtype != DType::I8 || invocation.batch_size != 1) {
+                throw std::invalid_argument(
+                    "gqa_attention_small_t_launch: unsupported wide-T profile");
+            }
+            NINFER_GQA_SMALL_T_DISPATCH(7, 4);
+            break;
+        }
+        [[fallthrough]];
+    case 8:
+        if constexpr (Geometry::QHeads == Gqa27Geometry::QHeads) {
+            if (cache.dtype != DType::I8 || invocation.batch_size != 1) {
+                throw std::invalid_argument(
+                    "gqa_attention_small_t_launch: unsupported wide-T profile");
+            }
+            NINFER_GQA_SMALL_T_DISPATCH(8, 4);
+            break;
+        }
+        [[fallthrough]];
+    case 9:
+        if constexpr (Geometry::QHeads == Gqa27Geometry::QHeads) {
+            if (cache.dtype != DType::I8 || invocation.batch_size != 1) {
+                throw std::invalid_argument(
+                    "gqa_attention_small_t_launch: unsupported wide-T profile");
+            }
+            NINFER_GQA_SMALL_T_DISPATCH(9, 4);
+            break;
+        }
+        [[fallthrough]];
     default:
         throw std::invalid_argument("gqa_attention_small_t_launch: unsupported T");
     }

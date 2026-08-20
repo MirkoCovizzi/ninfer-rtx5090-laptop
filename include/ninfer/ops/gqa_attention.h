@@ -49,13 +49,14 @@ struct GqaExecutionEnvelope {
 /**
  * Returns the transient arena capacity required for every W in the inclusive interval at one
  * exact logical batch size. Head geometry, cache dtype, and execution envelope are the fixed
- * implementation profile. Invalid profiles or intervals throw; a legal B=1 prompt route may
- * return zero.
+ * implementation profile. masked declares whether A1 receives valid_columns; A3 passes false.
+ * Invalid profiles or intervals throw; a legal B=1 prompt route may return zero.
  */
 [[nodiscard]] std::size_t
 gqa_attention_workspace_capacity_bytes(std::int32_t q_heads, DType cache_dtype,
                                        GqaExecutionEnvelope envelope, std::int32_t batch_size,
-                                       std::int32_t min_width, std::int32_t max_width);
+                                       bool masked, std::int32_t min_width,
+                                       std::int32_t max_width);
 
 /**
  * A1: append K/V for B independent sequences and compute causal grouped-query attention. Let

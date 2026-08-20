@@ -46,7 +46,7 @@ __device__ __forceinline__ void gqa_small_t_i8_store_swz(std::int8_t* tile, int 
     tile[off]     = code;
 }
 
-// Decode-specialized producer/consumer kernel for T=1..6. One producer warp per
+// Decode-specialized producer/consumer kernel for T=1..9. One producer warp per
 // m16 row tile computes QK + online softmax, while all CTA warps partition the
 // tile's 256-wide PV output. This keeps each thread's PV accumulator at 16, 32,
 // or 64 floats instead of 128 and uses otherwise-idle warps for useful output
@@ -87,9 +87,9 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     constexpr float Log2E         = 1.4426950408889634074f;
     constexpr unsigned FullMask   = 0xffffffffu;
 
-    static_assert(TokenTile >= 1 && TokenTile <= 6);
+    static_assert(TokenTile >= 1 && TokenTile <= 9);
     static_assert(Bc == 32 || Bc == 64);
-    static_assert(RowTiles >= 1 && RowTiles <= 3);
+    static_assert(RowTiles >= 1 && RowTiles <= 4);
     static_assert(Wc % RowTiles == 0);
     static_assert(PVNtPerWarp == 2 || PVNtPerWarp == 4 || PVNtPerWarp == 8 || PVNtPerWarp == 16);
     static_assert(QKKs == Groups * GroupKc);

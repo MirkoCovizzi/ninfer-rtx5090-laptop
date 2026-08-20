@@ -357,11 +357,11 @@ PagedKVBatchLayerView make_batch_cache_view(DeviceBuffer& k, DeviceBuffer& v, De
 }
 
 std::size_t workspace_capacity(const Geometry& geometry, DType dtype, std::int32_t tokens,
-                               std::int32_t batch, std::int32_t visible) {
+                                std::int32_t batch, std::int32_t visible, bool masked) {
     const ops::GqaExecutionEnvelope envelope{static_cast<std::uint32_t>(visible),
                                              static_cast<std::uint32_t>(visible)};
     return ops::gqa_attention_workspace_capacity_bytes(geometry.query_heads, dtype, envelope, batch,
-                                                       tokens, tokens);
+                                                        masked, tokens, tokens);
 }
 
 std::int32_t profile_visible(std::span<const std::int32_t> contexts,
@@ -403,7 +403,7 @@ public:
           block_table_(static_cast<std::size_t>(logical_pages_) * batch_ * sizeof(std::int32_t)),
           output_(bench::make_zeros(static_cast<std::size_t>(kHeadDim) * geometry.query_heads *
                                     tokens * batch_ * 2)),
-          workspace_bytes_(workspace_capacity(geometry, dtype, tokens, batch_, visible_)),
+          workspace_bytes_(workspace_capacity(geometry, dtype, tokens, batch_, visible_, masked_)),
           workspace_(std::max<std::size_t>(workspace_bytes_, 1)),
           q_tensor_(q_.p, DType::BF16, {kHeadDim, geometry.query_heads, tokens, batch_}),
           k_tensor_(k_.p, DType::BF16, {kHeadDim, geometry.kv_heads, tokens, batch_}),

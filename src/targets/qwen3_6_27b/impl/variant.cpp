@@ -47,21 +47,21 @@ constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::AllowA4;
 constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::AllowA8;
 
 // RTX 5090 Laptop, CUDA 13.1, Qwen3.8-27B legacy-W8 NVFP4, optimized proposal head, INT8 KV,
-// batch one. Values are milliseconds per physical MTP round. The midpoint confirms that
-// piecewise-linear interpolation captures this route's long-context attention cost cliff.
+// batch one. Values are milliseconds per physical MTP round. K6..K8 use the masked wide-small-T
+// split-KV route above its 256-visible-key admission seam.
 constexpr std::array<MtpAdaptiveCostPoint, 4> kNvfp4MtpAdaptiveCostPoints{{
     {256U,
-     {26.596376F, 28.936277F, 28.380552F, 30.002042F, 31.503180F, 33.015688F,
-      34.216129F, 35.838713F}},
+     {26.596376F, 28.936277F, 28.380552F, 30.002042F, 31.503180F, 32.890608F,
+      34.562589F, 35.847892F}},
     {2304U,
-     {26.833267F, 29.024762F, 28.546263F, 30.285130F, 31.876161F, 34.860764F,
-      35.888176F, 37.368331F}},
+     {26.833267F, 29.024762F, 28.546263F, 30.285130F, 31.876161F, 33.354065F,
+      35.014126F, 36.521353F}},
     {33024U,
-     {28.569155F, 31.277367F, 30.686196F, 33.010791F, 34.600379F, 62.568806F,
-      64.183533F, 65.760137F}},
+     {28.569155F, 31.277367F, 30.686196F, 33.010791F, 34.600379F, 36.198991F,
+      37.756093F, 40.721584F}},
     {65792U,
-     {30.287110F, 33.148583F, 32.678933F, 34.791146F, 37.190267F, 93.002847F,
-      94.611666F, 96.449993F}},
+     {30.287110F, 33.148583F, 32.678933F, 34.791146F, 37.190267F, 38.946149F,
+      40.639731F, 42.889582F}},
 }};
 
 constexpr std::array<MtpAdaptiveCostPoint, 1> kBaselineMtpAdaptiveCostPoints{{
@@ -166,6 +166,17 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
     } else if (draft_window == 5) {
         for (const std::uint32_t visible_end : {128U, 160U, 2054U, 8198U}) {
             add_shifted(visible_end, draft_window + 1);
+        }
+    } else if (draft_window >= 6 && draft_window <= 8) {
+        // The masked B=1 INT8 T=7..9 route changes from prompt to split-KV above 256 visible
+        // keys. Bound both target verification (E+K+1) and final MTP attention (E+2K) at the
+        // route seam so graph capture never prices a short-context replay with the wide route.
+        add_shifted(256U, draft_window + 1);
+        add_shifted(256U, 2 * draft_window);
+        if (draft_window <= 7) {
+            // T=7/8 changes its split-KV launch geometry at the measured 80K envelope seam.
+            add_shifted(81920U, draft_window + 1);
+            add_shifted(81920U, 2 * draft_window);
         }
     }
     std::sort(ends.begin(), ends.end());
