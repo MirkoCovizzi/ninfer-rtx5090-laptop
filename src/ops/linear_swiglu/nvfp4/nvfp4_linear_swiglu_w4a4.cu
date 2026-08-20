@@ -16,13 +16,13 @@ namespace ninfer::ops::detail {
 namespace {
 
 using Geometry = Nvfp4MlpGateUpGeometry;
-using M48N64   = Nvfp4W4a4MmaSchedule<48, 64, 256, 3, 4, 2, 2>;
+using M16N256  = Nvfp4W4a4MmaSchedule<16, 256, 256, 1, 16, 1, 2>;
 
 constexpr int kIntermediate = Geometry::kOutputRows / 2;
 
 struct Nvfp4SwiGluRows {
     static constexpr bool kContiguous   = false;
-    static constexpr int kRowsPerBranch = M48N64::kBlockN / 2;
+    static constexpr int kRowsPerBranch = M16N256::kBlockN / 2;
 
     __device__ __forceinline__ int weight_row(int row_begin, int local_row) const {
         return row_begin + (local_row & (kRowsPerBranch - 1)) +
@@ -90,7 +90,7 @@ void launch(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceArena& 
 
 void nvfp4_linear_swiglu_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                      WorkspaceArena& workspace, cudaStream_t stream) {
-    launch<M48N64>(x, weight, out, workspace, stream);
+    launch<M16N256>(x, weight, out, workspace, stream);
 }
 
 } // namespace ninfer::ops::detail
