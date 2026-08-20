@@ -1283,6 +1283,10 @@ int run_geometry(const Geometry& geometry) {
         if (dtype == DType::I8) {
             failures += run_append_case(geometry, dtype, MappingPattern::Fragmented,
                                         150u + geometry.q_heads, 129, 61);
+            if (geometry.q_heads == 24) {
+                failures += run_a1_case(geometry, dtype, {4, 8188, 8198, 151u},
+                                        MappingPattern::Identity);
+            }
         }
 
         const AttentionCase a1_cases[] = {

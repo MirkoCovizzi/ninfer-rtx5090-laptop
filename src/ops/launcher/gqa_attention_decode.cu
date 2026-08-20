@@ -42,6 +42,20 @@ std::int32_t gqa_small_t_split_upper_bound(std::int32_t window) {
 
 template <typename Geometry>
 std::int32_t gqa_small_t_split_count(std::int32_t window, std::int32_t tokens, DType kv_dtype) {
+    if constexpr (Geometry::QHeads == Gqa27Geometry::QHeads) {
+        if (kv_dtype == DType::I8 && tokens == 4 && window > 4096 && window <= 8198) {
+            const std::int32_t splits = div_up(window, 256);
+            return splits > 21 ? splits : 21;
+        }
+        if (kv_dtype == DType::I8 && tokens == 4 && window > 8198 && window <= 16390) {
+            const std::int32_t splits = div_up(window, 512);
+            return splits > 21 ? splits : 21;
+        }
+        if (kv_dtype == DType::I8 && tokens == 4 && window > 16390 && window <= 32774) {
+            // Two 82-SM waves outperform the desktop-oriented split density on this laptop GPU.
+            return 42;
+        }
+    }
     // A 64-key default split just above a 32-key boundary makes the partial
     // kernel execute a nearly empty second tile. These short ranges instead
     // launch one 32-key tile per split; the larger CTAs keep the small grid busy.
