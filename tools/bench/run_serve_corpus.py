@@ -83,7 +83,7 @@ WARMUP_FIXTURE = "text_smoke_zh"
 RUN_ARTIFACT_TYPE = "ninfer_serve_corpus_result"
 RUN_SCHEMA_VERSION = 5
 SERVER_LOG_ARTIFACT_TYPE = "ninfer_serve_request_log"
-SERVER_LOG_SCHEMA_VERSION = 9
+SERVER_LOG_SCHEMA_VERSION = 12
 STARTUP_TIMEOUT_SECONDS = 1800.0
 REQUEST_TIMEOUT_SECONDS = 24.0 * 60.0 * 60.0
 LOG_EVENT_TIMEOUT_SECONDS = 10.0
@@ -478,6 +478,7 @@ def validate_server_start(event: dict[str, Any], spec: RunSpec, device: int) -> 
         "speculative_backend": engine.get("speculative_backend"),
         "speculative_draft_window": engine.get("speculative_draft_window"),
         "proposal_head": engine.get("proposal_head"),
+        "mtp_policy": engine.get("mtp_policy"),
     }
     expected = {
         "device": device,
@@ -490,6 +491,7 @@ def validate_server_start(event: dict[str, Any], spec: RunSpec, device: int) -> 
         "speculative_backend": spec.speculative_backend,
         "speculative_draft_window": spec.draft_tokens,
         "proposal_head": "optimized" if spec.draft_tokens else "full",
+        "mtp_policy": "fixed",
     }
     if actual != expected:
         raise CampaignError(f"server_start Engine configuration mismatch: {actual!r}")

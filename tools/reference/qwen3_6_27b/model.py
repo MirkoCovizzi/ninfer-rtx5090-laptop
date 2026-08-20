@@ -58,8 +58,8 @@ class RefModel:
             raise ValueError("memory_bytes must be positive")
         if headroom_bytes < 0:
             raise ValueError("headroom_bytes must be nonnegative")
-        if not 0 <= mtp_draft_tokens <= 5:
-            raise ValueError("mtp_draft_tokens must be in [0,5]")
+        if not 0 <= mtp_draft_tokens <= 8:
+            raise ValueError("mtp_draft_tokens must be in [0,8]")
         if draft_head and mtp_draft_tokens == 0:
             raise ValueError("draft_head requires MTP")
 

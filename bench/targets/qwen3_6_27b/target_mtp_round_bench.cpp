@@ -41,7 +41,7 @@ struct Options {
 void print_usage(const char* executable) {
     std::cout << "usage: " << executable
               << " [--artifact <model.ninfer>] [--device <id>] [--warmup <n>] [--reps <n>]"
-                 " [--draft-tokens <1..5>] [--proposal-head full|optimized]"
+                 " [--draft-tokens <1..8>] [--proposal-head full|optimized]"
                  " [--no-cuda-graph]\n";
 }
 
@@ -86,8 +86,8 @@ Options parse_options(int argc, char** argv) {
     if (options.device < 0) { throw std::invalid_argument("--device must be nonnegative"); }
     if (options.warmup < 0) { throw std::invalid_argument("--warmup must be nonnegative"); }
     if (options.repetitions <= 0) { throw std::invalid_argument("--reps must be positive"); }
-    if (options.draft_tokens == 0 || options.draft_tokens > 5) {
-        throw std::invalid_argument("--draft-tokens must be in [1,5]");
+    if (options.draft_tokens == 0 || options.draft_tokens > 8) {
+        throw std::invalid_argument("--draft-tokens must be in [1,8]");
     }
     return options;
 }

@@ -76,9 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mtp-draft-tokens",
         type=int,
-        choices=range(6),
+        choices=range(9),
         default=0,
-        metavar="0..5",
+        metavar="0..8",
         help="MTP draft tokens proposed per verification round",
     )
     parser.add_argument(

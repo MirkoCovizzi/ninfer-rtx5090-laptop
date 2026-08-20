@@ -110,24 +110,40 @@ void test_round_layout() {
     ninfer::LayoutBuilder builder;
     q36::RoundStateLayout round = q36::begin_round_state_layout(
         builder, q36::RoundStateSpec{
-                     .hidden = 32, .output_rows = 128, .draft_window = 5, .enable_mtp = true});
+                     .hidden = 32, .output_rows = 128, .draft_window = 8, .enable_mtp = true});
     const ninfer::TensorRegion exact_prefill =
         builder.add_tensor(ninfer::DType::BF16, {32, 16}, 256, "exact prefill hidden");
     q36::complete_round_state_layout(builder, round);
     (void)builder.finish(256);
     expect(round.complete, "round layout completes");
     expect(round.logits.shape[0] == 128 && round.logits.shape[1] == 1, "round logits shape");
-    expect(round.mtp.has_value() && round.mtp->draft_tokens.shape[0] == 5 &&
-               round.mtp->target_input_ids.shape[0] == 6,
+    expect(round.mtp.has_value() && round.mtp->draft_tokens.shape[0] == 8 &&
+                round.mtp->target_input_ids.shape[0] == 9,
            "MTP prefill scratch shapes");
     expect(round.logits.region.offset < exact_prefill.region.offset &&
                exact_prefill.region.offset < round.mtp->draft_tokens.region.offset,
            "exact prefill extension retains established round-region order");
     expect(round.mtp.has_value() && round.mtp->position.shape[0] == 1,
            "MTP prefill scratch is explicit");
-    expect(round.mtp_decode.has_value() && round.mtp_decode->alignment_ids.shape[0] == 6 &&
-               round.mtp_decode->alignment_ids.shape[1] == 1,
-           "MTP decode frame is explicit");
+    expect(round.mtp_decode[7].has_value() && round.mtp_decode[7]->alignment_ids.shape[0] == 9 &&
+                 round.mtp_decode[7]->alignment_ids.shape[1] == 1,
+            "MTP decode frame is explicit");
+
+    ninfer::LayoutBuilder adaptive_builder;
+    q36::RoundStateLayout adaptive = q36::begin_round_state_layout(
+        adaptive_builder,
+        q36::RoundStateSpec{.hidden       = 32,
+                            .output_rows  = 128,
+                             .draft_window = 8,
+                            .enable_mtp   = true,
+                            .adaptive_mtp = true});
+    q36::complete_round_state_layout(adaptive_builder, adaptive);
+    (void)adaptive_builder.finish(256);
+    expect(adaptive.mtp_decode[0].has_value() && adaptive.mtp_decode[7].has_value() &&
+               adaptive.mtp_decode[0]->alignment_ids.shape[0] == 2 &&
+               adaptive.mtp_decode[0]->ar_positions.shape[1] == 1 &&
+                adaptive.mtp_decode[7]->ar_positions.shape[1] == 7,
+           "adaptive MTP plans compact exact-window dimensions");
 
     ninfer::LayoutBuilder speculative_builder;
     q36::RoundStateLayout dflash = q36::begin_round_state_layout(
@@ -141,8 +157,11 @@ void test_round_layout() {
                dflash.dflash_decode.has_value() &&
                dflash.dflash_decode->draft_tokens.shape[0] == 15,
            "K=15 DFlash storage is backend-owned");
-    expect(!dflash.mtp.has_value() && !dflash.mtp_decode.has_value(),
-           "DFlash layout does not allocate MTP storage");
+    const bool has_mtp_decode =
+        std::any_of(dflash.mtp_decode.begin(), dflash.mtp_decode.end(),
+                    [](const auto& frame) { return frame.has_value(); });
+    expect(!dflash.mtp.has_value() && !has_mtp_decode,
+            "DFlash layout does not allocate MTP storage");
 }
 
 void test_mtp_alignment() {

@@ -36,6 +36,9 @@ void validate_spec(const RoundStateSpec& spec) {
     if (spec.enable_mtp && spec.draft_window > kMtpDecodeMaximumDrafts) {
         throw std::invalid_argument("RoundState MTP draft window exceeds the decode frame domain");
     }
+    if (spec.adaptive_mtp && !spec.enable_mtp) {
+        throw std::invalid_argument("RoundState adaptive MTP requires the MTP extension");
+    }
     if (spec.enable_dflash &&
         (spec.draft_window == 0 || spec.draft_window > kDFlashDecodeMaximumDrafts)) {
         throw std::invalid_argument(
@@ -122,9 +125,6 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
     };
     if (layout.spec.enable_mtp) {
         layout.mtp.emplace();
-        const auto ar_steps =
-            checked_i32(std::max<std::uint64_t>(1ULL, layout.spec.draft_window - 1ULL),
-                        "RoundState MTP AR steps exceed int32");
         layout.mtp->position         = i32(1, "MTP prefill autoregressive position");
         layout.mtp->ar_hidden        = add_tensor(builder, DType::BF16, {layout.spec.hidden, 1},
                                                   "MTP prefill autoregressive hidden");
@@ -132,43 +132,57 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
         layout.mtp->target_input_ids = i32(columns, "MTP prefill target input ids");
         layout.mtp->target_positions = i32(columns, "MTP prefill target positions");
 
-        layout.mtp_decode.emplace();
-        MtpDecodeStateLayout& decode = *layout.mtp_decode;
-        decode.ingress = builder.add(sizeof(MtpDecodeIngress), kArenaAlign, "MTP decode ingress");
-        decode.egress  = builder.add(sizeof(MtpDecodeEgress), kArenaAlign, "MTP decode egress");
         const auto batch =
             checked_i32(layout.spec.batch_capacity, "RoundState MTP batch capacity exceeds int32");
-        decode.verify_ids =
-            add_tensor(builder, DType::I32, {columns, batch}, "MTP decode verify ids");
-        decode.target_positions =
-            add_tensor(builder, DType::I32, {columns, batch}, "MTP decode target positions");
-        decode.target_argmax =
-            add_tensor(builder, DType::I32, {columns, batch}, "MTP decode target argmax");
-        decode.target_logits =
-            add_tensor(builder, DType::BF16, {layout.spec.output_rows, columns, batch},
-                       "MTP decode target logits");
-        decode.target_hidden = add_tensor(
-            builder, DType::BF16, {layout.spec.hidden, columns, batch}, "MTP decode target hidden");
-        decode.target_continuation_hidden =
-            add_tensor(builder, DType::BF16, {layout.spec.hidden, batch},
-                       "MTP decode target continuation hidden");
-        decode.proposal_logits = add_tensor(builder, DType::BF16, {layout.spec.output_rows, batch},
-                                            "MTP decode proposal logits");
-        decode.alignment_ids =
-            add_tensor(builder, DType::I32, {columns, batch}, "MTP decode alignment ids");
-        decode.alignment_hidden =
-            add_tensor(builder, DType::BF16, {layout.spec.hidden, columns, batch},
-                       "MTP decode alignment hidden");
-        decode.ar_hidden = add_tensor(builder, DType::BF16, {layout.spec.hidden, batch},
-                                      "MTP decode autoregressive hidden");
-        decode.next_hidden =
-            add_tensor(builder, DType::BF16, {layout.spec.hidden, batch}, "MTP decode next hidden");
-        decode.ar_positions      = add_tensor(builder, DType::I32, {batch, ar_steps},
-                                              "MTP decode autoregressive positions");
-        decode.ar_rope_positions = add_tensor(builder, DType::I32, {batch, ar_steps},
-                                              "MTP decode autoregressive rope positions");
-        decode.ar_valid_columns  = add_tensor(builder, DType::I32, {batch, ar_steps},
-                                              "MTP decode autoregressive valid columns");
+        const std::uint32_t first_window = layout.spec.adaptive_mtp ? 1U : layout.spec.draft_window;
+        for (std::uint32_t verification_window = first_window;
+             verification_window <= layout.spec.draft_window; ++verification_window) {
+            const auto verify_columns = checked_i32(
+                static_cast<std::uint64_t>(verification_window) + 1ULL,
+                "RoundState MTP verification columns exceed int32");
+            const auto ar_steps =
+                checked_i32(std::max<std::uint64_t>(1ULL, verification_window - 1ULL),
+                            "RoundState MTP AR steps exceed int32");
+            MtpDecodeStateLayout& decode =
+                layout.mtp_decode[verification_window - 1U].emplace();
+            decode.ingress =
+                builder.add(sizeof(MtpDecodeIngress), kArenaAlign, "MTP decode ingress");
+            decode.egress = builder.add(sizeof(MtpDecodeEgress), kArenaAlign, "MTP decode egress");
+            decode.verify_ids = add_tensor(builder, DType::I32, {verify_columns, batch},
+                                           "MTP decode verify ids");
+            decode.target_positions = add_tensor(builder, DType::I32, {verify_columns, batch},
+                                                 "MTP decode target positions");
+            decode.target_argmax = add_tensor(builder, DType::I32, {verify_columns, batch},
+                                              "MTP decode target argmax");
+            decode.target_logits =
+                add_tensor(builder, DType::BF16,
+                           {layout.spec.output_rows, verify_columns, batch},
+                           "MTP decode target logits");
+            decode.target_hidden =
+                add_tensor(builder, DType::BF16,
+                           {layout.spec.hidden, verify_columns, batch}, "MTP decode target hidden");
+            decode.target_continuation_hidden =
+                add_tensor(builder, DType::BF16, {layout.spec.hidden, batch},
+                           "MTP decode target continuation hidden");
+            decode.proposal_logits =
+                add_tensor(builder, DType::BF16, {layout.spec.output_rows, batch},
+                           "MTP decode proposal logits");
+            decode.alignment_ids = add_tensor(builder, DType::I32, {verify_columns, batch},
+                                              "MTP decode alignment ids");
+            decode.alignment_hidden = add_tensor(
+                builder, DType::BF16, {layout.spec.hidden, verify_columns, batch},
+                "MTP decode alignment hidden");
+            decode.ar_hidden = add_tensor(builder, DType::BF16, {layout.spec.hidden, batch},
+                                          "MTP decode autoregressive hidden");
+            decode.next_hidden = add_tensor(builder, DType::BF16, {layout.spec.hidden, batch},
+                                            "MTP decode next hidden");
+            decode.ar_positions = add_tensor(builder, DType::I32, {batch, ar_steps},
+                                             "MTP decode autoregressive positions");
+            decode.ar_rope_positions = add_tensor(builder, DType::I32, {batch, ar_steps},
+                                                  "MTP decode autoregressive rope positions");
+            decode.ar_valid_columns = add_tensor(builder, DType::I32, {batch, ar_steps},
+                                                 "MTP decode autoregressive valid columns");
+        }
     }
     if (layout.spec.enable_dflash) {
         layout.dflash_prefill.emplace().produced_count = i32(1, "DFlash prefill produced count");
@@ -354,14 +368,32 @@ RoundState::RoundState(DeviceSpan backing, const RoundStateLayout& layout) {
     backend_kv_table_row = layout.backend_kv_table_row.bind(backing);
     if (layout.mtp) { mtp.emplace(backing, *layout.mtp); }
     if (layout.dflash_prefill) { dflash_prefill.emplace(backing, *layout.dflash_prefill); }
-    if (layout.mtp_decode) {
-        mtp_decode.emplace(backing, *layout.mtp_decode, layout.spec.batch_capacity,
-                           layout.spec.draft_window);
+    for (std::uint32_t window = 1; window <= kMtpDecodeMaximumDrafts; ++window) {
+        if (layout.mtp_decode[window - 1U]) {
+            mtp_decode[window - 1U].emplace(backing, *layout.mtp_decode[window - 1U],
+                                            layout.spec.batch_capacity, window);
+        }
     }
     if (layout.dflash_decode) {
         dflash_decode.emplace(backing, *layout.dflash_decode, layout.spec.batch_capacity,
                               layout.spec.draft_window);
     }
+}
+
+MtpDecodeState& RoundState::mtp_decode_for(std::uint32_t verification_window) {
+    if (verification_window == 0 || verification_window > mtp_decode.size() ||
+        !mtp_decode[verification_window - 1U]) {
+        throw std::logic_error("requested MTP decode window was not planned");
+    }
+    return *mtp_decode[verification_window - 1U];
+}
+
+const MtpDecodeState& RoundState::mtp_decode_for(std::uint32_t verification_window) const {
+    if (verification_window == 0 || verification_window > mtp_decode.size() ||
+        !mtp_decode[verification_window - 1U]) {
+        throw std::logic_error("requested MTP decode window was not planned");
+    }
+    return *mtp_decode[verification_window - 1U];
 }
 
 } // namespace ninfer::targets::qwen3_6

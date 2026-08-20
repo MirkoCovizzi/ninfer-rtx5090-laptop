@@ -15,7 +15,7 @@
 
 namespace ninfer::bench {
 
-inline constexpr int kSchemaVersion                   = 11;
+inline constexpr int kSchemaVersion                   = 13;
 inline constexpr std::string_view kArtifactType       = "ninfer_bench_report";
 inline constexpr std::string_view kDefaultCorpusPath  = "bench/fixtures/bench_corpus.ids";
 inline constexpr int kDecodeSeedTokens                = 1;
@@ -25,7 +25,7 @@ inline constexpr int kDefaultRepetitions              = 5;
 inline constexpr int kDefaultWarmup                   = 1;
 inline constexpr std::uint32_t kDefaultPrefillChunk   = 1024;
 inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
-inline constexpr std::uint32_t kMaxMtpDraftTokens     = 5;
+inline constexpr std::uint32_t kMaxMtpDraftTokens     = 8;
 
 enum class TestKind { Prefill, Decode, PrefillDecode };
 
@@ -65,6 +65,7 @@ struct BenchOptions {
     KvCacheStorage kv_cache        = KvCacheStorage::BFloat16;
     std::uint32_t mtp_draft_tokens = 0;
     ProposalHead proposal_head     = ProposalHead::Full;
+    bool adaptive_mtp              = false;
     int device                     = 0;
     bool use_cuda_graph            = true;
     bool profile_measured          = false;
@@ -108,6 +109,7 @@ struct BenchEnvironment {
     KvCacheStorage kv_cache                        = KvCacheStorage::BFloat16;
     std::uint32_t mtp_draft_tokens                 = 0;
     ProposalHead proposal_head                     = ProposalHead::Full;
+    bool adaptive_mtp                              = false;
     bool use_cuda_graph                            = true;
     bool decode_graph_primed                       = false;
     std::uint32_t decode_graph_prime_output_tokens = 0;

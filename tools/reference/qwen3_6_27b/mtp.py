@@ -17,7 +17,7 @@ class MtpStats:
     draft_tokens: int = 0
     accepted_tokens: int = 0
     fallback_steps: int = 0
-    accepted_per_pos: list[int] = field(default_factory=lambda: [0] * 5)
+    accepted_per_pos: list[int] = field(default_factory=lambda: [0] * 8)
 
     def record_round(self, drafted: int, accepted: int) -> None:
         if not 0 <= accepted <= drafted <= len(self.accepted_per_pos):

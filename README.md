@@ -299,7 +299,8 @@ All three registered model IDs support:
 - image, multi-image, video, and mixed multimodal messages;
 - chunked prefill and CUDA Graph decode;
 - startup-bounded small-scale concurrent serving with true batched decode;
-- MTP speculative decoding with draft windows from one to five;
+- fixed or signal-adaptive MTP speculative decoding with draft windows from one to eight on 27B
+  targets and one to five on 35B-A3B;
 - BF16 and INT8 group-64 KV cache;
 - model- and thinking-mode-aware official sampling defaults, with explicit greedy, temperature,
   top-k, top-p, min-p, and presence/frequency-penalty overrides;

@@ -82,8 +82,9 @@ int test_cli_contract() {
         "--kv-dtype",
         "int8",
         "--mtp-draft-tokens",
-        "5",
+        "8",
         "--lm-head-draft",
+        "--adaptive-mtp",
         "--device",
         "1",
         "--no-cuda-graph",
@@ -103,9 +104,10 @@ int test_cli_contract() {
     failures += expect(parsed.max_context == std::optional<std::uint32_t>(4096), "max context");
     failures += expect(parsed.prefill_chunk == 128, "prefill chunk");
     failures += expect(parsed.kv_cache == ninfer::KvCacheStorage::Int8Group64, "INT8 KV");
-    failures += expect(parsed.mtp_draft_tokens == 5, "MTP window");
+    failures += expect(parsed.mtp_draft_tokens == 8, "MTP window");
     failures +=
         expect(parsed.proposal_head == ninfer::ProposalHead::Optimized, "optimized proposal head");
+    failures += expect(parsed.adaptive_mtp, "adaptive MTP policy");
     failures += expect(parsed.device == 1 && !parsed.use_cuda_graph, "device and graph settings");
     failures += expect(parsed.profile_measured, "profile-measured flag");
     failures +=
@@ -129,8 +131,13 @@ int test_cli_contract() {
         "optimized head without MTP");
     failures += expect_throws<std::invalid_argument>(
         [] {
+            (void)parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--adaptive-mtp"});
+        },
+        "adaptive policy without MTP");
+    failures += expect_throws<std::invalid_argument>(
+        [] {
             (void)parse_for_test(
-                {"ninfer_bench", "--weights", "model.ninfer", "--mtp-draft-tokens", "6"});
+                {"ninfer_bench", "--weights", "model.ninfer", "--mtp-draft-tokens", "9"});
         },
         "unsupported MTP window");
     failures += expect_throws<std::invalid_argument>(
@@ -188,29 +195,49 @@ ninfer::GenerationTimings timings(double prepare, double prefill, double decode,
 }
 
 ninfer::SpeculativeStats speculative(std::uint64_t rounds, std::uint64_t drafted,
-                                     std::uint64_t accepted, std::uint64_t fallback,
-                                     std::vector<std::uint64_t> per_position) {
-    return {.enabled               = true,
+                                      std::uint64_t accepted, std::uint64_t fallback,
+                                      std::vector<std::uint64_t> accepted_per_position,
+                                      std::vector<std::uint64_t> drafted_per_position) {
+    std::vector<std::uint64_t> rounds_per_window(5, 0);
+    std::vector<std::uint64_t> window_transition_counts(25, 0);
+    rounds_per_window.front() = fallback;
+    rounds_per_window.back() += rounds;
+    const std::uint64_t window_transitions = rounds == 0 ? 0 : 2;
+    if (rounds != 0) {
+        window_transition_counts[2 * 5 + 4] = 1;
+        window_transition_counts[4 * 5 + 2] = 1;
+    }
+    return {.backend               = ninfer::SpeculativeBackend::Mtp,
+            .enabled               = true,
             .draft_window          = 5,
             .rounds                = rounds,
             .drafted_tokens        = drafted,
             .accepted_tokens       = accepted,
             .fallback_steps        = fallback,
-            .accepted_per_position = std::move(per_position)};
+            .adaptive              = true,
+            .window_transitions    = window_transitions,
+            .accepted_per_position = std::move(accepted_per_position),
+            .drafted_per_position  = std::move(drafted_per_position),
+            .rounds_per_window     = std::move(rounds_per_window),
+            .window_transition_counts = std::move(window_transition_counts)};
 }
 
 std::vector<qb::TestResult> sample_results() {
     qb::TestResult pp;
     pp.test = {qb::TestKind::Prefill, 512, 0, "pp512"};
-    pp.reps = {{timings(0.01, 0.5, 0.0, 0.52), speculative(0, 0, 0, 0, {0, 0, 0, 0, 0}), 1},
-               {timings(0.02, 0.25, 0.0, 0.28), speculative(0, 0, 0, 0, {0, 0, 0, 0, 0}), 1}};
+    pp.reps = {{timings(0.01, 0.5, 0.0, 0.52),
+                speculative(0, 0, 0, 0, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}), 1},
+               {timings(0.02, 0.25, 0.0, 0.28),
+                speculative(0, 0, 0, 0, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}), 1}};
     pp.workspace_peak_bytes           = 5ULL * 1024ULL * 1024ULL * 1024ULL;
     pp.workspace_allocator_peak_bytes = 4ULL * 1024ULL * 1024ULL;
 
     qb::TestResult tg;
     tg.test = {qb::TestKind::Decode, 0, 3, "tg3"};
-    tg.reps = {{timings(0.01, 0.1, 0.5, 0.62), speculative(1, 5, 5, 0, {1, 1, 1, 1, 1}), 4},
-               {timings(0.02, 0.1, 1.0, 1.13), speculative(0, 0, 0, 3, {0, 0, 0, 0, 0}), 4}};
+    tg.reps = {{timings(0.01, 0.1, 0.5, 0.62),
+                speculative(1, 5, 4, 0, {1, 1, 1, 1, 0}, {1, 1, 1, 1, 1}), 4},
+               {timings(0.02, 0.1, 1.0, 1.13),
+                speculative(0, 0, 0, 3, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}), 4}};
     tg.workspace_peak_bytes           = 1024ULL * 1024ULL;
     tg.workspace_allocator_peak_bytes = 512ULL * 1024ULL;
     return {std::move(pp), std::move(tg)};
@@ -248,6 +275,7 @@ qb::BenchEnvironment sample_environment() {
     env.kv_cache                          = ninfer::KvCacheStorage::Int8Group64;
     env.mtp_draft_tokens                  = 5;
     env.proposal_head                     = ninfer::ProposalHead::Optimized;
+    env.adaptive_mtp                      = true;
     env.use_cuda_graph                    = true;
     env.decode_graph_primed               = true;
     env.decode_graph_prime_output_tokens  = 13;
@@ -270,7 +298,7 @@ int test_report_contract() {
         return fail(std::string("invalid benchmark JSON: ") + error.what());
     }
 
-    failures += expect(report.at("schema_version") == 11, "report schema v11");
+    failures += expect(report.at("schema_version") == 13, "report schema v13");
     failures += expect(report.at("artifact_type") == "ninfer_bench_report", "report identity");
     failures += expect(report.at("artifact").at("path") == "model.ninfer", "artifact path");
     failures += expect(report.at("load").at("target") == "qwen3_6_27b", "load target");
@@ -288,6 +316,7 @@ int test_report_contract() {
                        "CUDA Graph allowance");
     failures += expect(report.at("memory").at("kv_payload_bytes") == 123456ULL, "KV payload");
     failures += expect(report.at("config").at("proposal_head") == "optimized", "proposal head");
+    failures += expect(report.at("config").at("mtp_policy") == "adaptive", "MTP policy");
     failures += expect(report.at("config").at("decode_graph_prime").at("output_tokens") == 13,
                        "graph prime output count");
 
@@ -306,17 +335,33 @@ int test_report_contract() {
         expect(tg.at("kind") == "tg" && tg.at("requested_output_tokens") == 4, "tg request shape");
     failures += expect_near(tg.at("decode_output_tok_s_mean").get<double>(), 4.5,
                             "decode output throughput");
-    failures += expect_near(tg.at("decode_engine_tok_s_mean").get<double>(), 7.5,
-                            "decode engine throughput");
+    failures += expect_near(tg.at("decode_engine_tok_s_mean").get<double>(), 6.5,
+                             "decode engine throughput");
     failures += expect(tg.at("speculative").at("rounds") == 1, "speculative rounds");
+    failures += expect(tg.at("speculative").at("backend") == "mtp", "speculative backend");
+    failures += expect(tg.at("speculative").at("adaptive") == true, "adaptive policy");
     failures += expect(tg.at("speculative").at("fallback_steps") == 3, "speculative fallbacks");
-    failures += expect_near(tg.at("speculative").at("acceptance_rate").get<double>(), 1.0,
-                            "speculative acceptance");
+    failures += expect_near(tg.at("speculative").at("acceptance_rate").get<double>(), 0.8,
+                             "speculative acceptance");
     failures += expect(tg.at("speculative").at("accepted_per_position").size() == 5,
                        "per-position acceptance");
+    failures += expect(tg.at("speculative").at("accepted_per_position") ==
+                           Json::array({1, 1, 1, 1, 0}),
+                       "per-position accepted prefix");
+    failures += expect(tg.at("speculative").at("drafted_per_position") ==
+                           Json::array({1, 1, 1, 1, 1}),
+                       "per-position draft exposure");
+    failures += expect(tg.at("speculative").at("rounds_per_window") ==
+                           Json::array({3, 0, 0, 0, 1}),
+                       "adaptive width histogram");
+    failures += expect(tg.at("speculative").at("window_transitions") == 2,
+                       "adaptive transition count");
+    failures += expect(tg.at("speculative").at("window_transition_counts").at(14) == 1 &&
+                           tg.at("speculative").at("window_transition_counts").at(22) == 1,
+                       "adaptive transition matrix");
     failures +=
         expect(tg.at("reps").at(0).at("generated_output_tokens") == 4, "rep generated tokens");
-    failures += expect(tg.at("reps").at(0).at("decode_engine_tokens") == 6, "rep engine tokens");
+    failures += expect(tg.at("reps").at(0).at("decode_engine_tokens") == 5, "rep engine tokens");
     failures += expect_near(tg.at("reps").at(0).at("timings").at("decode_seconds").get<double>(),
                             0.5, "rep GenerationTimings");
     failures += expect(tg.at("reps").at(0).at("speculative").at("drafted_tokens") == 5,

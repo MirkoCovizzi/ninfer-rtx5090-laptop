@@ -29,19 +29,28 @@ namespace ninfer::product {
 inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
     switch (options.backend) {
     case SpeculativeBackend::None:
-        if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full) {
+        if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full ||
+            options.mtp_policy != MtpDraftPolicy::Fixed) {
             throw std::invalid_argument(
-                "--draft-tokens and --lm-head-draft require --spec mtp|dflash");
+                "--draft-tokens and --lm-head-draft require --spec mtp|dflash; "
+                "--adaptive-mtp requires --spec mtp");
         }
         return;
     case SpeculativeBackend::Mtp:
-        if (options.draft_tokens == 0 || options.draft_tokens > 5) {
-            throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,5]");
+        if (options.draft_tokens == 0 || options.draft_tokens > 8) {
+            throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,8]");
+        }
+        if (options.mtp_policy != MtpDraftPolicy::Fixed &&
+            options.mtp_policy != MtpDraftPolicy::Adaptive) {
+            throw std::invalid_argument("invalid MTP draft policy");
         }
         return;
     case SpeculativeBackend::DFlash:
         if (options.draft_tokens == 0 || options.draft_tokens > 15) {
             throw std::invalid_argument("--spec dflash requires --draft-tokens in [1,15]");
+        }
+        if (options.mtp_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("--adaptive-mtp requires --spec mtp");
         }
         return;
     }

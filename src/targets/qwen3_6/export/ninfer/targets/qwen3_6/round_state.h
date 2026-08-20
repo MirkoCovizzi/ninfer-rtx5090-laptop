@@ -12,7 +12,7 @@
 
 namespace ninfer::targets::qwen3_6 {
 
-inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 5;
+inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 8;
 inline constexpr std::uint32_t kMtpDecodeMaximumWidth     = kMtpDecodeMaximumDrafts + 1;
 inline constexpr std::uint32_t kDFlashDecodeMaximumDrafts = 15;
 inline constexpr std::uint32_t kDFlashDecodeMaximumWidth  = kDFlashDecodeMaximumDrafts + 1;
@@ -24,6 +24,7 @@ struct RoundStateSpec {
     std::uint32_t draft_window   = 0;
     bool enable_mtp              = false;
     bool enable_dflash           = false;
+    bool adaptive_mtp            = false;
 };
 
 // Stable pinned/device transfer format for ordinary decode. The full fixed-size object is copied
@@ -152,7 +153,7 @@ struct RoundStateLayout {
     TensorRegion backend_kv_table_row;
     std::optional<MtpPrefillStateLayout> mtp;
     std::optional<DFlashPrefillStateLayout> dflash_prefill;
-    std::optional<MtpDecodeStateLayout> mtp_decode;
+    std::array<std::optional<MtpDecodeStateLayout>, kMtpDecodeMaximumDrafts> mtp_decode;
     std::optional<DFlashDecodeStateLayout> dflash_decode;
     bool complete = false;
 };
@@ -282,11 +283,14 @@ struct RoundState {
     Tensor backend_kv_table_row;
     std::optional<MtpPrefillState> mtp;
     std::optional<DFlashPrefillState> dflash_prefill;
-    std::optional<MtpDecodeState> mtp_decode;
+    std::array<std::optional<MtpDecodeState>, kMtpDecodeMaximumDrafts> mtp_decode;
     std::optional<DFlashDecodeState> dflash_decode;
 
     RoundState() = default;
     RoundState(DeviceSpan backing, const RoundStateLayout& layout);
+
+    [[nodiscard]] MtpDecodeState& mtp_decode_for(std::uint32_t verification_window);
+    [[nodiscard]] const MtpDecodeState& mtp_decode_for(std::uint32_t verification_window) const;
 };
 
 } // namespace ninfer::targets::qwen3_6

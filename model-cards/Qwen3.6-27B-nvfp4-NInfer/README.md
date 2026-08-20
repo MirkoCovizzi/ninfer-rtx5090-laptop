@@ -141,7 +141,7 @@ The artifact supports:
 
 - text generation in thinking and non-thinking modes;
 - image, multi-image, video, and mixed multimodal messages;
-- MTP speculative decoding with draft windows from one to five;
+- MTP speculative decoding with draft windows from one to eight;
 - BF16 and INT8 group-64 KV cache;
 - CUDA Graph decode and compatible-prefix reuse;
 - startup-bounded small-scale concurrent serving with true batched decode;

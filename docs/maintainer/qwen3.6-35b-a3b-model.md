@@ -780,7 +780,7 @@ The Program-owned memory classes are:
 | DFlash full context K and V | 1 layer × context × 8 heads × 128 × 2 planes | 1.0 GiB BF16 | active sequence when DFlash enabled |
 | GDN convolution history | 30 layers × 8192 channels × 3 columns × `2C` | 1.406 MiB × `2C` BF16 | Program lifetime; current and turn-checkpoint slots |
 | GDN recurrent matrices | 30 layers × 32 heads × 128 × 128 × `2C` | 60 MiB × `2C` FP32 | Program lifetime; current and turn-checkpoint slots |
-| ReplaySSM records | 30 layers × `C` rows × `draft_window+1` convolution/key/value/gate columns | backend/window dependent | Program lifetime with MTP or DFlash; one pending round |
+| ReplaySSM records | fixed backend: 30 layers × `C` rows × `draft_window+1`; adaptive MTP: one exact-width plane set for every `Kv=1..draft_window` | backend/window dependent | Program lifetime; one pending round selects one set |
 | Continuation hidden | current and turn-checkpoint `[2048,C]` BF16 stores | 8 KiB × `C` BF16 | Program lifetime |
 | DFlash prefill target features/positions | `[16384,P]` BF16 plus `[P]` I32 | about 32 KiB × `P` | Program lifetime; one prefill unit |
 | DFlash pending target features | `[16384,draft_window+1,C]` BF16 | window dependent | Program lifetime; one pending round |

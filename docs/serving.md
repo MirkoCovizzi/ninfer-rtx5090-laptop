@@ -38,6 +38,12 @@ server must accept image or video input. Speculative residency is likewise froze
 `--lm-head-draft` additionally loads the optimized proposal head. DFlash is 35B-A3B text-only and
 cannot be combined with `--vision`. A later request cannot enable a capability omitted at startup.
 
+`--adaptive-mtp` is an MTP-only startup policy. With `--spec mtp --draft-tokens 5
+--adaptive-mtp`, five is the maximum verification/proposal width; each maximal decode batch selects
+a physical width from one through five using filtered accepted-prefix survival from completed
+rounds. Width selection is internal to the Engine and is not an HTTP request field. Adaptive
+startup reserves compact frame, ReplaySSM, and CUDA Graph profiles for all admitted widths.
+
 ## Endpoints
 
 | Method and path | Behavior |
@@ -472,8 +478,9 @@ curl http://127.0.0.1:8080/v1/models \
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
+| `--draft-tokens N` | 27B MTP `1..8`; 35B-A3B MTP `1..5`; DFlash `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
+| `--adaptive-mtp` | dynamically select MTP verification width up to `--draft-tokens` | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
@@ -511,7 +518,7 @@ is also rejected if it resolves to the model artifact.
   --request-log-jsonl profiles/bench/run/server.requests.jsonl
 ```
 
-Every line is one `ninfer_serve_request_log` schema-v10 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v12 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -527,8 +534,14 @@ they do not infer request behavior from process-global counter deltas.
 | `throughput` | interval token deltas and rates, scheduler occupancy, and decode-round batch statistics |
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
-as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
-`drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
+as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`,
+`adaptive`, `rounds`, `drafted_tokens`, `accepted_tokens`, `fallback_steps`,
+`accepted_per_position`, `drafted_per_position`, `rounds_per_window`, `window_transitions`, and
+`window_transition_counts`. The last vector is a row-major `K×K` from→to matrix whose sum equals
+`window_transitions`; cohort startup does not count as a transition. The exposure and histogram
+arrays provide the denominators and selected physical widths needed to interpret adaptive MTP. When
+`adaptive` is true, `rounds_per_window` includes fallback rounds, so its sum is
+`rounds + fallback_steps`. Rates can be
 derived downstream from raw token counts and seconds instead of rounded stderr strings.
 
 The JSONL file contains no generated response text and never records an API-key value; `argv`

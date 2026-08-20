@@ -73,7 +73,7 @@ corpus:   bench/fixtures/bench_corpus.ids
 ```
 
 The matrix treats MTP `k=3` with the optimized proposal head as the primary path, keeps `k=0` and
-`k=5` as controls, and sweeps `k=0..5` on representative context-decode cases. Decode-bearing cases
+`k=8` as controls, and sweeps `k=0..8` on representative context-decode cases. Decode-bearing cases
 cover CUDA Graph and eager execution; prefill-only cases vary prompt length and prefill chunk.
 
 ```bash
@@ -109,7 +109,7 @@ Use `--resume` to skip completed JSON reports in an existing `--output-dir`, and
 for a minimal script/runner check. `--no-build` uses the binary supplied by `--bench` without
 building it.
 
-Each raw report must be `ninfer_bench_report` schema v11. The flattened summary and schema-v3 matrix
+Each raw report must be `ninfer_bench_report` schema v13. The flattened summary and schema-v3 matrix
 manifest carry native names from the report: selected target, canonical `weights_id`, artifact,
 load/read/upload/staging values, Engine memory arenas including request transient and CUDA Graph
 allowance, per-test planned logical and allocator-observed workspace peaks, KV capacity and
@@ -123,7 +123,7 @@ artifacts are supplied. Pass one `--artifact` to select a single target and `--m
 decode corpus with DFlash block=8 (`k=7`) and the optimized proposal head. Add
 `--sampling greedy` to force exact argmax while retaining the same fixtures and repetition count.
 Its schema-v5 result and flattened summaries retain the canonical `weights_id` received from the
-schema-v9 serving startup record. The stochastic route pins its complete
+schema-v12 serving startup record. The stochastic route pins its complete
 temperature/top-p/top-k/min-p/presence/frequency profile explicitly, so model-default changes do
 not alter the measurement method.
 

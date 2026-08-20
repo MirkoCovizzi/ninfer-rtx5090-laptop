@@ -44,8 +44,9 @@ inline std::vector<GraphExecutionProfile> ordinary_graph_profiles(std::uint32_t 
 }
 
 inline std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
-                                                             std::uint32_t draft_window) {
-    return Variant::mtp_graph_profiles(capacity, draft_window);
+                                                              std::uint32_t draft_window,
+                                                              std::uint32_t batch_size) {
+    return Variant::mtp_graph_profiles(capacity, draft_window, batch_size);
 }
 
 inline std::vector<GraphExecutionProfile> dflash_graph_profiles(std::uint32_t capacity,

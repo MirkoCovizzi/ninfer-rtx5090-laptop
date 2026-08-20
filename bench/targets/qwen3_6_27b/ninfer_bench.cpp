@@ -159,6 +159,8 @@ int main(int argc, char** argv) {
                                                        : ninfer::SpeculativeBackend::Mtp;
         engine_options.speculative.draft_tokens  = options.mtp_draft_tokens;
         engine_options.speculative.proposal_head = options.proposal_head;
+        engine_options.speculative.mtp_policy =
+            options.adaptive_mtp ? ninfer::MtpDraftPolicy::Adaptive : ninfer::MtpDraftPolicy::Fixed;
         engine_options.use_cuda_graph            = options.use_cuda_graph;
 
         ninfer::bench::BenchEnvironment env;
@@ -169,6 +171,7 @@ int main(int argc, char** argv) {
         env.kv_cache                 = options.kv_cache;
         env.mtp_draft_tokens         = options.mtp_draft_tokens;
         env.proposal_head            = options.proposal_head;
+        env.adaptive_mtp             = options.adaptive_mtp;
         env.use_cuda_graph           = options.use_cuda_graph;
         env.repetitions              = options.repetitions;
         env.warmup                   = options.warmup;

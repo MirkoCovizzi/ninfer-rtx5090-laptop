@@ -79,7 +79,28 @@ int main() {
     failures += check(dflash.speculative.draft_tokens == 15,
                       "--draft-tokens did not preserve the DFlash window");
     failures += check(dflash.speculative.proposal_head == ninfer::ProposalHead::Optimized,
-                      "--lm-head-draft did not select the optimized proposal head");
+                       "--lm-head-draft did not select the optimized proposal head");
+
+    const ServeOptions adaptive =
+        parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "8",
+               "--adaptive-mtp"});
+    failures += check(adaptive.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive,
+                       "--adaptive-mtp did not select adaptive MTP");
+    failures += check(adaptive.speculative.draft_tokens == 8,
+                      "adaptive MTP did not preserve the K=8 maximum");
+
+    bool mtp_nine_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "9"});
+    } catch (const std::invalid_argument&) { mtp_nine_rejected = true; }
+    failures += check(mtp_nine_rejected, "MTP K=9 was accepted");
+
+    bool adaptive_dflash_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash", "--draft-tokens", "5",
+                     "--adaptive-mtp"});
+    } catch (const std::invalid_argument&) { adaptive_dflash_rejected = true; }
+    failures += check(adaptive_dflash_rejected, "adaptive DFlash was accepted");
 
     bool dflash_vision_rejected = false;
     try {

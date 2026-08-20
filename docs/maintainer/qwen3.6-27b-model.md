@@ -412,7 +412,7 @@ Let `C=max_concurrency`.
 | MTP KV | 1 layer × context × 4 heads × 256 | active sequence when MTP enabled |
 | GDN convolution history | 48 layers × 10240 × 3 × `2C` BF16 | Program lifetime; current and turn-checkpoint slots |
 | GDN recurrent matrices | 48 layers × 48 heads × 128 × 128 × `2C` FP32 | Program lifetime; current and turn-checkpoint slots |
-| ReplaySSM records | 48 layers × `C` rows × `draft_window+1` convolution/key/value/gate columns | Program lifetime when MTP enabled; one pending round |
+| ReplaySSM records | fixed MTP: 48 layers × `C` rows × `draft_window+1`; adaptive MTP: one exact-width plane set for every `Kv=1..draft_window` | Program lifetime when MTP enabled; one pending round selects one set |
 | Continuation hidden | current and turn-checkpoint `[5120,C]` BF16 stores | Program lifetime |
 | Text step buffers | token, positions, logits, verify/draft/sampling tensors | Program lifetime |
 | Program scratch | Text/MTP/Vision phase temporaries | one phase in the shared workspace arena |

@@ -137,6 +137,7 @@ int main() {
                       "speculative backend missing");
     failures +=
         check(server.at("engine").at("proposal_head") == "optimized", "proposal head missing");
+    failures += check(server.at("engine").at("mtp_policy") == "fixed", "MTP policy missing");
     failures +=
         check(server.at("engine").at("prefix_reuse") == false, "prefix-reuse state missing");
     failures += check(server.at("server").at("default_preserve_thinking") == true,
@@ -263,10 +264,15 @@ int main() {
     outcome.metrics.speculative_backend         = ninfer::SpeculativeBackend::Mtp;
     outcome.metrics.speculative_draft_window    = 3;
     outcome.metrics.speculative_rounds          = 300;
-    outcome.metrics.speculative_draft_tokens    = 900;
+    outcome.metrics.speculative_draft_tokens    = 860;
     outcome.metrics.speculative_accepted_tokens = 720;
     outcome.metrics.speculative_fallback_steps  = 2;
+    outcome.metrics.speculative_adaptive        = true;
     outcome.metrics.speculative_accepted_per_position = {290, 240, 190};
+    outcome.metrics.speculative_drafted_per_position  = {300, 290, 270};
+    outcome.metrics.speculative_rounds_per_window      = {12, 20, 270};
+    outcome.metrics.speculative_window_transitions     = 4;
+    outcome.metrics.speculative_window_transition_counts = {0, 0, 0, 0, 0, 2, 0, 2, 0};
 
     const Json done = Json::parse(format_request_done_json("serve-test", 3000, context, outcome));
     failures +=
@@ -296,6 +302,17 @@ int main() {
     failures +=
         check(done.at("speculative").at("accepted_per_position") == Json::array({290, 240, 190}),
               "speculative position counts missing");
+    failures += check(done.at("speculative").at("adaptive") == true,
+                      "adaptive speculative policy missing");
+    failures += check(done.at("speculative").at("drafted_per_position") ==
+                           Json::array({300, 290, 270}) &&
+                          done.at("speculative").at("rounds_per_window") ==
+                              Json::array({12, 20, 270}),
+                      "adaptive speculative counters missing");
+    failures += check(done.at("speculative").at("window_transitions") == 4 &&
+                          done.at("speculative").at("window_transition_counts") ==
+                              Json::array({0, 0, 0, 0, 0, 2, 0, 2, 0}),
+                      "adaptive transition counters missing");
 
     const Json error =
         Json::parse(format_request_error_json("serve-test", 4000, context, "generation failed"));
@@ -312,6 +329,12 @@ int main() {
         check(format_request_done(context, outcome).find("reuse=restore_response_checkpoint") !=
                   std::string::npos,
               "human request log omits response checkpoint reuse path");
+    failures += check(format_request_done(context, outcome).find("widths=[12,20,270]") !=
+                          std::string::npos,
+                      "human request log omits adaptive width histogram");
+    failures += check(format_request_done(context, outcome).find(
+                          "transitions=4 pairs=[2>3:2,3>2:2]") != std::string::npos,
+                      "human request log omits adaptive transition pairs");
     failures += check(format_request_start(context).find("submitted") != std::string::npos,
                       "human request log mislabels a submitted request");
 

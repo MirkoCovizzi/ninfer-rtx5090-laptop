@@ -852,7 +852,8 @@ Resident Model Runtime 是 model-instance object，不是 request object。它�
 - shared Sequence-State Store；
 - 一份 shared execution workspace；
 - 一份最大容量为 `C` 的 `DecodeBatchFrame`；
-- speculative backend 启用时，一份容量为 `C`、宽度为 `draft_window+1` 的 all-layer ReplaySSM record arena；
+- fixed speculative backend 启用时，一份容量为 `C`、宽度为 `draft_window+1` 的 all-layer ReplaySSM
+  record arena；adaptive MTP 则为每个 admitted verification width 保留一份 exact-width arena；
 - startup-captured graph definitions 和 topology executables。
 
 每个 request 的持久状态只存在于 slot control 和该 slot 当前拥有的 `SequenceState`。Model Runtime 不保存
@@ -935,6 +936,29 @@ rows 必须在 launch 前完成准备；不允许先启动部分 batch，再为�
 Profile selection 使用整个 batch 的 bound，例如全部 rows 中最大的 visible-context frontier。Exact per-row
 positions 和 context lengths 仍作为 device data。若一个合法 active set 不能由单个 profile 表示，则该 route
 不满足并发 contract，不能把 rows 拆成 cohorts。
+
+Adaptive MTP 仍满足同一 maximal-batch contract。Startup 固定最大 window `Kmax`，每个 round boundary
+根据全部 rows 已完成的 accepted-prefix survival signal 选择一个 batch-wide physical verification width
+`K<=Kmax`。每行 semantic extent 仍由 available drafts、output budget 和 context room 独立截断，但不得据此把
+batch 拆成 width cohorts。Controller 只更新 fixed-size host state，使用 fast/slow EWMA 和 selection
+hysteresis。Score 合并当前 truthful extent 和一次由剩余 budget/context room 约束的 continuation；普通向上
+选择只探测相邻 width，连续六轮 tail success 可对尚未测量的 profile 跳过两个 width（不越过 K7）；普通
+score-driven candidate 必须连续四轮胜出，fresh-tail probe 与 K8 probation 必须连续两轮胜出。前三个位置的
+持续强 survival 与六轮 fresh tail success 防止 code-like stream
+收缩到 K6 以下，同时避免 mixed stream 的短 success burst 反复触发 widening；高 width
+收缩使用更长 residency。Active request cohort 改变时，selection/hysteresis 回到 startup prior，不继承上一
+request 的 acceptance regime。Controller 使用目标 GPU 上已测量的静态 relative-width cost curve。普通
+向上选择保持相邻 width，但 K3 的 qualified W4A4 route 比 K2 更便宜且 yield 不低，因此 K1 recovery
+直接同时评估 K3，不把 dominated K2 当作中间 steady state。每个 cohort 只记录 exact-b width execution
+age，用于限制 probe、允许陈旧 width 重新 probe，并给首次 K8 执行
+短 probation。它不从跨 request/context 的 wall time 推导 width cost。该策略不增加 allocation、device
+readback 或 synchronization。
+
+每个 admitted `K` 拥有 compact `[K+1,B]` target/alignment frame 和 exact-width ReplaySSM records，并产生
+最多 `K` 个 next drafts。Width 上升时，当前 available drafts 可以小于新的 physical `K`；valid-column mask
+让 wider profile 安全验证已有 prefix，并在同一 transaction 产生 widened next proposal，因此不执行 refill
+round。GQA envelope 的最终 bound 是 `E+2K`。Fixed MTP 是 constant `K=Kmax` 的同一 transaction，不保留
+第二套 execution schedule。
 
 Host 可以对 `B<=C` 的 metadata 做轻量循环，但 GPU ingress 必须是 batch-level publication；不得为每行发起
 独立的 scalar copy、transition kernel 或 model call。
@@ -1064,6 +1088,9 @@ Definition[family, B=C, profile]
 
 `family` 由 Engine startup mode 固定为 ordinary、MTP 或 DFlash；三个 mode 都使用 exact `B=1..C`，
 DFlash 不保留单独的 `B=1` concurrency route。
+Adaptive MTP 的 definition key 额外包含 physical verification width `Kv`；所有 admitted widths 在 startup
+捕获，serving 期间不捕获新 graph。不同 `Kv` 可以绑定不同 compact frame 和 topology executable，runtime
+selection 只安装已捕获 definition。
 
 `B=1` 是 first-class exact path。单请求不会运行永久 padding 到 `C` 行的 graph。
 每个 definition 表示该 semantic family、exact `B` 和 whole-batch profile 的完整 decode round，绑定同一份

@@ -23,8 +23,8 @@ The input is exactly one of `--prompt`, `--ids`, or `--messages`. Structured mes
 images and videos in the normal Transformers format. Thinking is enabled by default and can be
 disabled with `--no-thinking`.
 
-MTP is disabled by default. Enable one to five draft positions with
-`--mtp-draft-tokens 1..5`; `--draft-head` selects the artifact's optimized proposal head. Target
+MTP is disabled by default. Enable one to eight draft positions with
+`--mtp-draft-tokens 1..8`; `--draft-head` selects the artifact's optimized proposal head. Target
 verification always uses the full output head. The CLI reports round counts, per-position accepted
 drafts, fallback steps, timing, memory planning, and peak CUDA allocation.
 

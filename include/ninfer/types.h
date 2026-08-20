@@ -66,10 +66,16 @@ enum class SpeculativeBackend : std::uint8_t {
     DFlash,
 };
 
+enum class MtpDraftPolicy : std::uint8_t {
+    Fixed,
+    Adaptive,
+};
+
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
+    MtpDraftPolicy mtp_policy  = MtpDraftPolicy::Fixed;
 };
 
 struct LoadProgress {
@@ -384,7 +390,12 @@ struct SpeculativeStats {
     std::uint64_t drafted_tokens  = 0;
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
+    bool adaptive                 = false;
+    std::uint64_t window_transitions = 0;
     std::vector<std::uint64_t> accepted_per_position;
+    std::vector<std::uint64_t> drafted_per_position;
+    std::vector<std::uint64_t> rounds_per_window;
+    std::vector<std::uint64_t> window_transition_counts;
 };
 
 enum class PrefixReusePath : std::uint8_t {

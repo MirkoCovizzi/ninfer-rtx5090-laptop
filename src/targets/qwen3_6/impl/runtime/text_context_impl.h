@@ -231,7 +231,7 @@ TextContext::TextContext(DeviceContext& ctx, const LoadedModelData& weights, Wor
         prefill_chunk_ > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::invalid_argument("TextContext effective prefill chunk must fit positive int32");
     }
-    if (mtp_enabled() && !io_.mtp_decode && !io_.mtp) {
+    if (mtp_enabled() && !io_.mtp) {
         throw std::invalid_argument("MTP TextContext requires MTP round state");
     }
     set_linear_state_slots(0, state_.slot_count() > 1 ? 1 : 0);

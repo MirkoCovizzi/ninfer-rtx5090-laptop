@@ -55,7 +55,7 @@ std::vector<GraphExecutionProfile> dflash_base_profiles(std::uint32_t capacity,
 }
 
 bool dflash_target_uses_chunked_small_t(std::uint32_t draft_window, std::uint32_t batch_size,
-                                        std::uint32_t max_visible_keys) {
+                                         std::uint32_t max_visible_keys) {
     const std::uint32_t tokens = draft_window + 1;
     if (tokens <= 6) { return false; }
     if (batch_size > 1) { return true; }
@@ -95,7 +95,8 @@ std::vector<GraphExecutionProfile> Variant::ordinary_graph_profiles(std::uint32_
 }
 
 std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t capacity,
-                                                               std::uint32_t draft_window) {
+                                                                std::uint32_t draft_window,
+                                                                std::uint32_t) {
     if (draft_window == 0 || capacity == 0) { return {}; }
     std::vector<std::uint32_t> ends;
     const auto add_shifted = [&](std::uint32_t visible_end, std::uint32_t offset) {

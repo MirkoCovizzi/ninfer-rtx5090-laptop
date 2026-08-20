@@ -45,7 +45,7 @@ ninfer_bench --weights <artifact.ninfer>
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
           [--kv-dtype <bf16|int8>]
-          [--mtp-draft-tokens <0..5>] [--lm-head-draft]
+          [--mtp-draft-tokens <0..8>] [--lm-head-draft] [--adaptive-mtp]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]
 ```
@@ -61,7 +61,8 @@ Example:
 ```
 
 `bf16` selects BF16 KV storage and `int8` selects INT8 group-64 KV storage. MTP is enabled with
-`--mtp-draft-tokens`; `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
+`--mtp-draft-tokens`; `--lm-head-draft` selects the optimized proposal head. `--adaptive-mtp`
+treats that window as the maximum and records selected-width histograms. CUDA Graph decode is
 enabled by default.
 
 `--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
@@ -664,7 +665,7 @@ cmake --build build --parallel --target ninfer_argmax_bench ninfer_sampling_sele
 ```
 
 The G2/G3 benchmark uses physical rows 248320, valid token domain 248077, optional occurrence
-counts, batched sampling at `B=1,2,4,8`, and every MTP window `K=1..5`. With no arguments it runs
+counts, batched sampling at `B=1,2,4,8`, and every MTP window `K=1..8`. With no arguments it runs
 the full greedy/stochastic matrix; individual routes are suitable for Nsight Compute capture:
 
 ```bash
@@ -724,15 +725,17 @@ test shapes exercise the scalar fallbacks.
 
 Table, JSON, and CSV reports all identify the selected target, artifact, Engine configuration,
 load summary, memory capacity, KV payload, workspace peak, phase throughput, and speculative
-statistics. JSON schema version 10 records the public value objects directly:
+statistics. JSON schema version 13 records the public value objects directly, including adaptive
+MTP policy, per-position draft exposure, physical-window round histograms, and the row-major
+window-transition matrix:
 
 - `load`: target, `weights_id`, load/upload time, file/H2D/staging bytes, tensor count, and resource
   count;
 - `memory`: weights/sequence/workspace/request-transient arenas, planned context, KV storage,
   CUDA Graph allowance, and KV payload;
 - each repetition's `timings`: prepare, Vision, prefill, decode, and total seconds;
-- each repetition's `speculative`: window, rounds, drafted/accepted tokens, fallbacks, and per-position
-acceptance.
+- each repetition's `speculative`: window, rounds, drafted/accepted tokens, fallbacks, per-position
+  acceptance, transition count, and transition matrix.
 
 Each test reports `workspace_peak_bytes` from the planned phase markers, including CUDA Graph
 replay, and `workspace_allocator_peak_bytes` from host-side arena allocation activity. These are

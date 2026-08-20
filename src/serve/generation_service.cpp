@@ -396,8 +396,16 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.metrics.speculative_draft_tokens    = result.speculative.drafted_tokens;
     outcome.metrics.speculative_accepted_tokens = result.speculative.accepted_tokens;
     outcome.metrics.speculative_fallback_steps  = result.speculative.fallback_steps;
+    outcome.metrics.speculative_adaptive        = result.speculative.adaptive;
+    outcome.metrics.speculative_window_transitions = result.speculative.window_transitions;
     outcome.metrics.speculative_accepted_per_position =
         std::move(result.speculative.accepted_per_position);
+    outcome.metrics.speculative_drafted_per_position =
+        std::move(result.speculative.drafted_per_position);
+    outcome.metrics.speculative_rounds_per_window =
+        std::move(result.speculative.rounds_per_window);
+    outcome.metrics.speculative_window_transition_counts =
+        std::move(result.speculative.window_transition_counts);
 
     bool is_tool_call_response = false;
     if (prepared.tool_capable) {

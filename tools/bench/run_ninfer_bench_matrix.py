@@ -4,8 +4,8 @@
 The matrix is intentionally layered instead of fully factorial:
 
 * k=3 is the primary MTP path to evaluate.
-* k=0 and k=5 are baseline/max-window controls.
-* k=0..5 is swept on representative context-decode cases.
+* k=0 and k=8 are baseline/max-window controls.
+* k=0..8 is swept on representative context-decode cases.
 * CUDA graph is compared only for decode-bearing tests.
 * Prefill-only tests sweep length and chunk size, but not graph on/off.
 
@@ -38,9 +38,9 @@ PREFILL_CHUNKS = (128, 256, 512, 1024, 2048, 4096)
 PURE_DECODE_GENS = (16, 64, 128, 512, 2048)
 CONTEXT_CORE = ((512, 512), (2048, 512), (8192, 512))
 CONTEXT_FULL_EXTRA = ((32768, 256), (65536, 128))
-PRIMARY_KS = (0, 3, 5)
-SWEEP_KS = (0, 1, 2, 3, 4, 5)
-REPORT_SCHEMA_VERSION = 11
+PRIMARY_KS = (0, 3, 8)
+SWEEP_KS = (0, 1, 2, 3, 4, 5, 6, 7, 8)
+REPORT_SCHEMA_VERSION = 13
 REPORT_ARTIFACT_TYPE = "ninfer_bench_report"
 REPORT_TOOL = "ninfer_bench"
 
@@ -291,6 +291,7 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
             "kv_cache": config.get("kv_cache"),
             "mtp_draft_tokens": config.get("mtp_draft_tokens"),
             "proposal_head": config.get("proposal_head"),
+            "mtp_policy": config.get("mtp_policy"),
             "decode_path": config.get("decode_path"),
             "decode_graph_primed": config.get("decode_graph_prime", {}).get("primed"),
             "decode_graph_prime_output_tokens": config.get("decode_graph_prime", {}).get(
@@ -323,12 +324,24 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
             "total_seconds_mean": test.get("total_seconds_mean"),
             "spec_acceptance_rate": speculative.get("acceptance_rate"),
             "spec_acceptance_length": speculative.get("acceptance_length"),
+            "spec_backend": speculative.get("backend"),
             "spec_rounds": speculative.get("rounds"),
             "spec_drafted_tokens": speculative.get("drafted_tokens"),
             "spec_accepted_tokens": speculative.get("accepted_tokens"),
             "spec_fallback_steps": speculative.get("fallback_steps"),
+            "spec_adaptive": speculative.get("adaptive"),
             "spec_accepted_per_position": json.dumps(
                 speculative.get("accepted_per_position", []), separators=(",", ":")
+            ),
+            "spec_drafted_per_position": json.dumps(
+                speculative.get("drafted_per_position", []), separators=(",", ":")
+            ),
+            "spec_rounds_per_window": json.dumps(
+                speculative.get("rounds_per_window", []), separators=(",", ":")
+            ),
+            "spec_window_transitions": speculative.get("window_transitions"),
+            "spec_window_transition_counts": json.dumps(
+                speculative.get("window_transition_counts", []), separators=(",", ":")
             ),
             "gpu_name": report.get("environment", {}).get("gpu_name"),
         }

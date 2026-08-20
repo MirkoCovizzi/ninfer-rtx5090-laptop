@@ -134,7 +134,9 @@ int main() {
 
     int failures = 0;
     failures += run_case(1, {0});
+    failures += run_case(3, {0, 2, 3});
     failures += run_case(5, {0, 2, 5});
+    failures += run_case(8, {0, 3, 8, 6});
 
     if (failures != 0) {
         std::cerr << "mtp_round failures=" << failures << '\n';

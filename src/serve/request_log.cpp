@@ -239,11 +239,17 @@ Json arena_json(const ninfer::ArenaMemorySummary& arena) {
 Json speculative_json(const GenerationMetrics& metrics) {
     return Json{{"backend", product::speculative_backend_name(metrics.speculative_backend)},
                 {"draft_window", metrics.speculative_draft_window},
+                {"adaptive", metrics.speculative_adaptive},
                 {"rounds", metrics.speculative_rounds},
                 {"drafted_tokens", metrics.speculative_draft_tokens},
                 {"accepted_tokens", metrics.speculative_accepted_tokens},
                 {"fallback_steps", metrics.speculative_fallback_steps},
-                {"accepted_per_position", metrics.speculative_accepted_per_position}};
+                {"window_transitions", metrics.speculative_window_transitions},
+                {"accepted_per_position", metrics.speculative_accepted_per_position},
+                {"drafted_per_position", metrics.speculative_drafted_per_position},
+                {"rounds_per_window", metrics.speculative_rounds_per_window},
+                {"window_transition_counts",
+                 metrics.speculative_window_transition_counts}};
 }
 
 // Tokens/second with fixed precision, or "n/a" when the interval is degenerate.
@@ -292,6 +298,31 @@ std::string speculative_str(const GenerationMetrics& metrics) {
         const double accept_pct = 100.0 * static_cast<double>(metrics.speculative_accepted_tokens) /
                                   static_cast<double>(metrics.speculative_draft_tokens);
         out << " (" << std::setprecision(1) << accept_pct << "%)";
+    }
+    if (metrics.speculative_adaptive && !metrics.speculative_rounds_per_window.empty()) {
+        out << " widths=[";
+        for (std::size_t i = 0; i < metrics.speculative_rounds_per_window.size(); ++i) {
+            if (i != 0) { out << ','; }
+            out << metrics.speculative_rounds_per_window[i];
+        }
+        out << ']';
+        out << " transitions=" << metrics.speculative_window_transitions;
+        if (!metrics.speculative_window_transition_counts.empty()) {
+            out << " pairs=[";
+            bool first = true;
+            const std::size_t width = metrics.speculative_rounds_per_window.size();
+            for (std::size_t from = 0; from < width; ++from) {
+                for (std::size_t to = 0; to < width; ++to) {
+                    const std::uint64_t count =
+                        metrics.speculative_window_transition_counts[from * width + to];
+                    if (count == 0) { continue; }
+                    if (!first) { out << ','; }
+                    first = false;
+                    out << from + 1U << '>' << to + 1U << ':' << count;
+                }
+            }
+            out << ']';
+        }
     }
     return out.str();
 }
@@ -489,6 +520,8 @@ std::string format_server_start_json(
           {"prefix_reuse", options.allow_prefix_reuse},
           {"speculative_backend", product::speculative_backend_name(options.speculative.backend)},
           {"speculative_draft_window", options.speculative.draft_tokens},
+          {"mtp_policy", options.speculative.mtp_policy == MtpDraftPolicy::Adaptive ? "adaptive"
+                                                                                     : "fixed"},
           {"proposal_head", proposal_head_name(options.speculative.proposal_head)}};
     record["sampling_defaults"] =
         Json{{"thinking", preset_json(sampling_defaults.thinking)},

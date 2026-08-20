@@ -204,6 +204,9 @@ void print_generation_summary(const ninfer::GenerationResult& result,
         const std::string backend =
             speculative.backend == ninfer::SpeculativeBackend::DFlash ? "dflash" : "mtp";
         print_metric(backend + " draft window", std::to_string(speculative.draft_window));
+        if (speculative.backend == ninfer::SpeculativeBackend::Mtp) {
+            print_metric("mtp policy", speculative.adaptive ? "adaptive" : "fixed");
+        }
         print_metric(backend + " rounds", std::to_string(speculative.rounds));
         print_metric(backend + " fallback steps", std::to_string(speculative.fallback_steps));
         print_metric(backend + " drafted tokens", std::to_string(speculative.drafted_tokens));
@@ -225,6 +228,41 @@ void print_generation_summary(const ninfer::GenerationResult& result,
                 positions << speculative.accepted_per_position[i];
             }
             print_metric(backend + " accepted by pos", positions.str());
+        }
+        if (!speculative.drafted_per_position.empty()) {
+            std::ostringstream positions;
+            for (std::size_t i = 0; i < speculative.drafted_per_position.size(); ++i) {
+                if (i != 0) { positions << ','; }
+                positions << speculative.drafted_per_position[i];
+            }
+            print_metric(backend + " drafted by pos", positions.str());
+        }
+        if (!speculative.rounds_per_window.empty()) {
+            std::ostringstream windows;
+            for (std::size_t i = 0; i < speculative.rounds_per_window.size(); ++i) {
+                if (i != 0) { windows << ','; }
+                windows << speculative.rounds_per_window[i];
+            }
+            print_metric("mtp rounds by window", windows.str());
+        }
+        if (speculative.adaptive) {
+            print_metric("mtp window transitions", std::to_string(speculative.window_transitions));
+            if (!speculative.window_transition_counts.empty()) {
+                std::ostringstream pairs;
+                bool first = true;
+                const std::size_t width = speculative.draft_window;
+                for (std::size_t from = 0; from < width; ++from) {
+                    for (std::size_t to = 0; to < width; ++to) {
+                        const std::uint64_t count =
+                            speculative.window_transition_counts[from * width + to];
+                        if (count == 0) { continue; }
+                        if (!first) { pairs << ','; }
+                        first = false;
+                        pairs << from + 1U << '>' << to + 1U << ':' << count;
+                    }
+                }
+                print_metric("mtp transition pairs", pairs.str());
+            }
         }
     }
 }
