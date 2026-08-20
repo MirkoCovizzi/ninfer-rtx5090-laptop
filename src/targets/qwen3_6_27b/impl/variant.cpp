@@ -46,6 +46,28 @@ void validate_token_interval(std::int32_t first, std::int32_t last) {
 constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::AllowA4;
 constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::AllowA8;
 
+// RTX 5090 Laptop, CUDA 13.1, Qwen3.8-27B legacy-W8 NVFP4, optimized proposal head, INT8 KV,
+// batch one. Values are milliseconds per physical MTP round. The midpoint confirms that
+// piecewise-linear interpolation captures this route's long-context attention cost cliff.
+constexpr std::array<MtpAdaptiveCostPoint, 4> kNvfp4MtpAdaptiveCostPoints{{
+    {256U,
+     {26.596376F, 28.936277F, 28.380552F, 30.002042F, 31.503180F, 33.015688F,
+      34.216129F, 35.838713F}},
+    {2304U,
+     {26.833267F, 29.024762F, 28.546263F, 30.285130F, 31.876161F, 34.860764F,
+      35.888176F, 37.368331F}},
+    {33024U,
+     {28.569155F, 31.277367F, 30.686196F, 33.010791F, 34.600379F, 62.568806F,
+      64.183533F, 65.760137F}},
+    {65792U,
+     {30.287110F, 33.148583F, 32.678933F, 34.791146F, 37.190267F, 93.002847F,
+      94.611666F, 96.449993F}},
+}};
+
+constexpr std::array<MtpAdaptiveCostPoint, 1> kBaselineMtpAdaptiveCostPoints{{
+    {0U, {1.000F, 1.075F, 1.064F, 1.125F, 1.177F, 1.227F, 1.281F, 1.334F}},
+}};
+
 ops::LinearPolicy text_policy(const Weight& weight) {
     switch (weight.qtype) {
     case QType::NVFP4:
@@ -149,6 +171,24 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
     return graph_profiles_through(capacity - 1, ends);
+}
+
+MtpAdaptiveCostProfile Variant::mtp_adaptive_cost_profile(WeightsProfile weights_profile) {
+    MtpAdaptiveCostProfile profile;
+    profile.batch_curves.fill(
+        std::span<const MtpAdaptiveCostPoint>(kBaselineMtpAdaptiveCostPoints));
+    switch (weights_profile) {
+    case WeightsProfile::Qwen38Nvfp4LegacyW8:
+        profile.batch_curves[0] =
+            std::span<const MtpAdaptiveCostPoint>(kNvfp4MtpAdaptiveCostPoints);
+        break;
+    case WeightsProfile::Qwen36Nvfp4:
+    case WeightsProfile::Qwen38Nvfp4:
+    case WeightsProfile::Qwen36GroupwiseInt:
+    case WeightsProfile::Qwen38GroupwiseInt:
+        break;
+    }
+    return profile;
 }
 
 std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t, std::uint32_t,

@@ -947,12 +947,17 @@ score-driven candidate 必须连续四轮胜出，fresh-tail probe 与 K8 probat
 持续强 survival 与六轮 fresh tail success 防止 code-like stream
 收缩到 K6 以下，同时避免 mixed stream 的短 success burst 反复触发 widening；高 width
 收缩使用更长 residency。Active request cohort 改变时，selection/hysteresis 回到 startup prior，不继承上一
-request 的 acceptance regime。Controller 使用目标 GPU 上已测量的静态 relative-width cost curve。普通
-向上选择保持相邻 width，但 K3 的 qualified W4A4 route 比 K2 更便宜且 yield 不低，因此 K1 recovery
-直接同时评估 K3，不把 dominated K2 当作中间 steady state。每个 cohort 只记录 exact-b width execution
-age，用于限制 probe、允许陈旧 width 重新 probe，并给首次 K8 执行
-短 probation。它不从跨 request/context 的 wall time 推导 width cost。该策略不增加 allocation、device
-readback 或 synchronization。
+request 的 acceptance regime。每个 exact target package 提供目标 GPU 上测得的 `(batch size, width,
+maximum frontier)` round-cost curve；family controller 以当前 rows 的最大 frontier 计价，并以每行
+`frontier+consumed` 的最大值计价 continuation。曲线只做 host-side 分段线性插值并在已测范围外保持端点，
+不从跨 request/context 的 wall time 在线学习。若 startup wide window 的 physical round cost 已高到即使全部 drafts
+accepted 也不可能超过较窄 width，cohort 直接从 prior-score 最优的非 dominated width 开始；strong-prefix
+floor 和 fresh-tail probe 同样不得强制执行这种 physically dominated width，并回退到其范围内最宽的
+non-dominated intermediate width，而不是取消 widening evidence。普通向上选择保持相邻 width，
+但 K3 的 qualified W4A4 route 比 K2 更便宜且 yield 不低，因此 K1 recovery 直接同时评估 K3，不把
+dominated K2 当作中间 steady state。每个 cohort 只记录 exact-b width execution age，用于限制 probe、
+允许陈旧 width 重新 probe，并给首次 K8 执行短 probation。该策略不增加 allocation、device readback 或
+synchronization。
 
 每个 admitted `K` 拥有 compact `[K+1,B]` target/alignment frame 和 exact-width ReplaySSM records，并产生
 最多 `K` 个 next drafts。Width 上升时，当前 available drafts 可以小于新的 physical `K`；valid-column mask

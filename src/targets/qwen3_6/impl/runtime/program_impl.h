@@ -197,6 +197,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
       persistent(plan.persistent.bytes), workspace_storage(plan.workspace.capacity),
       work(DeviceSpan{workspace_storage.base(), workspace_storage.capacity()}),
+      mtp_adaptive_costs(mtp_adaptive_cost_profile(plan.weights_profile)),
+      mtp_controller(mtp_adaptive_costs),
       round_host(sizeof(TokenId)),
       ordinary_host(
           plan.speculative_backend == SpeculativeBackend::None
@@ -1944,6 +1946,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     std::array<const qwen3_6::detail::MtpAdaptiveSignal*, kMaximumConcurrency> signals{};
     std::array<std::uint32_t, kMaximumConcurrency> signal_extents{};
     std::array<std::uint32_t, kMaximumConcurrency> signal_rooms{};
+    std::array<std::uint32_t, kMaximumConcurrency> signal_frontiers{};
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
         if (lane >= max_concurrency ||
@@ -1970,10 +1973,11 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                 ? budgets[row].generated_tokens_remaining - 1U
                                                 : 0U;
-        signals[row]      = &request.mtp_signal;
-        signal_rooms[row] =
+        signals[row]          = &request.mtp_signal;
+        signal_frontiers[row] = sequence.execution_frontier;
+        signal_rooms[row]     =
             std::min(max_by_budget, capacity - sequence.execution_frontier - 1U);
-        signal_extents[row] =
+        signal_extents[row]   =
             std::min({draft_window, sequence.mtp_draft_count, signal_rooms[row]});
     }
 
@@ -1985,7 +1989,8 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         verification_window = mtp_controller.select(
             std::span<const qwen3_6::detail::MtpAdaptiveSignal* const>(signals.data(), lanes.size()),
             std::span<const std::uint32_t>(signal_extents.data(), lanes.size()),
-            std::span<const std::uint32_t>(signal_rooms.data(), lanes.size()), cohort_key);
+            std::span<const std::uint32_t>(signal_rooms.data(), lanes.size()),
+            std::span<const std::uint32_t>(signal_frontiers.data(), lanes.size()), cohort_key);
         window_transition = mtp_controller.transitioned();
         transition_from   = mtp_controller.transition_from();
         transition_to     = mtp_controller.transition_to();

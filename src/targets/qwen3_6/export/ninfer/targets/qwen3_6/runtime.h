@@ -3,6 +3,7 @@
 #include "ninfer/types.h"
 #include "runtime/contract/transient_region.h"
 #include "runtime/contract/types.h"
+#include <ninfer/targets/qwen3_6/mtp_adaptive_cost.h>
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
 
 #include <cstddef>

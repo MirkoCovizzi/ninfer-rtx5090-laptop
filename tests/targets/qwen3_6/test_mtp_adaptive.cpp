@@ -9,6 +9,21 @@ namespace {
 
 using ninfer::targets::qwen3_6::detail::MtpAdaptiveBatchController;
 using ninfer::targets::qwen3_6::detail::MtpAdaptiveSignal;
+using ninfer::targets::qwen3_6::MtpAdaptiveCostPoint;
+using ninfer::targets::qwen3_6::MtpAdaptiveCostProfile;
+
+MtpAdaptiveCostProfile cost_profile(std::span<const MtpAdaptiveCostPoint> curve) {
+    MtpAdaptiveCostProfile profile;
+    profile.batch_curves.fill(curve);
+    return profile;
+}
+
+MtpAdaptiveCostProfile default_cost_profile() {
+    static constexpr std::array<MtpAdaptiveCostPoint, 1> points{{
+        {0U, {1.000F, 1.075F, 1.064F, 1.125F, 1.177F, 1.227F, 1.281F, 1.334F}},
+    }};
+    return cost_profile(points);
+}
 
 int check(bool condition, const char* message) {
     if (condition) { return 0; }
@@ -18,11 +33,12 @@ int check(bool condition, const char* message) {
 
 std::uint32_t select(MtpAdaptiveBatchController& controller, const MtpAdaptiveSignal& signal,
                      std::uint32_t available = 8, std::uint32_t room = 64,
-                     std::uint64_t cohort = 1) {
+                     std::uint64_t cohort = 1, std::uint32_t frontier = 0) {
     const std::array<const MtpAdaptiveSignal*, 1> signals{&signal};
     const std::array<std::uint32_t, 1> extents{available};
     const std::array<std::uint32_t, 1> rooms{room};
-    return controller.select(signals, extents, rooms, cohort);
+    const std::array<std::uint32_t, 1> frontiers{frontier};
+    return controller.select(signals, extents, rooms, frontiers, cohort);
 }
 
 } // namespace
@@ -30,7 +46,7 @@ std::uint32_t select(MtpAdaptiveBatchController& controller, const MtpAdaptiveSi
 int main() {
     int failures = 0;
     MtpAdaptiveSignal signal;
-    MtpAdaptiveBatchController controller;
+    MtpAdaptiveBatchController controller(default_cost_profile());
     controller.reset(8);
     failures += check(select(controller, signal) == 7, "Kmax=8 prior did not select K=7");
 
@@ -162,6 +178,54 @@ int main() {
     }
     failures += check(bursty_transitions <= 2,
                       "stationary bursty survival caused repeated widening probes");
+
+    static constexpr std::array<MtpAdaptiveCostPoint, 2> depth_points{{
+        {256U, {1.000F, 1.088F, 1.067F, 1.128F, 1.184F, 1.241F, 1.287F, 1.348F}},
+        {65792U, {1.000F, 1.094F, 1.079F, 1.149F, 1.228F, 3.071F, 3.124F, 3.185F}},
+    }};
+    MtpAdaptiveBatchController depth_controller(cost_profile(depth_points));
+    MtpAdaptiveSignal depth_signal;
+    depth_controller.reset(8);
+    failures += check(select(depth_controller, depth_signal, 8, 64, 1, 256) == 7,
+                      "shallow startup did not retain the wide exploration window");
+    depth_controller.reset(8);
+    failures += check(select(depth_controller, depth_signal, 8, 64, 2, 65792) == 3,
+                      "deep startup selected a physically dominated wide window");
+    depth_controller.reset(8);
+    failures += check(select(depth_controller, depth_signal, 8, 64, 3, 200000) == 3,
+                      "frontier beyond the calibrated range did not retain the endpoint policy");
+    depth_controller.reset(8);
+    const std::array<const MtpAdaptiveSignal*, 2> mixed_signals{&depth_signal, &depth_signal};
+    const std::array<std::uint32_t, 2> mixed_extents{8, 8};
+    const std::array<std::uint32_t, 2> mixed_rooms{64, 64};
+    const std::array<std::uint32_t, 2> mixed_frontiers{256, 65792};
+    failures += check(depth_controller.select(mixed_signals, mixed_extents, mixed_rooms,
+                                              mixed_frontiers, 4) == 3,
+                      "mixed-depth batch did not price the maximum frontier");
+    for (int round = 0; round < 32; ++round) {
+        (void)select(depth_controller, high_signal, depth_controller.selected_window(), 64, 5,
+                     65792);
+    }
+    failures += check(depth_controller.selected_window() <= 5,
+                      "deep strong-prefix probing selected a physically dominated width");
+
+    MtpAdaptiveSignal k4_tail_signal;
+    for (int round = 0; round < 12; ++round) { k4_tail_signal.observe(4, 4); }
+    depth_controller.reset(8);
+    failures += check(select(depth_controller, k4_tail_signal, 4, 5, 6, 65792) == 4,
+                      "deep K5 fallback test did not establish K4");
+    bool direct_k5_probe = false;
+    for (int round = 0; round < 8; ++round) {
+        (void)select(depth_controller, k4_tail_signal, 4, 64, 6, 65792);
+        failures += check(depth_controller.selected_window() != 6,
+                          "deep K4 tail probe selected dominated K6");
+        direct_k5_probe = direct_k5_probe ||
+                          (depth_controller.transitioned() &&
+                           depth_controller.transition_from() == 4 &&
+                           depth_controller.transition_to() == 5);
+    }
+    failures += check(direct_k5_probe,
+                      "deep K4 tail evidence did not probe admissible K5");
 
     if (failures != 0) { return 1; }
     std::cout << "mtp_adaptive: PASS\n";

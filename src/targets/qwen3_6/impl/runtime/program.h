@@ -289,6 +289,7 @@ public:
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily mtp_graphs;
     DecodeGraphFamily dflash_graphs;
+    const qwen3_6::MtpAdaptiveCostProfile mtp_adaptive_costs;
     qwen3_6::detail::MtpAdaptiveBatchController mtp_controller;
     std::uint32_t pending_mtp_window = 0;
     std::uint32_t pending_mtp_batch_size = 0;

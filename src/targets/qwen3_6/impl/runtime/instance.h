@@ -26,6 +26,7 @@ using FullAttentionProjectionWeights = typename Variant::FullAttentionProjection
 using GdnProjectionWeights           = typename Variant::GdnProjectionWeights;
 using VisionWeights                  = typename Variant::VisionWeights;
 using GraphExecutionProfile          = typename Variant::GraphExecutionProfile;
+using MtpAdaptiveCostProfile          = typename Variant::MtpAdaptiveCostProfile;
 
 using SequencePlan    = qwen3_6::SequencePlan<Variant>;
 using SequencePlanner = qwen3_6::SequencePlanner<Variant>;
@@ -47,6 +48,10 @@ inline std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capac
                                                               std::uint32_t draft_window,
                                                               std::uint32_t batch_size) {
     return Variant::mtp_graph_profiles(capacity, draft_window, batch_size);
+}
+
+inline MtpAdaptiveCostProfile mtp_adaptive_cost_profile(WeightsProfile weights_profile) {
+    return Variant::mtp_adaptive_cost_profile(weights_profile);
 }
 
 inline std::vector<GraphExecutionProfile> dflash_graph_profiles(std::uint32_t capacity,

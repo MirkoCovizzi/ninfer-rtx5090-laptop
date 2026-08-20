@@ -11,6 +11,8 @@
 namespace ninfer::targets::qwen3_6_35b_a3b::detail {
 
 using GraphExecutionProfile = qwen3_6::GraphExecutionProfile;
+using MtpAdaptiveCostPoint   = qwen3_6::MtpAdaptiveCostPoint;
+using MtpAdaptiveCostProfile = qwen3_6::MtpAdaptiveCostProfile;
 
 struct Variant {
     using WeightsProfile                 = detail::WeightsProfile;
@@ -25,6 +27,7 @@ struct Variant {
     using MtpPostMixerWeights            = detail::SparseMoePayload;
     using VisionWeights                  = qwen3_6::VisionWeights;
     using GraphExecutionProfile          = detail::GraphExecutionProfile;
+    using MtpAdaptiveCostProfile          = detail::MtpAdaptiveCostProfile;
 
     static constexpr float attention_scale                     = kAttentionScale;
     static constexpr float gdn_scale                           = kGdnScale;
@@ -40,6 +43,8 @@ struct Variant {
     [[nodiscard]] static std::vector<GraphExecutionProfile>
     mtp_graph_profiles(std::uint32_t capacity, std::uint32_t draft_window,
                        std::uint32_t batch_size);
+    [[nodiscard]] static MtpAdaptiveCostProfile
+    mtp_adaptive_cost_profile(WeightsProfile weights_profile);
     [[nodiscard]] static std::vector<GraphExecutionProfile>
     dflash_graph_profiles(std::uint32_t capacity, std::uint32_t draft_window,
                           std::uint32_t batch_size);

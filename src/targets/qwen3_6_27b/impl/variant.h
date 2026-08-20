@@ -11,6 +11,8 @@
 namespace ninfer::targets::qwen3_6_27b::detail {
 
 using GraphExecutionProfile = qwen3_6::GraphExecutionProfile;
+using MtpAdaptiveCostPoint   = qwen3_6::MtpAdaptiveCostPoint;
+using MtpAdaptiveCostProfile = qwen3_6::MtpAdaptiveCostProfile;
 
 // Compile-time data and the three closed execution leaves supplied to the Qwen3.6 family runtime.
 // It owns no request state, execution phase, graph object, or schedule callback.
@@ -27,6 +29,7 @@ struct Variant {
     using MtpPostMixerWeights            = detail::DensePostMixerPayload;
     using VisionWeights                  = qwen3_6::VisionWeights;
     using GraphExecutionProfile          = detail::GraphExecutionProfile;
+    using MtpAdaptiveCostProfile          = detail::MtpAdaptiveCostProfile;
 
     static constexpr float attention_scale                     = kAttentionScale;
     static constexpr float gdn_scale                           = kGdnScale;
@@ -123,6 +126,8 @@ struct Variant {
     [[nodiscard]] static std::vector<GraphExecutionProfile>
     mtp_graph_profiles(std::uint32_t capacity, std::uint32_t draft_window,
                        std::uint32_t batch_size);
+    [[nodiscard]] static MtpAdaptiveCostProfile
+    mtp_adaptive_cost_profile(WeightsProfile weights_profile);
     [[nodiscard]] static std::vector<GraphExecutionProfile>
     dflash_graph_profiles(std::uint32_t capacity, std::uint32_t draft_window,
                           std::uint32_t batch_size);

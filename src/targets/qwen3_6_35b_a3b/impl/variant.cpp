@@ -81,6 +81,12 @@ void validate_token_interval(std::int32_t first, std::int32_t last) {
 
 constexpr std::size_t kMinimumLeafWorkspaceBytes = 1;
 
+// Preserve the qualified 35B-A3B policy until a target-local depth sweep replaces this constant
+// profile. Keeping the data target-owned avoids importing the 27B attention topology into 35B.
+constexpr std::array<MtpAdaptiveCostPoint, 1> kMtpAdaptiveCostPoints{{
+    {0U, {1.000F, 1.075F, 1.064F, 1.125F, 1.177F, 1.227F, 1.281F, 1.334F}},
+}};
+
 std::size_t gdn_record_workspace_bytes(const Tensor& hidden) {
     return std::max(kMinimumLeafWorkspaceBytes,
                     ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
@@ -108,6 +114,12 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
     return graph_profiles_through(capacity - 1, ends);
+}
+
+MtpAdaptiveCostProfile Variant::mtp_adaptive_cost_profile(WeightsProfile) {
+    MtpAdaptiveCostProfile profile;
+    profile.batch_curves.fill(std::span<const MtpAdaptiveCostPoint>(kMtpAdaptiveCostPoints));
+    return profile;
 }
 
 std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t capacity,

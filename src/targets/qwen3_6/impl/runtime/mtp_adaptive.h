@@ -1,5 +1,7 @@
 #pragma once
 
+#include "targets/qwen3_6/export/ninfer/targets/qwen3_6/mtp_adaptive_cost.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -103,9 +105,12 @@ private:
 
 class MtpAdaptiveBatchController final {
 public:
+    explicit MtpAdaptiveBatchController(qwen3_6::MtpAdaptiveCostProfile cost_profile) noexcept
+        : cost_profile_(cost_profile) {}
+
     void reset(std::uint32_t maximum_window) noexcept {
         maximum_window_ = std::clamp(maximum_window, 1U, kAdaptiveMtpMaximumDrafts);
-        selected_window_ = startup_window();
+        selected_window_ = default_startup_window();
         candidate_window_ = selected_window_;
         rounds_at_window_ = 0;
         candidate_rounds_ = 0;
@@ -134,14 +139,17 @@ public:
     [[nodiscard]] std::uint32_t
     select(std::span<const MtpAdaptiveSignal* const> signals,
            std::span<const std::uint32_t> available,
-           std::span<const std::uint32_t> room, std::uint64_t cohort_key = 1) noexcept {
+           std::span<const std::uint32_t> room, std::span<const std::uint32_t> frontiers,
+           std::uint64_t cohort_key = 1) noexcept {
         last_transition_from_ = selected_window_;
         last_transition_to_   = selected_window_;
-        if (signals.empty() || signals.size() != available.size() || signals.size() != room.size()) {
+        if (signals.empty() || signals.size() != available.size() || signals.size() != room.size() ||
+            signals.size() != frontiers.size()) {
             return selected_window_;
         }
+        const std::uint32_t batch_frontier = maximum_frontier(frontiers);
         if (selection_cohort_key_ != cohort_key) {
-            selected_window_    = startup_window();
+            selected_window_    = startup_window(signals, available, room, frontiers);
             candidate_window_   = selected_window_;
             rounds_at_window_   = 0;
             candidate_rounds_   = 0;
@@ -153,14 +161,14 @@ public:
         const std::uint32_t round_window = selected_window_;
 
         std::uint32_t best_window = selected_window_;
-        float best_score          = score(selected_window_, signals, available, room);
+        float best_score          = score(selected_window_, signals, available, room, frontiers);
         // K3's qualified W4A4 route is cheaper than K2 and has no lower token yield, so K2 is not
         // a valid steady-state bridge when recovering from K1.
         const std::uint32_t upward_limit =
             selected_window_ == 1 && maximum_window_ >= 3 ? 3U : selected_window_ + 1U;
         for (std::uint32_t window = 1; window <= maximum_window_; ++window) {
             if (window > upward_limit) { continue; }
-            const float candidate = score(window, signals, available, room);
+            const float candidate = score(window, signals, available, room, frontiers);
             if (candidate > best_score) {
                 best_score  = candidate;
                 best_window = window;
@@ -172,13 +180,15 @@ public:
             for (const MtpAdaptiveSignal* signal : signals) {
                 all_prefixes_strong = all_prefixes_strong && signal->strong_wide_prefix();
             }
-            if (all_prefixes_strong) {
-                best_window = 6;
-                best_score  = score(best_window, signals, available, room);
+            const std::uint32_t floor_window = widest_admissible_width(
+                6, best_window, signals.size(), batch_frontier);
+            if (all_prefixes_strong && floor_window != 0) {
+                best_window = floor_window;
+                best_score  = score(best_window, signals, available, room, frontiers);
             }
         }
 
-        const float current_score = score(selected_window_, signals, available, room);
+        const float current_score = score(selected_window_, signals, available, room, frontiers);
         bool confident_probe      = false;
         if (selected_window_ < maximum_window_) {
             bool has_continuing_row = false;
@@ -191,18 +201,24 @@ public:
                 all_tails_confident =
                     all_tails_confident && signals[row]->confident_tail(selected_window_);
             }
-            const std::uint32_t probe_window =
+            const std::uint32_t preferred_probe =
                 std::min({selected_window_ + 2U, maximum_window_, 7U});
-            const std::size_t batch = std::min(signals.size(), execution_samples_.size()) - 1U;
-            const std::uint64_t observed_round =
-                last_width_execution_round_[batch][probe_window - 1U];
-            const bool probe_due = observed_round == 0 || execution_round_ - observed_round >= 32;
-            if (selected_window_ < 7 && has_continuing_row && all_tails_confident &&
-                probe_due) {
-                best_window = probe_window;
-                best_score = std::max(score(best_window, signals, available, room),
-                                      current_score * 1.011F);
-                confident_probe = true;
+            const std::uint32_t probe_window = widest_admissible_width(
+                preferred_probe, selected_window_, signals.size(), batch_frontier);
+            if (probe_window != 0) {
+                const std::size_t batch =
+                    std::min(signals.size(), execution_samples_.size()) - 1U;
+                const std::uint64_t observed_round =
+                    last_width_execution_round_[batch][probe_window - 1U];
+                const bool probe_due =
+                    observed_round == 0 || execution_round_ - observed_round >= 32;
+                if (selected_window_ < 7 && has_continuing_row && all_tails_confident &&
+                    probe_due) {
+                    best_window = probe_window;
+                    best_score = std::max(score(best_window, signals, available, room, frontiers),
+                                          current_score * 1.011F);
+                    confident_probe = true;
+                }
             }
         }
         const float margin = 1.01F;
@@ -252,45 +268,117 @@ public:
     [[nodiscard]] std::uint32_t transition_to() const noexcept { return last_transition_to_; }
 
 private:
-    [[nodiscard]] std::uint32_t startup_window() const noexcept {
+    [[nodiscard]] std::uint32_t default_startup_window() const noexcept {
         return std::min(maximum_window_ >= 6 ? 7U : 3U, maximum_window_);
+    }
+
+    [[nodiscard]] std::uint32_t
+    startup_window(std::span<const MtpAdaptiveSignal* const> signals,
+                   std::span<const std::uint32_t> available,
+                   std::span<const std::uint32_t> room,
+                   std::span<const std::uint32_t> frontiers) const noexcept {
+        const std::uint32_t startup = default_startup_window();
+        if (!physically_dominated(startup, signals.size(), maximum_frontier(frontiers))) {
+            return startup;
+        }
+        std::uint32_t best_window = 1;
+        float best_score = score(best_window, signals, available, room, frontiers);
+        for (std::uint32_t window = 2; window < startup; ++window) {
+            const float candidate = score(window, signals, available, room, frontiers);
+            if (candidate > best_score) {
+                best_score  = candidate;
+                best_window = window;
+            }
+        }
+        return best_window;
     }
 
     [[nodiscard]] float
     score(std::uint32_t window, std::span<const MtpAdaptiveSignal* const> signals,
-          std::span<const std::uint32_t> available,
-          std::span<const std::uint32_t> room) const noexcept {
-        // Normalized fixed-width round costs measured on the supported Blackwell execution route.
-        // K=3 is slightly cheaper than K=2 because it crosses the qualified W4A4 schedule boundary.
+           std::span<const std::uint32_t> available,
+           std::span<const std::uint32_t> room,
+           std::span<const std::uint32_t> frontiers) const noexcept {
         float expected        = 0.0F;
         float future_expected = 0.0F;
-        float cost            = round_cost(window, signals.size());
+        float cost = round_cost(window, signals.size(), maximum_frontier(frontiers));
         std::size_t future_batch = 0;
+        std::uint32_t future_frontier = 0;
         for (std::size_t row = 0; row < signals.size(); ++row) {
             expected += signals[row]->expected_tokens(window, available[row]);
             const std::uint32_t consumed = std::min(window, available[row]) + 1U;
             const std::uint32_t future_room = room[row] > consumed ? room[row] - consumed : 0U;
             const std::uint32_t future_extent = std::min(window, future_room);
-            if (future_extent != 0) {
+            if (future_room != 0) {
                 future_expected += signals[row]->expected_tokens(window, future_extent);
                 ++future_batch;
+                future_frontier = std::max(future_frontier, frontiers[row] + consumed);
             }
         }
         if (future_batch != 0) {
             expected += future_expected;
-            cost += round_cost(window, future_batch);
+            cost += round_cost(window, future_batch, future_frontier);
         }
         return expected / cost;
     }
 
-    [[nodiscard]] float round_cost(std::uint32_t window, std::size_t) const noexcept {
-        const std::size_t width = window - 1U;
-        return kPriorRoundCost[width];
+    [[nodiscard]] bool physically_dominated(std::uint32_t window, std::size_t batch_size,
+                                            std::uint32_t frontier) const noexcept {
+        const float candidate_cost = round_cost(window, batch_size, frontier);
+        for (std::uint32_t narrower = 1; narrower < window; ++narrower) {
+            const float narrower_cost = round_cost(narrower, batch_size, frontier);
+            const float maximum_yield_ratio =
+                static_cast<float>(window + 1U) / static_cast<float>(narrower + 1U);
+            if (candidate_cost >= narrower_cost * maximum_yield_ratio) { return true; }
+        }
+        return false;
     }
 
-    static constexpr std::array<float, kAdaptiveMtpMaximumDrafts> kPriorRoundCost{
-        1.000F, 1.075F, 1.064F, 1.125F, 1.177F, 1.227F, 1.281F, 1.334F};
+    [[nodiscard]] std::uint32_t widest_admissible_width(std::uint32_t preferred,
+                                                        std::uint32_t lower_exclusive,
+                                                        std::size_t batch_size,
+                                                        std::uint32_t frontier) const noexcept {
+        for (std::uint32_t window = preferred; window > lower_exclusive; --window) {
+            if (!physically_dominated(window, batch_size, frontier)) { return window; }
+        }
+        return 0;
+    }
 
+    [[nodiscard]] float round_cost(std::uint32_t window, std::size_t batch_size,
+                                   std::uint32_t frontier) const noexcept {
+        const std::size_t batch =
+            std::clamp<std::size_t>(batch_size, 1, kAdaptiveMtpMaximumBatch) - 1U;
+        const std::size_t width = std::clamp(window, 1U, kAdaptiveMtpMaximumDrafts) - 1U;
+        const std::span<const qwen3_6::MtpAdaptiveCostPoint> curve =
+            cost_profile_.batch_curves[batch];
+        if (curve.empty()) { return 1.0F; }
+        if (curve.size() == 1 || frontier <= curve.front().frontier) {
+            return std::max(curve.front().round_costs[width], 0.001F);
+        }
+        if (frontier >= curve.back().frontier) {
+            return std::max(curve.back().round_costs[width], 0.001F);
+        }
+
+        std::size_t upper = 1;
+        while (upper < curve.size() && frontier > curve[upper].frontier) { ++upper; }
+        const qwen3_6::MtpAdaptiveCostPoint& lo = curve[upper - 1U];
+        const qwen3_6::MtpAdaptiveCostPoint& hi = curve[upper];
+        const float extent = static_cast<float>(hi.frontier - lo.frontier);
+        const float offset = static_cast<float>(frontier - lo.frontier);
+        const float cost = lo.round_costs[width] +
+                           offset / extent * (hi.round_costs[width] - lo.round_costs[width]);
+        return std::max(cost, 0.001F);
+    }
+
+    [[nodiscard]] static std::uint32_t
+    maximum_frontier(std::span<const std::uint32_t> frontiers) noexcept {
+        std::uint32_t frontier = 0;
+        for (const std::uint32_t row_frontier : frontiers) {
+            frontier = std::max(frontier, row_frontier);
+        }
+        return frontier;
+    }
+
+    qwen3_6::MtpAdaptiveCostProfile cost_profile_;
     std::uint32_t maximum_window_ = 1;
     std::uint32_t selected_window_ = 1;
     std::uint32_t candidate_window_ = 1;
