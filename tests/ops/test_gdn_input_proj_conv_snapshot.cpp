@@ -788,6 +788,7 @@ int run_nvfp4() {
     failures += run_nvfp4_case(parent, 1, ops::LinearPolicy::A16Only, 2);
     failures += run_nvfp4_case(parent, 3, ops::LinearPolicy::AllowA4, 4);
     failures += run_nvfp4_case(parent, 4, ops::LinearPolicy::AllowA4, 5);
+    failures += run_nvfp4_case(parent, 9, ops::LinearPolicy::AllowA4, 10);
     failures += run_nvfp4_case(parent, 17, ops::LinearPolicy::AllowA4, 0);
     failures += run_nvfp4_case(parent, 1024, ops::LinearPolicy::AllowA4, 1025);
     constexpr std::int32_t kValueRows = 6144;
