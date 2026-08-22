@@ -362,7 +362,7 @@ __launch_bounds__(256) __global__ void gqa_attention_prefill_fill_i8_page_kernel
 }
 
 template <typename Geometry, bool PackedV, bool RotateK, bool RotateV, bool PackedK,
-          bool E8Root = false, typename Metadata>
+          bool VectorizedPacked, bool E8Root = false, typename Metadata>
 __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
     const __nv_bfloat16* __restrict__ q, const std::int8_t* __restrict__ cache_k,
     const std::uint8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
@@ -492,10 +492,20 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
                 } else if constexpr (PackedK) {
                     const std::int64_t koff =
                         gqa_kv_i4_code_index<Geometry>(physical_page, kv_head, d / 2, key_l);
-                    gqa_kv_unpack_i4x16(&reinterpret_cast<const std::uint8_t*>(cache_k)[koff], kd);
+                    if constexpr (VectorizedPacked) {
+                        gqa_kv_unpack_i4x16_vectorized(
+                            &reinterpret_cast<const std::uint8_t*>(cache_k)[koff], kd);
+                    } else {
+                        gqa_kv_unpack_i4x16(
+                            &reinterpret_cast<const std::uint8_t*>(cache_k)[koff], kd);
+                    }
                     const std::int64_t voff =
                         gqa_kv_i4_code_index<Geometry>(physical_page, kv_head, d / 2, key_l);
-                    gqa_kv_unpack_i4x16(&cache_v[voff], vd);
+                    if constexpr (VectorizedPacked) {
+                        gqa_kv_unpack_i4x16_vectorized(&cache_v[voff], vd);
+                    } else {
+                        gqa_kv_unpack_i4x16(&cache_v[voff], vd);
+                    }
                 } else {
                     const std::int64_t off =
                         gqa_kv_quant_code_index<Geometry>(physical_page, kv_head, d, key_l);

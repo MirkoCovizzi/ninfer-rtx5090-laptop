@@ -80,7 +80,7 @@ int test_cli_contract() {
         "--prefill-chunk",
         "128",
         "--kv-dtype",
-        "int8",
+        "rk4v4-e8",
         "--mtp-draft-tokens",
         "8",
         "--lm-head-draft",
@@ -103,7 +103,7 @@ int test_cli_contract() {
     failures += expect(parsed.repetitions == 3 && parsed.warmup == 2, "repetition settings");
     failures += expect(parsed.max_context == std::optional<std::uint32_t>(4096), "max context");
     failures += expect(parsed.prefill_chunk == 128, "prefill chunk");
-    failures += expect(parsed.kv_cache == ninfer::KvCacheStorage::Int8Group64, "INT8 KV");
+    failures += expect(parsed.kv_cache == ninfer::KvCacheStorage::RK4V4E8, "RK4V4-E8 KV");
     failures += expect(parsed.mtp_draft_tokens == 8, "MTP window");
     failures +=
         expect(parsed.proposal_head == ninfer::ProposalHead::Optimized, "optimized proposal head");
@@ -170,6 +170,9 @@ int test_measurement_contract() {
     failures += expect_u32(tg.required_context(0), 129, "tg context");
     failures += expect_u32(tg.required_context(5), 139, "MTP tg context");
     failures += expect_u32(combined.required_context(5), 2186, "MTP combined context");
+    failures += expect(qb::prompt_slice({11, 22, 33}, 8) ==
+                           std::vector<ninfer::TokenId>({11, 22, 33, 11, 22, 33, 11, 22}),
+                       "long prompts tile the deterministic corpus");
     failures += expect_u32(qb::decode_graph_prime_output_tokens(5), 13, "MTP graph-prime outputs");
     failures +=
         expect_u32(qb::decode_graph_prime_required_context(5), 23, "MTP graph-prime context");

@@ -122,7 +122,7 @@ __global__ void gqa_kv_inverse_rotate_output_kernel(__nv_bfloat16* output, int w
 }
 
 __device__ __forceinline__ void gqa_kv_unpack_i4x16(const std::uint8_t* src8,
-                                                    std::int8_t* dst16) {
+                                                     std::int8_t* dst16) {
     const std::uint64_t raw = load_vec<std::uint64_t>(src8);
     const auto* bytes       = reinterpret_cast<const std::uint8_t*>(&raw);
 #pragma unroll
@@ -130,6 +130,27 @@ __device__ __forceinline__ void gqa_kv_unpack_i4x16(const std::uint8_t* src8,
         dst16[2 * i]     = gqa_kv_unpack_i4(bytes[i], 0);
         dst16[2 * i + 1] = gqa_kv_unpack_i4(bytes[i], 1);
     }
+}
+
+// RK4V4-E8 decode consumes K4 and V4 together, so keep its hot unpack path entirely in packed
+// 32-bit arithmetic. __vsub4 performs four independent byte subtractions; unlike scalar integer
+// subtraction it cannot propagate a borrow between neighboring signed i4 codes.
+__device__ __forceinline__ void gqa_kv_unpack_i4x16_vectorized(const std::uint8_t* src8,
+                                                               std::int8_t* dst16) {
+    constexpr unsigned kNibbles = 0x0f0f0f0fu;
+    constexpr unsigned kSigns   = 0x08080808u;
+    const uint2 raw             = load_vec<uint2>(src8);
+    const auto unpack8          = [](unsigned packed, unsigned& first, unsigned& second) {
+        const unsigned lo = __vsub4((packed & kNibbles) ^ kSigns, kSigns);
+        const unsigned hi = __vsub4(((packed >> 4) & kNibbles) ^ kSigns, kSigns);
+        first             = __byte_perm(lo, hi, 0x5140);
+        second            = __byte_perm(lo, hi, 0x7362);
+    };
+    unsigned d0, d1, d2, d3;
+    unpack8(raw.x, d0, d1);
+    unpack8(raw.y, d2, d3);
+    store_vec(dst16, make_int4(static_cast<int>(d0), static_cast<int>(d1), static_cast<int>(d2),
+                               static_cast<int>(d3)));
 }
 
 // Dequantize 8 consecutive int8 codes (dims [d, d+8), aligned to a multiple of 8

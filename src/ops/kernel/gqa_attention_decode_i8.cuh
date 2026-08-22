@@ -438,10 +438,21 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     const std::int64_t koff = gqa_kv_i4_code_index<Geometry>(
                         physical_page, kv_head, d / 2, key & kPagedKVPageMask);
                     std::int8_t* dst = &k_i8[key_l * D + gqa_small_t_tc_swz(key_l, dc * 8) * 2];
-                    gqa_kv_unpack_i4x16(&reinterpret_cast<const std::uint8_t*>(cache_k_i8)[koff], dst);
+                    if constexpr (E8Lattice) {
+                        gqa_kv_unpack_i4x16_vectorized(
+                            &reinterpret_cast<const std::uint8_t*>(cache_k_i8)[koff], dst);
+                    } else {
+                        gqa_kv_unpack_i4x16(
+                            &reinterpret_cast<const std::uint8_t*>(cache_k_i8)[koff], dst);
+                    }
                     const std::int64_t voff = gqa_kv_i4_code_index<Geometry>(
                         physical_page, kv_head, d / 2, key & kPagedKVPageMask);
-                    gqa_kv_unpack_i4x16(&cache_v_codes[voff], &v_i8[key_l * D + d]);
+                    if constexpr (E8Lattice) {
+                        gqa_kv_unpack_i4x16_vectorized(&cache_v_codes[voff],
+                                                       &v_i8[key_l * D + d]);
+                    } else {
+                        gqa_kv_unpack_i4x16(&cache_v_codes[voff], &v_i8[key_l * D + d]);
+                    }
                 } else {
                     const std::int64_t off = gqa_kv_quant_code_index<Geometry>(
                         physical_page, kv_head, d, key & kPagedKVPageMask);

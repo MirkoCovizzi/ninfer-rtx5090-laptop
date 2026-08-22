@@ -39,7 +39,7 @@ constexpr double kRtx5090DramGBs    = 1792.0;
 
 enum class Entry : std::uint8_t { Append, Cached, Both };
 enum class GeometryChoice : std::uint8_t { H24Kv4, H16Kv2, All };
-enum class KvChoice : std::uint8_t { Bf16, Int8, All };
+enum class KvChoice : std::uint8_t { Bf16, Int8, RK4V4E8, All };
 enum class Execution : std::uint8_t { Eager, Graph, Both };
 enum class CacheMode : std::uint8_t { Cold, Warm, Both };
 enum class CacheState : std::uint8_t { Cold, Warm };
@@ -51,8 +51,21 @@ struct Geometry {
     std::int32_t kv_heads;
 };
 
+struct KvProfile {
+    const char* name;
+    DType dtype;
+    bool packed_v;
+    bool rotate_k;
+    bool rotate_v;
+    bool packed_k;
+    bool e8_lattice;
+};
+
 constexpr Geometry kH24Kv4{"d256-h24-kv4", 24, 4};
 constexpr Geometry kH16Kv2{"d256-h16-kv2", 16, 2};
+constexpr KvProfile kKvBf16{"bf16", DType::BF16, false, false, false, false, false};
+constexpr KvProfile kKvInt8{"int8", DType::I8, false, false, false, false, false};
+constexpr KvProfile kKvRK4V4E8{"rk4v4-e8", DType::I8, true, true, true, true, true};
 
 struct Options {
     Entry entry             = Entry::Both;
@@ -76,7 +89,7 @@ struct Options {
 struct Result {
     Entry entry;
     Geometry geometry;
-    DType kv_dtype;
+    KvProfile kv;
     Execution execution;
     CacheState cache;
     PageMapping mapping;
@@ -97,7 +110,7 @@ struct Result {
                  "usage: ninfer_causal_softmax_attention_bench "
                  "[--entry append|cached|both] "
                  "[--geometry d256-h24-kv4|d256-h16-kv2|all] "
-                 "[--kv-dtype bf16|int8|all] [--batch B,...] [--tokens W,...] "
+                 "[--kv-dtype bf16|int8|rk4v4-e8|all] [--batch B,...] [--tokens W,...] "
                  "[--context L,...] [--row-contexts L0,...] [--valid-columns V0,...] "
                  "[--table-rows R0,...] "
                  "[--execution eager|graph|both] [--cache cold|warm|both] "
@@ -170,10 +183,12 @@ Options parse_options(int argc, char** argv) {
                 options.kv = KvChoice::Bf16;
             else if (value == "int8")
                 options.kv = KvChoice::Int8;
+            else if (value == "rk4v4-e8")
+                options.kv = KvChoice::RK4V4E8;
             else if (value == "all")
                 options.kv = KvChoice::All;
             else
-                usage("--kv-dtype expects bf16, int8, or all");
+                usage("--kv-dtype expects bf16, int8, rk4v4-e8, or all");
         } else if (argument == "--tokens") {
             options.tokens = parse_list(next("--tokens requires a value"), 1, 262144, "--tokens");
         } else if (argument == "--batch") {
@@ -291,9 +306,11 @@ Options parse_options(int argc, char** argv) {
 
 std::int32_t align_context(std::int32_t visible) { return ((visible + 127) / 128) * 128; }
 
-std::size_t cache_plane_bytes(const Geometry& geometry, DType dtype, std::int32_t physical_pages) {
+std::size_t cache_plane_bytes(const Geometry& geometry, const KvProfile& kv,
+                              std::int32_t physical_pages, bool key) {
+    const bool packed = key ? kv.packed_k : kv.packed_v;
     return static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * kPagedKVPageSize *
-           physical_pages * dtype_size(dtype);
+           physical_pages * dtype_size(kv.dtype) / (packed ? 2 : 1);
 }
 
 std::size_t scale_plane_bytes(const Geometry& geometry, std::int32_t physical_pages) {
@@ -303,17 +320,20 @@ std::size_t scale_plane_bytes(const Geometry& geometry, std::int32_t physical_pa
 
 PagedKVLayerView make_cache_view(DeviceBuffer& k, DeviceBuffer& v, DeviceBuffer& k_scale,
                                  DeviceBuffer& v_scale, DeviceBuffer& block_table,
-                                 const Geometry& geometry, DType dtype, std::int32_t padded) {
-    const bool quantized              = dtype == DType::I8;
+                                 const Geometry& geometry, const KvProfile& kv,
+                                 std::int32_t padded) {
+    const bool quantized              = kv.dtype == DType::I8;
     const std::int32_t logical_pages  = padded / kPagedKVPageSize;
+    const std::int32_t k_dim          = kv.packed_k ? kHeadDim / 2 : kHeadDim;
+    const std::int32_t v_dim          = kv.packed_v ? kHeadDim / 2 : kHeadDim;
     const std::int32_t physical_pages = static_cast<std::int32_t>(
-        k.bytes / (static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * kPagedKVPageSize *
-                   dtype_size(dtype)));
+        k.bytes / (static_cast<std::size_t>(k_dim) * geometry.kv_heads * kPagedKVPageSize *
+                   dtype_size(kv.packed_k ? DType::U8 : kv.dtype)));
     return {
-        .k_pages =
-            Tensor(k.p, dtype, {kHeadDim, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
-        .v_pages =
-            Tensor(v.p, dtype, {kHeadDim, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .k_pages = Tensor(k.p, kv.packed_k ? DType::U8 : kv.dtype,
+                          {k_dim, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .v_pages = Tensor(v.p, kv.packed_v ? DType::U8 : kv.dtype,
+                          {v_dim, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
         .k_scale_pages = quantized ? Tensor(k_scale.p, DType::FP16,
                                             {kHeadDim / kKvGroup, kPagedKVPageSize,
                                              geometry.kv_heads, physical_pages})
@@ -325,8 +345,13 @@ PagedKVLayerView make_cache_view(DeviceBuffer& k, DeviceBuffer& v, DeviceBuffer&
         .block_table   = Tensor(block_table.p, DType::I32, {logical_pages}),
         .head_dim      = kHeadDim,
         .num_kv_heads  = geometry.kv_heads,
-        .dtype         = dtype,
+        .dtype         = kv.dtype,
         .quant_group   = quantized ? kKvGroup : 0,
+        .packed_v      = kv.packed_v,
+        .rotate_k      = kv.rotate_k,
+        .rotate_v      = kv.rotate_v,
+        .packed_k      = kv.packed_k,
+        .e8_lattice    = kv.e8_lattice,
     };
 }
 
@@ -341,15 +366,20 @@ PagedKVBatchLayerView make_batch_cache_view(const PagedKVLayerView& cache) {
         .num_kv_heads  = cache.num_kv_heads,
         .dtype         = cache.dtype,
         .quant_group   = cache.quant_group,
+        .packed_v      = cache.packed_v,
+        .rotate_k      = cache.rotate_k,
+        .rotate_v      = cache.rotate_v,
+        .packed_k      = cache.packed_k,
+        .e8_lattice    = cache.e8_lattice,
     };
 }
 
 PagedKVBatchLayerView make_batch_cache_view(DeviceBuffer& k, DeviceBuffer& v, DeviceBuffer& k_scale,
                                             DeviceBuffer& v_scale, DeviceBuffer& block_tables,
-                                            const Geometry& geometry, DType dtype,
+                                            const Geometry& geometry, const KvProfile& kv,
                                             std::int32_t padded, std::int32_t table_rows) {
     const PagedKVLayerView direct =
-        make_cache_view(k, v, k_scale, v_scale, block_tables, geometry, dtype, padded);
+        make_cache_view(k, v, k_scale, v_scale, block_tables, geometry, kv, padded);
     PagedKVBatchLayerView result = make_batch_cache_view(direct);
     result.block_tables =
         Tensor(block_tables.p, DType::I32, {padded / kPagedKVPageSize, table_rows});
@@ -375,11 +405,12 @@ std::int32_t profile_visible(std::span<const std::int32_t> contexts,
 
 class Case {
 public:
-    Case(Geometry geometry, DType dtype, std::int32_t tokens,
+    Case(Geometry geometry, KvProfile kv, std::int32_t tokens,
          std::span<const std::int32_t> contexts, std::span<const std::int32_t> valid_columns,
-         std::span<const std::int32_t> table_rows, PageMapping mapping)
+         std::span<const std::int32_t> table_rows, PageMapping mapping, bool force_masked)
         : batch_(static_cast<std::int32_t>(contexts.size())),
-          masked_(std::any_of(valid_columns.begin(), valid_columns.end(),
+          masked_(force_masked ||
+                  std::any_of(valid_columns.begin(), valid_columns.end(),
                               [tokens](std::int32_t valid) { return valid != tokens; })),
           visible_(profile_visible(contexts, valid_columns)), padded_(align_context(visible_)),
           mapping_(mapping), logical_pages_(padded_ / kPagedKVPageSize),
@@ -394,16 +425,19 @@ public:
           positions_(static_cast<std::size_t>(tokens) * batch_ * sizeof(std::int32_t)),
           valid_columns_(static_cast<std::size_t>(batch_) * sizeof(std::int32_t)),
           table_rows_(static_cast<std::size_t>(batch_) * sizeof(std::int32_t)),
-          cache_k_(bench::make_zeros(cache_plane_bytes(geometry, dtype, physical_pages_))),
-          cache_v_(bench::make_zeros(cache_plane_bytes(geometry, dtype, physical_pages_))),
-          cache_k_scale_(bench::make_zeros(
-              dtype == DType::I8 ? scale_plane_bytes(geometry, physical_pages_) : std::size_t{1})),
-          cache_v_scale_(bench::make_zeros(
-              dtype == DType::I8 ? scale_plane_bytes(geometry, physical_pages_) : std::size_t{1})),
+          cache_k_(bench::make_zeros(cache_plane_bytes(geometry, kv, physical_pages_, true))),
+          cache_v_(bench::make_zeros(cache_plane_bytes(geometry, kv, physical_pages_, false))),
+          cache_k_scale_(bench::make_zeros(kv.dtype == DType::I8
+                                               ? scale_plane_bytes(geometry, physical_pages_)
+                                               : std::size_t{1})),
+          cache_v_scale_(bench::make_zeros(kv.dtype == DType::I8
+                                               ? scale_plane_bytes(geometry, physical_pages_)
+                                               : std::size_t{1})),
           block_table_(static_cast<std::size_t>(logical_pages_) * batch_ * sizeof(std::int32_t)),
           output_(bench::make_zeros(static_cast<std::size_t>(kHeadDim) * geometry.query_heads *
                                     tokens * batch_ * 2)),
-          workspace_bytes_(workspace_capacity(geometry, dtype, tokens, batch_, visible_, masked_)),
+          workspace_bytes_(
+              workspace_capacity(geometry, kv.dtype, tokens, batch_, visible_, masked_)),
           workspace_(std::max<std::size_t>(workspace_bytes_, 1)),
           q_tensor_(q_.p, DType::BF16, {kHeadDim, geometry.query_heads, tokens, batch_}),
           k_tensor_(k_.p, DType::BF16, {kHeadDim, geometry.kv_heads, tokens, batch_}),
@@ -413,9 +447,9 @@ public:
           table_rows_tensor_(table_rows_.p, DType::I32, {batch_}),
           output_tensor_(output_.p, DType::BF16, {kHeadDim, geometry.query_heads, tokens, batch_}),
           cache_view_(make_cache_view(cache_k_, cache_v_, cache_k_scale_, cache_v_scale_,
-                                      block_table_, geometry, dtype, padded_)),
+                                      block_table_, geometry, kv, padded_)),
           batch_cache_view_(make_batch_cache_view(cache_k_, cache_v_, cache_k_scale_,
-                                                  cache_v_scale_, block_table_, geometry, dtype,
+                                                  cache_v_scale_, block_table_, geometry, kv,
                                                   padded_, batch_)),
           envelope_{static_cast<std::uint32_t>(visible_), static_cast<std::uint32_t>(visible_)} {
         std::vector<std::int32_t> host_positions(static_cast<std::size_t>(tokens) * batch_, 0);
@@ -499,8 +533,6 @@ private:
 
 const char* entry_name(Entry entry) { return entry == Entry::Append ? "append" : "cached"; }
 
-const char* dtype_name(DType dtype) { return dtype == DType::BF16 ? "bf16" : "int8"; }
-
 const char* execution_name(Execution execution) {
     return execution == Execution::Eager ? "eager" : "graph";
 }
@@ -520,11 +552,13 @@ std::string profile_name(std::span<const std::int32_t> values) {
     return result;
 }
 
-double cache_vector_bytes(DType dtype) {
-    return dtype == DType::BF16
-               ? static_cast<double>(kHeadDim * dtype_size(DType::BF16))
-               : static_cast<double>(kHeadDim * dtype_size(DType::I8) +
-                                     (kHeadDim / kKvGroup) * dtype_size(DType::FP16));
+double cache_vector_bytes(const KvProfile& kv) {
+    if (kv.dtype == DType::BF16) {
+        return static_cast<double>(kHeadDim * dtype_size(DType::BF16));
+    }
+    const int divisor = kv.packed_k ? 2 : 1;
+    return static_cast<double>(kHeadDim * dtype_size(DType::I8) / divisor +
+                               (kHeadDim / kKvGroup) * dtype_size(DType::FP16));
 }
 
 double causal_key_sum(std::int32_t tokens, std::int32_t context) {
@@ -541,7 +575,7 @@ double causal_key_sum(std::span<const std::int32_t> contexts,
     return total;
 }
 
-double logical_bytes(Entry entry, const Geometry& geometry, DType dtype,
+double logical_bytes(Entry entry, const Geometry& geometry, const KvProfile& kv,
                      std::span<const std::int32_t> contexts,
                      std::span<const std::int32_t> valid_columns) {
     std::int64_t valid_token_count = 0;
@@ -549,10 +583,10 @@ double logical_bytes(Entry entry, const Geometry& geometry, DType dtype,
     const double valid_tokens = static_cast<double>(valid_token_count);
     const double q_and_output = 2.0 * kHeadDim * geometry.query_heads * valid_tokens * 2.0;
     const double cache_reads  = causal_key_sum(contexts, valid_columns) * geometry.kv_heads * 2.0 *
-                               cache_vector_bytes(dtype);
+                                cache_vector_bytes(kv);
     if (entry == Entry::Cached) { return q_and_output + cache_reads; }
     const double input_kv     = 2.0 * kHeadDim * geometry.kv_heads * valid_tokens * 2.0;
-    const double cache_writes = 2.0 * geometry.kv_heads * valid_tokens * cache_vector_bytes(dtype);
+    const double cache_writes = 2.0 * geometry.kv_heads * valid_tokens * cache_vector_bytes(kv);
     return q_and_output + cache_reads + input_kv + cache_writes;
 }
 
@@ -583,7 +617,7 @@ void report(const Result& result) {
                 "B=%d W=%d contexts=%s valid=%s rows=%s "
                 "workspace=%9zu median=%10.3f us min=%10.3f us p95=%10.3f us "
                 "logical=%8.1f GB/s (%5.1f%% of %.0f) math=%7.2f TFLOP/s (%5.1f%% of %.1f)\n",
-                entry_name(result.entry), result.geometry.name, dtype_name(result.kv_dtype),
+                entry_name(result.entry), result.geometry.name, result.kv.name,
                 mapping_name(result.mapping), execution_name(result.execution),
                 cache_name(result.cache), result.batch, result.tokens, result.row_contexts.c_str(),
                 result.valid_columns.c_str(), result.table_rows.c_str(), result.workspace_bytes,
@@ -603,7 +637,7 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
               "useful_flops,median_us,min_us,p95_us\n";
     for (const Result& result : results) {
         output << entry_name(result.entry) << ',' << result.geometry.name << ','
-               << dtype_name(result.kv_dtype) << ',' << mapping_name(result.mapping) << ','
+               << result.kv.name << ',' << mapping_name(result.mapping) << ','
                << execution_name(result.execution) << ',' << cache_name(result.cache) << ','
                << result.batch << ',' << result.tokens << ',' << result.row_contexts << ','
                << result.valid_columns << ',' << result.table_rows << ',' << result.workspace_bytes
@@ -613,7 +647,8 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
     }
 }
 
-void profile(Case& data, Entry entry, const Geometry& geometry, DType dtype, const Options& options,
+void profile(Case& data, Entry entry, const Geometry& geometry, const KvProfile& kv,
+             const Options& options,
              std::int32_t batch, std::int32_t width, std::string_view contexts,
              std::string_view valid_columns, std::string_view table_rows, DeviceBuffer& flush,
              cudaStream_t stream) {
@@ -637,7 +672,7 @@ void profile(Case& data, Entry entry, const Geometry& geometry, DType dtype, con
     std::printf(
         "PROFILE entry=%s geometry=%s kv=%s mapping=%s dispatch=public execution=%s cache=%s "
         "B=%d W=%d contexts=%.*s valid=%.*s rows=%.*s\n",
-        entry_name(entry), geometry.name, dtype_name(dtype), mapping_name(options.mapping),
+        entry_name(entry), geometry.name, kv.name, mapping_name(options.mapping),
         execution_name(execution), cache_name(cache), batch, width,
         static_cast<int>(contexts.size()), contexts.data(), static_cast<int>(valid_columns.size()),
         valid_columns.data(), static_cast<int>(table_rows.size()), table_rows.data());
@@ -657,10 +692,11 @@ std::vector<Geometry> selected_geometries(GeometryChoice choice) {
     return {kH24Kv4, kH16Kv2};
 }
 
-std::vector<DType> selected_dtypes(KvChoice choice) {
-    if (choice == KvChoice::Bf16) { return {DType::BF16}; }
-    if (choice == KvChoice::Int8) { return {DType::I8}; }
-    return {DType::BF16, DType::I8};
+std::vector<KvProfile> selected_profiles(KvChoice choice) {
+    if (choice == KvChoice::Bf16) { return {kKvBf16}; }
+    if (choice == KvChoice::Int8) { return {kKvInt8}; }
+    if (choice == KvChoice::RK4V4E8) { return {kKvRK4V4E8}; }
+    return {kKvBf16, kKvInt8, kKvRK4V4E8};
 }
 
 struct RowProfile {
@@ -712,23 +748,23 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
         DeviceBuffer flush(kFlushBytes);
         const std::vector<Geometry> geometries = selected_geometries(options.geometry);
-        const std::vector<DType> dtypes        = selected_dtypes(options.kv);
+        const std::vector<KvProfile> profiles = selected_profiles(options.kv);
 
         if (options.profile) {
             const Entry entry        = options.entry;
             const Geometry geometry  = geometries.front();
-            const DType dtype        = dtypes.front();
+            const KvProfile kv       = profiles.front();
             const std::int32_t batch = options.batches.front();
             const std::int32_t width = options.tokens.front();
             const std::int32_t context =
                 options.row_contexts.empty() ? options.contexts.front() : 0;
             const RowProfile rows = make_row_profile(options, batch, width, context);
-            Case data(geometry, dtype, width, rows.contexts, rows.valid_columns, rows.table_rows,
-                      options.mapping);
+            Case data(geometry, kv, width, rows.contexts, rows.valid_columns, rows.table_rows,
+                      options.mapping, !options.valid_columns.empty());
             const std::string context_name = profile_name(rows.contexts);
             const std::string valid_name   = profile_name(rows.valid_columns);
             const std::string table_name   = profile_name(rows.table_rows);
-            profile(data, entry, geometry, dtype, options, batch, width, context_name, valid_name,
+            profile(data, entry, geometry, kv, options, batch, width, context_name, valid_name,
                     table_name, flush, stream);
             CUDA_CHECK(cudaStreamDestroy(stream));
             return 0;
@@ -738,14 +774,15 @@ int main(int argc, char** argv) {
         const std::vector<std::int32_t> context_profiles =
             options.row_contexts.empty() ? options.contexts : std::vector<std::int32_t>{0};
         for (const Geometry& geometry : geometries) {
-            for (const DType dtype : dtypes) {
+            for (const KvProfile kv : profiles) {
                 for (const std::int32_t batch : options.batches) {
                     for (const std::int32_t context : context_profiles) {
                         for (const std::int32_t tokens : options.tokens) {
                             const RowProfile rows =
                                 make_row_profile(options, batch, tokens, context);
-                            Case data(geometry, dtype, tokens, rows.contexts, rows.valid_columns,
-                                      rows.table_rows, options.mapping);
+                            Case data(geometry, kv, tokens, rows.contexts, rows.valid_columns,
+                                      rows.table_rows, options.mapping,
+                                      !options.valid_columns.empty());
                             for (const Entry entry : {Entry::Append, Entry::Cached}) {
                                 if ((options.entry == Entry::Append && entry != Entry::Append) ||
                                     (options.entry == Entry::Cached && entry != Entry::Cached) ||
@@ -779,7 +816,7 @@ int main(int argc, char** argv) {
                                         Result result{
                                             entry,
                                             geometry,
-                                            dtype,
+                                            kv,
                                             execution,
                                             cache,
                                             options.mapping,
@@ -789,7 +826,7 @@ int main(int argc, char** argv) {
                                             profile_name(rows.valid_columns),
                                             profile_name(rows.table_rows),
                                             data.workspace_bytes(),
-                                            logical_bytes(entry, geometry, dtype, rows.contexts,
+                                            logical_bytes(entry, geometry, kv, rows.contexts,
                                                           rows.valid_columns),
                                             useful_flops(geometry, rows.contexts,
                                                          rows.valid_columns),
