@@ -44,5 +44,10 @@ tools/freq_corpus/fixtures/*
 profiles/
 .chatgpt/
 
+# Local development directories
+models/
+scripts/
+worktrees/
+
 # Claude Code personal/local settings (may contain API tokens)
 .claude/settings.local.json
