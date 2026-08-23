@@ -27,9 +27,10 @@ struct RouteSpec {
     Bf16GdnGatingScheduleId schedule;
 };
 
-constexpr std::array<RouteSpec, 6> k27Routes{{
-    {{1, 1}, Bf16GdnGatingScheduleId::GemvPairedRows},
-    {{2, 8}, Bf16GdnGatingScheduleId::SmallTSplit10},
+constexpr std::array<RouteSpec, 5> k27Routes{{
+    // Decode and speculative verification share one reduction profile so observable FP32 decay
+    // and update controls do not depend on the physical verification width.
+    {{1, 8}, Bf16GdnGatingScheduleId::SmallTSplit10},
     // As token tiles double, halve SplitK. This keeps the cooperative grid near 192 CTAs instead
     // of making T a launch limit. Once the unsplit grid has enough independent work, it also
     // removes the cooperative-residency constraint.
@@ -166,7 +167,7 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
         case Bf16GdnGatingScheduleId::GemvPairedRows:
             return problem.cols == 1;
         case Bf16GdnGatingScheduleId::SmallTSplit10:
-            return problem.cols >= 2 && problem.cols <= 8;
+            return problem.cols >= 1 && problem.cols <= 8;
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:

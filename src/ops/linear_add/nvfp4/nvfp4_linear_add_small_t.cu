@@ -51,8 +51,13 @@ constexpr auto kResidual17408Launchers = make_launchers<Nvfp4Residual17408Geomet
 
 void nvfp4_linear_add_small_t_launch(const Tensor& x, const Weight& weight, Tensor& residual,
                                      cudaStream_t stream) {
+    const Nvfp4Problem problem = resolve_nvfp4_problem(weight.n, weight.k);
+    if (x.ne[1] == 1 && problem == Nvfp4Problem::Residual6144) {
+        launch_exact<Nvfp4Residual6144Geometry, 1>(x, weight, residual, stream);
+        return;
+    }
     const std::size_t index = static_cast<std::size_t>(x.ne[1] - kNvfp4FirstSmallT);
-    switch (resolve_nvfp4_problem(weight.n, weight.k)) {
+    switch (problem) {
     case Nvfp4Problem::Residual6144:
         kResidual6144Launchers[index](x, weight, residual, stream);
         return;

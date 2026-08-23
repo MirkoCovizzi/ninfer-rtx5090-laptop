@@ -82,19 +82,21 @@ std::int32_t gqa_small_t_launch_capacity(GqaExecutionEnvelope envelope, std::int
     return capacity;
 }
 
-template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bool Masked,
-          typename CacheInput>
+template <typename Geometry, bool MultiBatch, bool Masked, typename CacheInput>
 void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
                             PagedKVBatchLayerView cache, const GqaSmallTInvocation& invocation,
                             std::int32_t logical_capacity, std::int32_t splits, Tensor& partial_acc,
                             Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
-    constexpr int kBlock = 32 * WarpsPerCta;
-    const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
+    constexpr int kTokenTile   = 1;
+    constexpr int kWarpsPerCta = 2;
+    constexpr int kBlock       = 32 * kWarpsPerCta;
+    const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size * invocation.width);
     Tensor& cache_k = cache.k_pages;
     Tensor& cache_v = cache.v_pages;
     // bf16 kernel uses only static smem (no dynamic staging).
-    gqa_attention_small_t_tc_partial_bf16_kernel<Geometry, TokenTile, WarpsPerCta, MultiBatch,
-                                                 Masked, CacheInput><<<grid, kBlock, 0, stream>>>(
+    gqa_attention_small_t_tc_partial_bf16_kernel<Geometry, kTokenTile, kWarpsPerCta, MultiBatch,
+                                                 Masked, true, CacheInput>
+        <<<grid, kBlock, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(q.data), input,
         static_cast<const std::int32_t*>(pos.data), static_cast<__nv_bfloat16*>(cache_k.data),
         static_cast<__nv_bfloat16*>(cache_v.data),
@@ -148,7 +150,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                     ? nullptr
                     : static_cast<const std::int32_t*>(invocation.table_rows->data),
                 cache.block_tables.ne[0], invocation.full_width, invocation.column_begin,
-                logical_capacity, scale, static_cast<__nv_bfloat16*>(partial_acc.data),
+                logical_capacity, scale, static_cast<float*>(partial_acc.data),
                 static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
     };
     if constexpr (TokenTile == 6) {
@@ -244,9 +246,9 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
     const auto splits =
         gqa_small_t_launch_capacity<Geometry>(envelope, invocation.width, cache.dtype);
 
-    // BF16 keeps its row-tile warp count; INT8 selects its producer/consumer
-    // geometry inside launch_tc_partial_i8.
-#define NINFER_GQA_SMALL_T_DISPATCH(TOKENS, WARPS)                                                 \
+    // BF16 uses its fixed canonical-column geometry; INT8 selects a token-specialized
+    // producer/consumer geometry inside launch_tc_partial_i8.
+#define NINFER_GQA_SMALL_T_DISPATCH(TOKENS)                                                        \
     do {                                                                                           \
         const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {                          \
             if (cache.dtype == DType::I8) {                                                        \
@@ -254,7 +256,7 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
             } else {                                                                               \
-                launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked>(           \
+                launch_tc_partial_bf16<Geometry, MultiBatch, Masked>(                              \
                     q, input, pos, scale, cache, invocation, logical_capacity, splits,             \
                     partial_acc, partial_m, partial_l, stream);                                    \
             }                                                                                      \
@@ -275,22 +277,22 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
 
     switch (invocation.width) {
     case 1:
-        NINFER_GQA_SMALL_T_DISPATCH(1, 2);
+        NINFER_GQA_SMALL_T_DISPATCH(1);
         break;
     case 2:
-        NINFER_GQA_SMALL_T_DISPATCH(2, 4);
+        NINFER_GQA_SMALL_T_DISPATCH(2);
         break;
     case 3:
-        NINFER_GQA_SMALL_T_DISPATCH(3, 4);
+        NINFER_GQA_SMALL_T_DISPATCH(3);
         break;
     case 4:
-        NINFER_GQA_SMALL_T_DISPATCH(4, 4);
+        NINFER_GQA_SMALL_T_DISPATCH(4);
         break;
     case 5:
-        NINFER_GQA_SMALL_T_DISPATCH(5, 4);
+        NINFER_GQA_SMALL_T_DISPATCH(5);
         break;
     case 6:
-        NINFER_GQA_SMALL_T_DISPATCH(6, 4);
+        NINFER_GQA_SMALL_T_DISPATCH(6);
         break;
     default:
         throw std::invalid_argument("gqa_attention_small_t_launch: unsupported T");
@@ -305,7 +307,7 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
         gqa_attention_small_t_reduce_output_kernel<Geometry, kDChunk, Int8, MultiBatch, Masked,
                                                    Offset>
             <<<reduce_grid, kReduceBlock, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(partial_acc.data),
+                partial_acc.data,
                 static_cast<const float*>(partial_m.data),
                 static_cast<const float*>(partial_l.data),
                 static_cast<const std::int32_t*>(pos.data),

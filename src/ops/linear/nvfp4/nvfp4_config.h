@@ -188,17 +188,16 @@ struct Nvfp4LinearSmallTProductionSchedule {
                             Nvfp4SmallTBlockOrder::RowsContiguous, 1>;
 };
 
-// G1's wider N benefits from keeping four warps per CTA throughout the A16 policy boundary. Only
-// T=2 amortizes activation traffic enough for shared staging to win.
+// G1's wider N benefits from keeping four warps per CTA throughout the A16 policy boundary. Decode
+// and every supported speculative width share the token-packed reduction profile so fused
+// projection/convolution results do not depend on the physical verification width.
 template <int ActiveTokens>
 struct Nvfp4LinearSmallTProductionSchedule<Nvfp4GdnInputGeometry, ActiveTokens> {
-    static_assert(ActiveTokens >= kNvfp4FirstSmallT);
+    static_assert(ActiveTokens >= 1);
     static_assert(ActiveTokens <= kNvfp4LastSmallT);
     static constexpr int kWarpsPerCta       = 4;
     static constexpr int kValuesPerLane     = ActiveTokens >= 17 && ActiveTokens <= 20 ? 8 : 16;
-    static constexpr auto kActivationAccess = ActiveTokens == 2
-                                                  ? Nvfp4SmallTActivationAccess::SharedPhase
-                                                  : Nvfp4SmallTActivationAccess::TokenPacked;
+    static constexpr auto kActivationAccess = Nvfp4SmallTActivationAccess::TokenPacked;
     using Type =
         Nvfp4SmallTSchedule<kWarpsPerCta, 1, 2, kValuesPerLane, ActiveTokens, 1, kActivationAccess,
                             Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
@@ -209,7 +208,7 @@ struct Nvfp4LinearSmallTProductionSchedule<Nvfp4GdnInputGeometry, ActiveTokens> 
 // A16-only tail keeps the established generic schedule.
 template <int ActiveTokens>
 struct Nvfp4LinearSmallTProductionSchedule<Nvfp4Residual6144Geometry, ActiveTokens> {
-    static_assert(ActiveTokens >= kNvfp4FirstSmallT);
+    static_assert(ActiveTokens >= 1);
     static_assert(ActiveTokens <= kNvfp4LastSmallT);
     static constexpr int kWarpsPerCta   = ActiveTokens <= 16 ? (ActiveTokens >= 14 ? 16 : 4) : 4;
     static constexpr int kValuesPerLane = ActiveTokens >= 17 && ActiveTokens <= 20 ? 8 : 16;

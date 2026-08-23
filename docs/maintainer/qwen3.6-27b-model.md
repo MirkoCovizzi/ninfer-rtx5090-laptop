@@ -299,6 +299,14 @@ sampling mode, proposal and target probabilities use the same processed distribu
 accept/reject correction preserves the target distribution. A bad draft therefore reduces
 acceptance and throughput; it must not change the distribution of emitted target tokens.
 
+The greedy product contract is stronger than distributional equivalence. For one fixed artifact,
+prepared prompt, KV-cache dtype, and otherwise identical Engine and request configuration, MTP-off
+and MTP draft windows `1..5` must publish exactly the same committed token IDs. Draft-window and
+proposal-head choices may change acceptance and execution work only. The contract does not require
+bit-identical target logits or private intermediates and does not compare different artifacts or KV
+dtypes. Stochastic execution preserves the processed target distribution but need not reproduce the
+same token IDs for a fixed seed because its RNG consumption may differ.
+
 Target verification writes candidate KV into provisioned but unpublished extents, reads each
 lane's current GDN checkpoint, and produces Program-owned ReplaySSM records without modifying any
 persistent GDN state. After the final per-row output prefix is known, one all-layer Fold replays

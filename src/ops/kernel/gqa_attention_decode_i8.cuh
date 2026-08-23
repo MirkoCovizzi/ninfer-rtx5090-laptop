@@ -63,7 +63,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         const std::int32_t* block_tables, const std::int32_t* valid_columns,
         const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t full_width,
         std::int32_t column_begin, std::int32_t logical_capacity, float scale,
-        __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
+        float* partial_acc, float* partial_m, float* partial_l) {
     constexpr int Wc                   = WarpsPerCta;
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
     constexpr int RowTiles             = (RowCount + 15) / 16;
@@ -164,7 +164,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             gqa_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
             if (gqa_valid_q_head<Geometry>(kv_head, q_head)) {
                 partial_acc[gqa_partial_acc_index<Geometry>(q_head, d, token, split, TokenTile)] =
-                    __float2bfloat16(0.0f);
+                    0.0f;
             }
         }
     };
@@ -592,7 +592,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             gqa_small_t_tc_row_to_qt<Geometry>(row0, TokenTile, kv_head, q_head, token);
             const std::int64_t dst =
                 gqa_partial_acc_index<Geometry>(q_head, d0, token, split, TokenTile);
-            *reinterpret_cast<unsigned*>(&partial_acc[dst]) = pack_bf16x2(acc[n][0], acc[n][1]);
+            partial_acc[dst]     = acc[n][0];
+            partial_acc[dst + 1] = acc[n][1];
         }
         if (row1 < RowCount) {
             int q_head = 0;
@@ -600,7 +601,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             gqa_small_t_tc_row_to_qt<Geometry>(row1, TokenTile, kv_head, q_head, token);
             const std::int64_t dst =
                 gqa_partial_acc_index<Geometry>(q_head, d0, token, split, TokenTile);
-            *reinterpret_cast<unsigned*>(&partial_acc[dst]) = pack_bf16x2(acc[n][2], acc[n][3]);
+            partial_acc[dst]     = acc[n][2];
+            partial_acc[dst + 1] = acc[n][3];
         }
     }
 }

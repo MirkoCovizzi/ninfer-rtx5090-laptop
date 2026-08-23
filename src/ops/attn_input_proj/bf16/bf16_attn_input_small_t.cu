@@ -48,7 +48,7 @@ struct Bf16AttentionInputSmallTOutput {
 
 template <int ActiveTokens>
 struct Bf16AttentionSmallTProductionSchedule {
-    static_assert(ActiveTokens >= 2 && ActiveTokens <= 32);
+    static_assert(ActiveTokens >= 1 && ActiveTokens <= 32);
     // The Attention epilogue is measured separately from Linear, so it owns its exact-T winner
     // mapping while sharing the Linear computation body.
     static constexpr int kRowsPerWarp = ActiveTokens <= 4 ? 8 : (ActiveTokens <= 8 ? 4 : 2);
@@ -104,7 +104,7 @@ constexpr auto kLaunchers = make_launchers(
 void bf16_attn_input_small_t_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                                     Tensor& k, Tensor& v, cudaStream_t stream) {
     if (x.ne[1] < kBf16AttnInputSmallTMinTokens || x.ne[1] > kBf16AttnInputSmallTMaxTokens) {
-        throw std::invalid_argument("bf16 attn_input_proj small-T requires T in [2,32]");
+        throw std::invalid_argument("bf16 attn_input_proj small-T requires T in [1,32]");
     }
     kLaunchers[x.ne[1] - kBf16AttnInputSmallTMinTokens](x, weight, q, gate, k, v, stream);
 }

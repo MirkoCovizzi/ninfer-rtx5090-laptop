@@ -900,8 +900,8 @@ std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
             throw std::logic_error("ReplaySSM record planner admitted NVFP4 decode");
         }
         if (maximum_plan.schedule == detail::Nvfp4GdnConvScheduleId::SmallTFusedA16) { return 0; }
-        return detail::nvfp4_gdn_input_workspace_capacity_bytes(LinearPolicy::AllowA4,
-                                                                std::max(min_width, 4), max_width);
+        return detail::nvfp4_gdn_input_workspace_capacity_bytes(LinearPolicy::AllowA4, min_width,
+                                                                 max_width);
     }
     return detail::nvfp4_gdn_input_workspace_capacity_bytes(policy, batch_size * min_width,
                                                             batch_size * max_width);

@@ -21,7 +21,7 @@ Nvfp4AttnInputRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (policy != LinearPolicy::AllowA4) {
         throw std::invalid_argument("nvfp4 attn_input_proj: unsupported policy");
     }
-    return tokens >= 4 ? Nvfp4AttnInputRoute::W4A4 : Nvfp4AttnInputRoute::A16;
+    return Nvfp4AttnInputRoute::W4A4;
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tensor& k,

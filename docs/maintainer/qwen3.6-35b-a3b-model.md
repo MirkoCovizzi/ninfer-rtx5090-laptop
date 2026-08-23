@@ -626,6 +626,14 @@ rule that preserves the processed target distribution; equality-only checking is
 for greedy decoding. Draft quality changes acceptance and throughput, never the target-model
 distribution.
 
+For MTP, greedy decoding additionally requires exact committed-token parity with ordinary decode.
+Given the same artifact, prepared prompt, KV-cache dtype, and otherwise identical Engine and request
+configuration, MTP-off and MTP draft windows `1..5` must publish the same token IDs. Draft-window and
+proposal-head choices may change acceptance and execution work only. This does not require
+bit-identical target logits or private intermediates and does not compare different artifacts or KV
+dtypes. Stochastic execution preserves the processed target distribution but need not reproduce the
+same token IDs for a fixed seed because its RNG consumption may differ.
+
 Only the target state through the anchor and accepted candidate prefix becomes committed. The
 correction or bonus is the next still-unprocessed anchor. Rejected target state and draft-query K/V
 must not remain logically reachable. Target verification writes raw per-layer ReplaySSM records

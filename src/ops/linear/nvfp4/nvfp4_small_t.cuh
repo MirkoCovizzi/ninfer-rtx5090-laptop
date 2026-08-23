@@ -212,7 +212,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_smal
     const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales, float inverse_weight_divisor, Epilogue epilogue,
     OutputPolicy output) {
-    static_assert(ActiveTokens >= 2);
+    static_assert(ActiveTokens >= 1);
     static_assert(Schedule::kTokenTile <= ActiveTokens);
     static_assert((Geometry::kOutputRows % 128) == 0);
     static_assert((Schedule::kRowsPerCta % 4) == 0);

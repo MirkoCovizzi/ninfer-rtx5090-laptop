@@ -27,9 +27,23 @@ struct Bf16LinearAddSmallTOutput {
 };
 
 template <int ActiveTokens>
+struct Bf16LinearAddSmallTProductionSchedule {
+    static_assert(ActiveTokens >= 1 && ActiveTokens <= kBf16LinearAddSmallTMaxTokens);
+    // The residual update is an observable BF16 state boundary. Keep one contraction reduction
+    // profile across decode and every supported speculative width while retaining each width's
+    // independent row occupancy choice.
+    static constexpr int kRowsPerWarp =
+        (ActiveTokens == 4 || ActiveTokens == 6) ? 2 : (ActiveTokens <= 8 ? 4 : 2);
+    using Type = Bf16SmallTInnerSchedule<4, 1, kRowsPerWarp, 16, 1, 4,
+                                         Bf16SmallTActivationAccess::WarpPacked,
+                                         Bf16WeightCache::Default, Bf16PhaseOrder::Sequential, 1,
+                                         2, 1, 2>;
+};
+
+template <int ActiveTokens>
 void launch_exact(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
     using Geometry = Bf16GemvGeometry<5120, 6144>;
-    using Schedule = typename Bf16LinearSmallTProductionSchedule<Geometry, ActiveTokens>::Type;
+    using Schedule = typename Bf16LinearAddSmallTProductionSchedule<ActiveTokens>::Type;
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
 
     const Bf16LinearAddSmallTOutput output{static_cast<__nv_bfloat16*>(residual.data),

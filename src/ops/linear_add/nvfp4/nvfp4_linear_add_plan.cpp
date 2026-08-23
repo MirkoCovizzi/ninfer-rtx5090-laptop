@@ -23,8 +23,10 @@ Nvfp4LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_r
     if (policy != LinearPolicy::AllowA4) {
         throw std::invalid_argument("nvfp4 linear_add: unsupported policy");
     }
-    const std::int32_t first_w4a4 = input_rows == 6144 ? 7 : 8;
-    return tokens >= first_w4a4 ? Nvfp4LinearAddRoute::W4A4 : Nvfp4LinearAddRoute::A16;
+    // MLP down projection consumes the represented A4 activation at every execution width. The
+    // GDN output projection retains its A16 path through the supported speculative frontier.
+    if (input_rows == 17408 || tokens >= 7) { return Nvfp4LinearAddRoute::W4A4; }
+    return Nvfp4LinearAddRoute::A16;
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
@@ -37,7 +39,9 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& residual, cudaStr
                        static_cast<std::int64_t>(token_begin) * weight.n * sizeof(std::uint16_t);
         Tensor input_chunk(input, DType::BF16, {weight.k, active});
         Tensor residual_chunk(output, DType::BF16, {weight.n, active});
-        if (active == 1) {
+        // The 6144-wide GDN output projection uses one reduction profile for decode and
+        // speculative verification so the residual update is independent of physical width.
+        if (active == 1 && weight.k != 6144) {
             nvfp4_linear_add_decode_launch(input_chunk, weight, residual_chunk, stream);
         } else {
             nvfp4_linear_add_small_t_launch(input_chunk, weight, residual_chunk, stream);
