@@ -39,8 +39,8 @@ Nvfp4GdnConvPlan nvfp4_gdn_conv_resolve_plan(LinearPolicy policy, std::int32_t t
         if (tokens <= 16) { return {Nvfp4GdnConvScheduleId::SmallTFusedA16}; }
         throw std::invalid_argument("nvfp4 gdn conv A16 is registered only through T=16");
     }
-    if (tokens == 1) { return {Nvfp4GdnConvScheduleId::DecodeFusedA16}; }
-    if (tokens <= 3) { return {Nvfp4GdnConvScheduleId::SmallTFusedA16}; }
+    // AllowA4 owns a represented A4 activation boundary. Use it at every decode/verification
+    // width, then consume the materialized BF16 projection in the convolution/state transition.
     return {Nvfp4GdnConvScheduleId::Materialized};
 }
 

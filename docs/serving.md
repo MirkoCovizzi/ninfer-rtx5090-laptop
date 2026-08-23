@@ -38,6 +38,14 @@ server must accept image or video input. Speculative residency is likewise froze
 `--lm-head-draft` additionally loads the optimized proposal head. DFlash is 35B-A3B text-only and
 cannot be combined with `--vision`. A later request cannot enable a capability omitted at startup.
 
+For a request resolved to greedy sampling, MTP preserves the committed token sequence. Holding the
+artifact, prepared prompt, KV-cache dtype, and all other Engine and request settings fixed, MTP-off
+and every MTP draft window from one to five return the same token IDs; the draft window and proposal
+head affect only acceptance and throughput. This is not a bit-identical-logit guarantee and does not
+compare different artifacts or KV dtypes. Under stochastic sampling, MTP preserves the processed
+target distribution rather than fixed-seed token identity because speculative execution may consume
+random values differently.
+
 ## Endpoints
 
 | Method and path | Behavior |

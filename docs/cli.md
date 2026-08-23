@@ -131,6 +131,15 @@ use MTP with three draft tokens and DFlash with seven draft tokens (block length
 the optimized proposal head. DFlash accepts up to fifteen draft tokens; seven is the current
 measured recommendation rather than a semantic limit.
 
+With greedy decoding, MTP preserves the committed token sequence: for the same artifact, prepared
+prompt, KV-cache dtype, and otherwise identical Engine and request configuration, disabling MTP or
+selecting any MTP draft window from one to five produces the same token IDs. The draft window and
+proposal head may change acceptance and throughput, but not the greedy output. This contract does
+not require bit-identical logits or intermediates and does not compare different artifacts or KV
+dtypes. With stochastic sampling, speculative acceptance preserves the processed target
+distribution but does not promise the same token IDs for a fixed seed because execution may consume
+random values differently.
+
 ## Common options
 
 | Option | Meaning | Default |

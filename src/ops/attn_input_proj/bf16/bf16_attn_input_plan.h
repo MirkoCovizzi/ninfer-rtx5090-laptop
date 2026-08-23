@@ -10,7 +10,7 @@ namespace ninfer::ops::detail {
 
 // The Attention epilogue has its own measured crossover. The wider candidate domain remains
 // benchmark-callable so the production boundary is not conflated with template availability.
-inline constexpr std::int32_t kBf16AttnInputSmallTMinTokens   = 2;
+inline constexpr std::int32_t kBf16AttnInputSmallTMinTokens   = 1;
 inline constexpr std::int32_t kBf16AttnInputSmallTMaxTokens   = 32;
 inline constexpr std::int32_t kBf16AttnInputSmallTDispatchEnd = 22;
 

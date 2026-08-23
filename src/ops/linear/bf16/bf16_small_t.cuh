@@ -180,7 +180,7 @@ __global__
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_small_t_inner_kernel(
     const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ weight,
     OutputPolicy output) {
-    static_assert(ActiveTokens >= 2 && ActiveTokens <= 32);
+    static_assert(ActiveTokens >= 1 && ActiveTokens <= 32);
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
 
     __shared__ Bf16SmallTSharedStorage<Schedule, ActiveTokens> shared;

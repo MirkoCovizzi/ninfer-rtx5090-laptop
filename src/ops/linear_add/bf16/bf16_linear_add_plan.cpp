@@ -14,7 +14,6 @@ Bf16LinearAddScheduleId bf16_linear_add_select(std::int32_t output_rows, std::in
     if (!bf16_linear_add_admits(output_rows, input_rows, tokens)) {
         throw std::invalid_argument("bf16 linear_add: unsupported exact problem");
     }
-    if (tokens == 1) { return Bf16LinearAddScheduleId::Decode; }
     if (tokens <= kBf16LinearAddSmallTDispatchEnd) { return Bf16LinearAddScheduleId::SmallT; }
     if (tokens <= kBf16LinearAddAggregateMmaEnd) { return Bf16LinearAddScheduleId::AggregateMma; }
     return Bf16LinearAddScheduleId::Mma;
