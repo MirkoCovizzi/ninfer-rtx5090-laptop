@@ -16,7 +16,7 @@ void launch_compress(const Tensor& k, const Tensor& v, KvarnTileStorage storage,
                      cudaStream_t stream) {
     constexpr int kThreads = 256;
     constexpr std::size_t kSharedFloats =
-        static_cast<std::size_t>(D) * G + 7ULL * D + kThreads;
+        static_cast<std::size_t>(D) * G + 8ULL * D + kThreads;
     constexpr std::size_t kSharedBytes = kSharedFloats * sizeof(float);
     static const cudaError_t attribute = cudaFuncSetAttribute(
         kvarn_compress_kernel<D, G, Iterations>, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -62,7 +62,7 @@ void launch_paged_append(const Tensor& k, const Tensor& v, const Tensor& positio
     constexpr int Iterations = kKvarnIterations;
     constexpr int kThreads   = 256;
     constexpr std::size_t kSharedFloats =
-        static_cast<std::size_t>(D) * G + 7ULL * D + kThreads;
+        static_cast<std::size_t>(D) * G + 8ULL * D + kThreads;
     constexpr std::size_t kSharedBytes = kSharedFloats * sizeof(float);
     static const cudaError_t attribute = cudaFuncSetAttribute(
         kvarn_paged_compress_direct_kernel<D, G, Iterations, Masked>,
@@ -117,7 +117,7 @@ void launch_flush_full_tails(std::span<const PagedKVBatchLayerView> layer_views,
     constexpr int Iterations = kKvarnIterations;
     constexpr int kThreads   = 256;
     constexpr std::size_t kSharedFloats =
-        static_cast<std::size_t>(D) * G + 7ULL * D + kThreads;
+        static_cast<std::size_t>(D) * G + 8ULL * D + kThreads;
     constexpr std::size_t kSharedBytes = kSharedFloats * sizeof(float);
     static const cudaError_t attribute = cudaFuncSetAttribute(
         kvarn_flush_full_tails_kernel<D, G, Iterations, Masked>,

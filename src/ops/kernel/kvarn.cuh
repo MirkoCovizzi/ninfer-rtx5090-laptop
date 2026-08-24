@@ -20,16 +20,30 @@ inline constexpr float kKvarnLogMaximum = 10.0F;
 
 template <int Count, bool Maximum>
 __device__ float kvarn_block_extreme(float value, float* scratch) {
-    const int tid = static_cast<int>(threadIdx.x);
-    scratch[tid]  = tid < Count ? value : (Maximum ? -CUDART_INF_F : CUDART_INF_F);
-    __syncthreads();
-    for (int stride = static_cast<int>(blockDim.x) / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            const float other = scratch[tid + stride];
-            scratch[tid]      = Maximum ? fmaxf(scratch[tid], other) : fminf(scratch[tid], other);
-        }
-        __syncthreads();
+    constexpr int WarpSize = 32;
+    constexpr unsigned FullMask = 0xffffffffU;
+    const int tid  = static_cast<int>(threadIdx.x);
+    const int lane = tid & (WarpSize - 1);
+    const int warp = tid / WarpSize;
+    value = tid < Count ? value : (Maximum ? -CUDART_INF_F : CUDART_INF_F);
+#pragma unroll
+    for (int offset = WarpSize / 2; offset > 0; offset >>= 1) {
+        const float other = __shfl_down_sync(FullMask, value, offset);
+        value             = Maximum ? fmaxf(value, other) : fminf(value, other);
     }
+    if (lane == 0) { scratch[warp] = value; }
+    __syncthreads();
+    if (warp == 0) {
+        constexpr int Warps = 256 / WarpSize;
+        value = lane < Warps ? scratch[lane] : (Maximum ? -CUDART_INF_F : CUDART_INF_F);
+#pragma unroll
+        for (int offset = WarpSize / 2; offset > 0; offset >>= 1) {
+            const float other = __shfl_down_sync(FullMask, value, offset);
+            value             = Maximum ? fmaxf(value, other) : fminf(value, other);
+        }
+        if (lane == 0) { scratch[0] = value; }
+    }
+    __syncthreads();
     const float result = scratch[0];
     // Every thread must consume the result before the next reduction reuses the same scratch.
     __syncthreads();
@@ -51,15 +65,16 @@ struct KvarnTileGeometry {
 };
 
 template <int D, int G, bool Key>
-__device__ float kvarn_row_std(const float* tile, const float* log_row, const float* log_col,
-                               int row) {
+__device__ float kvarn_row_std(const float* tile, const float* row_inverse,
+                                const float* col_inverse,
+                                int row) {
     using Geometry = KvarnTileGeometry<D, G, Key>;
     float sum      = 0.0F;
     float squares  = 0.0F;
-    const float rs = expf(-log_row[row]);
+    const float rs = row_inverse[row];
 #pragma unroll 1
     for (int col = 0; col < Geometry::Cols; ++col) {
-        const float x = Geometry::element(tile, row, col) * rs * expf(-log_col[col]);
+        const float x = Geometry::element(tile, row, col) * rs * col_inverse[col];
         sum += x;
         squares = fmaf(x, x, squares);
     }
@@ -69,15 +84,16 @@ __device__ float kvarn_row_std(const float* tile, const float* log_row, const fl
 }
 
 template <int D, int G, bool Key>
-__device__ float kvarn_col_std(const float* tile, const float* log_row, const float* log_col,
-                               int col) {
+__device__ float kvarn_col_std(const float* tile, const float* row_inverse,
+                                const float* col_inverse,
+                                int col) {
     using Geometry = KvarnTileGeometry<D, G, Key>;
     float sum      = 0.0F;
     float squares  = 0.0F;
-    const float cs = expf(-log_col[col]);
+    const float cs = col_inverse[col];
 #pragma unroll 1
     for (int row = 0; row < Geometry::Rows; ++row) {
-        const float x = Geometry::element(tile, row, col) * expf(-log_row[row]) * cs;
+        const float x = Geometry::element(tile, row, col) * row_inverse[row] * cs;
         sum += x;
         squares = fmaf(x, x, squares);
     }
@@ -87,12 +103,17 @@ __device__ float kvarn_col_std(const float* tile, const float* log_row, const fl
 }
 
 template <int D, int G, bool Key>
-__device__ float kvarn_imbalance(const float* tile, const float* log_row, const float* log_col,
-                                 float* row_std, float* col_std, float* scratch) {
+__device__ float kvarn_imbalance(const float* tile, const float* row_inverse,
+                                  const float* col_inverse,
+                                  float* row_std, float* col_std, float* scratch) {
     using Geometry = KvarnTileGeometry<D, G, Key>;
     const int tid  = static_cast<int>(threadIdx.x);
-    if (tid < Geometry::Rows) { row_std[tid] = kvarn_row_std<D, G, Key>(tile, log_row, log_col, tid); }
-    if (tid < Geometry::Cols) { col_std[tid] = kvarn_col_std<D, G, Key>(tile, log_row, log_col, tid); }
+    if (tid < Geometry::Rows) {
+        row_std[tid] = kvarn_row_std<D, G, Key>(tile, row_inverse, col_inverse, tid);
+    }
+    if (tid < Geometry::Cols) {
+        col_std[tid] = kvarn_col_std<D, G, Key>(tile, row_inverse, col_inverse, tid);
+    }
     __syncthreads();
     const float row_value = tid < Geometry::Rows ? row_std[tid] : 0.0F;
     const float row_max = kvarn_block_extreme<Geometry::Rows, true>(row_value, scratch);
@@ -107,13 +128,14 @@ __device__ float kvarn_imbalance(const float* tile, const float* log_row, const 
 // deviation multiplied by exp(old_log-new_log). The caller has stored that residual in row_std,
 // so only columns need another reduction to score the newly visited scale pair.
 template <int D, int G, bool Key>
-__device__ float kvarn_imbalance_after_row_update(const float* tile, const float* log_row,
-                                                  const float* log_col, float* row_std,
-                                                  float* col_std, float* scratch) {
+__device__ float kvarn_imbalance_after_row_update(const float* tile,
+                                                   const float* row_inverse,
+                                                   const float* col_inverse, float* row_std,
+                                                   float* col_std, float* scratch) {
     using Geometry = KvarnTileGeometry<D, G, Key>;
     const int tid  = static_cast<int>(threadIdx.x);
     if (tid < Geometry::Cols) {
-        col_std[tid] = kvarn_col_std<D, G, Key>(tile, log_row, log_col, tid);
+        col_std[tid] = kvarn_col_std<D, G, Key>(tile, row_inverse, col_inverse, tid);
     }
     __syncthreads();
     const float row_value = tid < Geometry::Rows ? row_std[tid] : 0.0F;
@@ -127,38 +149,39 @@ __device__ float kvarn_imbalance_after_row_update(const float* tile, const float
 
 template <int D, int G, bool Key, int Iterations>
 __device__ void kvarn_balance(float* tile, float* log_row, float* log_col, float* best_row,
-                              float* best_col, float* row_std, float* col_std, float* scratch) {
+                               float* best_col, float* row_std, float* col_std,
+                               float* row_inverse, float* col_inverse, float* scratch) {
     using Geometry = KvarnTileGeometry<D, G, Key>;
     const int tid  = static_cast<int>(threadIdx.x);
     if (tid < Geometry::Rows) {
         log_row[tid]  = 0.0F;
         best_row[tid] = 0.0F;
+        row_inverse[tid] = 1.0F;
     }
     if (tid < Geometry::Cols) {
         log_col[tid]  = 0.0F;
         best_col[tid] = 0.0F;
+        col_inverse[tid] = 1.0F;
     }
     __syncthreads();
 
-    float best = kvarn_imbalance<D, G, Key>(tile, log_row, log_col, row_std, col_std, scratch);
+    float best =
+        kvarn_imbalance<D, G, Key>(tile, row_inverse, col_inverse, row_std, col_std, scratch);
     for (int iteration = 0; iteration < Iterations; ++iteration) {
-        if (tid < Geometry::Cols) {
-            col_std[tid] = kvarn_col_std<D, G, Key>(tile, log_row, log_col, tid);
-        }
-        // Every standard deviation in one alternating pass is defined against the same scale pair.
-        // Publishing a log scale while another thread is still reducing would make the pass order
-        // scheduler-dependent.
-        __syncthreads();
+        // The initial score and each preceding post-row score leave col_std evaluated at the
+        // current scale pair. Recomputing it here would repeat the same reduction exactly.
         if (tid < Geometry::Cols) {
             const float stddev = col_std[tid];
             log_col[tid] = fminf(kKvarnLogMaximum,
-                                  fmaxf(kKvarnLogMinimum,
-                                        log_col[tid] + logf(fminf(kKvarnStdMaximum,
-                                                                  fmaxf(kKvarnStdMinimum, stddev)))));
+                                   fmaxf(kKvarnLogMinimum,
+                                         log_col[tid] + logf(fminf(kKvarnStdMaximum,
+                                                                   fmaxf(kKvarnStdMinimum, stddev)))));
+            col_inverse[tid] = expf(-log_col[tid]);
         }
         __syncthreads();
         if (tid < Geometry::Rows) {
-            row_std[tid] = kvarn_row_std<D, G, Key>(tile, log_row, log_col, tid);
+            row_std[tid] =
+                kvarn_row_std<D, G, Key>(tile, row_inverse, col_inverse, tid);
         }
         __syncthreads();
         if (tid < Geometry::Rows) {
@@ -171,10 +194,11 @@ __device__ void kvarn_balance(float* tile, float* log_row, float* log_col, float
                                            fmaxf(kKvarnStdMinimum, stddev)))));
             log_row[tid] = new_log;
             row_std[tid] = stddev * expf(old_log - new_log);
+            row_inverse[tid] = expf(-new_log);
         }
         __syncthreads();
         const float imbalance = kvarn_imbalance_after_row_update<D, G, Key>(
-            tile, log_row, log_col, row_std, col_std, scratch);
+            tile, row_inverse, col_inverse, row_std, col_std, scratch);
         if (imbalance <= best) {
             best = imbalance;
             if (tid < Geometry::Rows) { best_row[tid] = log_row[tid]; }
@@ -198,13 +222,15 @@ __device__ void kvarn_compress_loaded_tile(float* shared, bool key_path, std::in
     float* best_col  = best_row + D;
     float* row_std   = best_col + D;
     float* col_std   = row_std + D;
-    float* scratch   = col_std + D;
+    float* row_inverse = col_std + D;
+    float* col_inverse = row_inverse + D;
+    float* scratch   = col_inverse + D;
 
     const int tid          = static_cast<int>(threadIdx.x);
 
     if (key_path) {
         kvarn_balance<D, G, true, Iterations>(tile, log_row, log_col, best_row, best_col, row_std,
-                                              col_std, scratch);
+                                               col_std, row_inverse, col_inverse, scratch);
         if (tid < D) {
             k_channel_scales[record * D + tid] =
                 __float2half_rn(expf(best_row[tid]));
@@ -250,7 +276,7 @@ __device__ void kvarn_compress_loaded_tile(float* shared, bool key_path, std::in
     } else {
         // V is logically [G,D], while the represented tensor remains d-contiguous [D,G].
         kvarn_balance<D, G, false, Iterations>(tile, log_row, log_col, best_row, best_col, row_std,
-                                               col_std, scratch);
+                                                col_std, row_inverse, col_inverse, scratch);
         if (tid < D) {
             v_channel_scales[record * D + tid] =
                 __float2half_rn(expf(best_col[tid]));
@@ -582,14 +608,20 @@ __global__ void kvarn_decompress_kernel(const std::uint8_t* k_codes,
 
 template <int D>
 __global__ void kvarn_hadamard_kernel(const __nv_bfloat16* source, __nv_bfloat16* destination,
-                                      int vectors) {
+                                       int vectors) {
     __shared__ float values[D];
     const int vector = static_cast<int>(blockIdx.x);
     const int d      = static_cast<int>(threadIdx.x);
     if (vector >= vectors || d >= D) { return; }
-    values[d] = __bfloat162float(source[static_cast<std::int64_t>(vector) * D + d]);
+    float value = __bfloat162float(source[static_cast<std::int64_t>(vector) * D + d]);
+#pragma unroll
+    for (int span = 1; span < 32; span <<= 1) {
+        const float other = __shfl_xor_sync(0xffffffffU, value, span);
+        value             = (d & span) == 0 ? value + other : other - value;
+    }
+    values[d] = value;
     __syncthreads();
-    for (int span = 1; span < D; span <<= 1) {
+    for (int span = 32; span < D; span <<= 1) {
         const int group = d / (span << 1);
         const int lane  = d & (span - 1);
         const int left  = group * (span << 1) + lane;
@@ -597,12 +629,13 @@ __global__ void kvarn_hadamard_kernel(const __nv_bfloat16* source, __nv_bfloat16
         const float a   = values[left];
         const float b   = values[right];
         __syncthreads();
-        values[d] = (d & span) == 0 ? a + b : a - b;
+        value     = (d & span) == 0 ? a + b : a - b;
+        values[d] = value;
         __syncthreads();
     }
     constexpr float normalization = D == 256 ? 0.0625F : 0.08838834764831845F;
     destination[static_cast<std::int64_t>(vector) * D + d] =
-        __float2bfloat16_rn(values[d] * normalization);
+        __float2bfloat16_rn(value * normalization);
 }
 
 } // namespace ninfer::ops::detail
