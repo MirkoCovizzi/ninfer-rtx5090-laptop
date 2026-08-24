@@ -73,6 +73,7 @@ add_library(ninfer_ops STATIC
   ops/launcher/gqa_attention_decode.cu
   ops/launcher/gqa_attention_prefill.cu
   ops/launcher/kv_cache_append_prefix.cu
+  ops/launcher/kvarn.cu
   ops/launcher/l2norm.cu
   ops/launcher/layer_norm.cu
   ops/launcher/mtp_pack.cu
@@ -237,6 +238,7 @@ add_library(ninfer_ops STATIC
   ops/wrapper/swa.cpp
   ops/wrapper/gqa_attention.cpp
   ops/wrapper/kv_cache_append_prefix.cpp
+  ops/wrapper/kvarn.cpp
   ops/wrapper/attn_input_proj.cpp
   ops/wrapper/l2norm.cpp
   ops/wrapper/layer_norm.cpp

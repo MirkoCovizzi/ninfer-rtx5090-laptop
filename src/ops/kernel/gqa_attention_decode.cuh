@@ -21,6 +21,12 @@ namespace ninfer::ops {
 
 inline constexpr int kGqaHeadDim = 256;
 
+// The 82-SM target admits two 256-thread KVarN CTAs per SM. These caps form one resident
+// wave through the mid-context range and two waves once longer CTAs need more parallelism.
+inline constexpr int kGqa27KvarnT1MidWindow = 98304;
+inline constexpr int kGqa27KvarnT1MidSplits = 41;
+inline constexpr int kGqa27KvarnT1LongSplits = 82;
+
 struct GqaAppendInput {
     static constexpr bool writes_cache = true;
     const __nv_bfloat16* k;
@@ -142,7 +148,8 @@ __device__ __forceinline__ void gqa_small_t_tc_row_to_qt(int row, int tokens, in
     q_head            = kv_head * Geometry::GroupSize + local_q;
 }
 
-template <typename Geometry, int DChunk, bool Int8, bool MultiBatch, bool Masked, bool Offset>
+template <typename Geometry, int DChunk, bool Int8, bool Kvarn, bool MultiBatch, bool Masked,
+          bool Offset>
 __launch_bounds__(256) __global__ void gqa_attention_small_t_reduce_output_kernel(
     const void* partial_acc, const float* partial_m, const float* partial_l,
     const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
@@ -167,7 +174,7 @@ __launch_bounds__(256) __global__ void gqa_attention_small_t_reduce_output_kerne
 
     if constexpr (Offset) { positions += column_begin; }
     if constexpr (MultiBatch) { positions += batch * full_width; }
-    const int last_pos = positions[tokens - 1];
+    const int last_pos = Kvarn ? positions[token] : positions[tokens - 1];
     int output_column  = token;
     if constexpr (Offset) { output_column += column_begin; }
     if constexpr (MultiBatch) { output_column += batch * full_width; }
@@ -183,8 +190,20 @@ __launch_bounds__(256) __global__ void gqa_attention_small_t_reduce_output_kerne
     }
 
     const int window = last_pos + 1;
-    const int active_split_count =
-        gqa_small_t_active_splits<Geometry, Int8>(window, split_count, tokens);
+    int active_split_count =
+        gqa_small_t_active_splits<Geometry, Int8>(window, split_count, Kvarn ? 1 : tokens);
+    if constexpr (Kvarn) {
+        if (window > 8198) {
+            int kvarn_splits = div_up(window, 192 / Geometry::DecodeSplitScale);
+            if constexpr (Geometry::QHeads == 24) {
+                const int cap = window <= kGqa27KvarnT1MidWindow
+                                    ? kGqa27KvarnT1MidSplits
+                                    : kGqa27KvarnT1LongSplits;
+                kvarn_splits = kvarn_splits < cap ? kvarn_splits : cap;
+            }
+            active_split_count = kvarn_splits < split_count ? kvarn_splits : split_count;
+        }
+    }
 
     __shared__ float reduce[256];
 

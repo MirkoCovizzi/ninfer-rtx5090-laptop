@@ -24,6 +24,7 @@ struct KvProfile {
 constexpr std::array kKvProfiles{
     KvProfile{"bf16", ninfer::KvCacheStorage::BFloat16},
     KvProfile{"int8", ninfer::KvCacheStorage::Int8Group64},
+    KvProfile{"kvarn", ninfer::KvCacheStorage::KvarnNvfp4V2Group64},
 };
 
 ninfer::EngineOptions engine_options(const char* artifact, ninfer::KvCacheStorage kv_storage,
@@ -59,8 +60,8 @@ ninfer::PromptInput prompt() {
     return input;
 }
 
-std::vector<ninfer::TokenId> generate(const char* artifact, ninfer::KvCacheStorage kv_storage,
-                                       std::uint32_t mtp_draft_tokens) {
+ninfer::GenerationResult generate(const char* artifact, ninfer::KvCacheStorage kv_storage,
+                                  std::uint32_t mtp_draft_tokens) {
     const std::string route = mtp_draft_tokens == 0
                                   ? "ordinary"
                                   : "MTP k=" + std::to_string(mtp_draft_tokens);
@@ -77,7 +78,7 @@ std::vector<ninfer::TokenId> generate(const char* artifact, ninfer::KvCacheStora
             result.finish_reason != ninfer::FinishReason::OutputLimit) {
             throw std::runtime_error("did not reach its fixed output limit");
         }
-        return result.generated_token_ids;
+        return result;
     } catch (const std::exception& error) {
         throw std::runtime_error(route + ": " + error.what());
     }
@@ -94,20 +95,25 @@ int main() {
 
     try {
         for (const KvProfile profile : kKvProfiles) {
-            const std::vector<ninfer::TokenId> ordinary =
-                generate(artifact, profile.storage, 0);
+            const ninfer::GenerationResult ordinary = generate(artifact, profile.storage, 0);
             for (const std::uint32_t draft_tokens : kMtpDraftCounts) {
-                const std::vector<ninfer::TokenId> mtp =
+                const ninfer::GenerationResult mtp =
                     generate(artifact, profile.storage, draft_tokens);
                 const auto [ordinary_mismatch, mtp_mismatch] =
-                    std::mismatch(ordinary.begin(), ordinary.end(), mtp.begin(), mtp.end());
-                if (ordinary_mismatch != ordinary.end()) {
+                    std::mismatch(ordinary.generated_token_ids.begin(),
+                                  ordinary.generated_token_ids.end(),
+                                  mtp.generated_token_ids.begin(), mtp.generated_token_ids.end());
+                if (ordinary_mismatch != ordinary.generated_token_ids.end()) {
                     const std::size_t index =
-                        static_cast<std::size_t>(ordinary_mismatch - ordinary.begin());
+                        static_cast<std::size_t>(ordinary_mismatch -
+                                                 ordinary.generated_token_ids.begin());
                     std::cerr << "greedy MTP parity mismatch for " << profile.name << " KV at k="
                               << draft_tokens << ", generated token " << index
                               << ": ordinary=" << *ordinary_mismatch
-                              << " mtp=" << *mtp_mismatch << '\n';
+                              << " mtp=" << *mtp_mismatch
+                              << " prompt_tokens=" << ordinary.prompt.prompt_tokens
+                              << " accepted=" << mtp.speculative.accepted_tokens << '/'
+                              << mtp.speculative.drafted_tokens << '\n';
                     return 1;
                 }
             }

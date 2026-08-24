@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace ninfer::ops {
 
@@ -44,6 +45,14 @@ struct GqaExecutionEnvelope {
  * activation range; they are not a universal error bound for arbitrary adversarial BF16 tensors.
  * A1 and A3 are each qualified directly against the ideal oracle. A1-versus-A3 parity is only an
  * additional consistency check.
+ *
+ * KVarN cache positions are interpreted from either their live BF16 rotated tail or the exact
+ * represented decode of stored K4/V2 codes and FP8/FP16 metadata defined by kvarn.h. Its
+ * production profile applies the same orthonormal Hadamard transform to Q/K/V and the self-inverse
+ * transform to Out. Qualification independently decodes the represented cache, evaluates the
+ * complete model-space formula against the same FP64 oracle, and owns separate implementation and
+ * compression-quality criteria. BF16 decode staging is a private implementation profile, not a
+ * semantic cast boundary.
  */
 
 /**
@@ -71,9 +80,10 @@ gqa_attention_workspace_capacity_bytes(std::int32_t q_heads, DType cache_dtype,
  * kv_table_rows is contiguous I32 [B]. valid_columns is either contiguous I32 [B], or an empty
  * Tensor meaning every row has exactly W valid columns. This dense/masked choice is part of the
  * call topology; it is not inferred by copying device metadata to the host. B=1 accepts every
- * positive W in the current prefill/decode domain; B=2..8 accepts W=1..16. Cache storage is BF16
- * or INT8-G64 under the shared numerical contract above. PagedKVBatchLayerView supplies shared
- * planes and the complete block-table matrix; kv_table_rows[b] selects one row for sequence b.
+ * positive W in the current prefill/decode domain; B=2..8 accepts W=1..16. Cache storage is BF16,
+ * INT8-G64, or KVarN NVFP4-K/V2-G64 under the shared numerical contract above.
+ * PagedKVBatchLayerView supplies shared planes and the complete block-table matrix;
+ * kv_table_rows[b] selects one row for sequence b.
  *
  * In masked form, every row's valid columns are the prefix [0,valid_columns[b]); positions in that
  * prefix are sequential and address populated causal histories. Each nonempty row repeats its
@@ -85,7 +95,10 @@ gqa_attention_workspace_capacity_bytes(std::int32_t q_heads, DType cache_dtype,
  *
  * q/k/v/positions/valid_columns/kv_table_rows/out, every cache plane/table, and live workspace
  * suballocations are pairwise non-overlapping. The Op overwrites every addressed cache row but
- * owns no persistent frontier, allocation, request identity, or commit authority.
+ * owns no persistent frontier, allocation, request identity, or commit authority. For KVarN
+ * small-T execution, every completed staged page is encoded before attention while its BF16 marker
+ * remains live. Each query column reads its current page from that BF16 tail and completed preceding
+ * pages from encoded storage, matching sequential T=1 representation transitions.
  */
 void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& positions,
                    const Tensor& valid_columns, const Tensor& kv_table_rows, float scale,
@@ -94,7 +107,8 @@ void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tens
 
 /**
  * A2: perform only the cache-write part of A1. k/v are contiguous BF16 `[256,4|2,T]`, positions is
- * contiguous sequential I32 [T], and every addressed code and INT8 scale is overwritten. It reads
+ * contiguous sequential I32 [T], and every addressed cache representation is overwritten. KVarN
+ * writes BF16 tail staging and defers full-tile encoding to gqa_kvarn_flush_full_pages(). It reads
  * no unrelated cache row, receives no execution envelope, and owns no persistent frontier.
  */
 void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
@@ -107,7 +121,21 @@ void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
  * to A1. Caller workspace is reported by gqa_attention_workspace_capacity_bytes().
  */
 void gqa_attention_cached(const Tensor& q, const Tensor& positions, float scale,
-                          const PagedKVLayerView& cache, GqaExecutionEnvelope envelope,
-                          WorkspaceArena& workspace, Tensor& out, cudaStream_t stream);
+                           const PagedKVLayerView& cache, GqaExecutionEnvelope envelope,
+                           WorkspaceArena& workspace, Tensor& out, cudaStream_t stream);
+
+/**
+ * Completes deferred KVarN encoding and retires every committed full staged tail page.
+ * Layer views share one block-table matrix and geometry. positions is sequential I32 [W,B],
+ * kv_table_rows is I32 [B], and valid_columns has the same optional-prefix meaning as A1.
+ * Partial tail pages remain lossless BF16 staging; full pages are encoded in one cross-layer launch
+ * and their staging markers are retired. For speculative execution, valid_columns is the accepted
+ * prefix established by the caller's commit decision, not the provisional verification width.
+ * The caller invokes this after all listed layers have completed A1 and before any listed row starts
+ * another append unit.
+ */
+void gqa_kvarn_flush_full_pages(std::span<const PagedKVBatchLayerView> layers,
+                                const Tensor& positions, const Tensor& valid_columns,
+                                const Tensor& kv_table_rows, cudaStream_t stream);
 
 } // namespace ninfer::ops

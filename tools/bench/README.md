@@ -123,9 +123,54 @@ artifacts are supplied. Pass one `--artifact` to select a single target and `--m
 decode corpus with DFlash block=8 (`k=7`) and the optimized proposal head. Add
 `--sampling greedy` to force exact argmax while retaining the same fixtures and repetition count.
 Its schema-v5 result and flattened summaries retain the canonical `weights_id` received from the
-schema-v9 serving startup record. The stochastic route pins its complete
+schema-v10 serving startup record. The stochastic route pins its complete
 temperature/top-p/top-k/min-p/presence/frequency profile explicitly, so model-default changes do
 not alter the measurement method.
+
+## KV-cache quality campaign
+
+`run_kv_cache_quality.py` compares BF16, INT8-G64, and KVarN through the real serving route. Its
+ledger fixtures use same-schema records, composite-key near misses, conflicting revisions,
+multi-record retrieval, and negative controls at fixed depths. Runs are greedy and resumable; raw
+responses, exact scores, common-prefix/repetition metrics, request-log timings, and BF16 pairwise
+comparisons are retained in the output directory.
+
+```bash
+python3 tools/bench/run_kv_cache_quality.py \
+  --artifact out/qwen3_8_27b_nvfp4.ninfer \
+  --preset standard --mode mtp0 --mode mtp3 \
+  --output profiles/bench/kv-cache-quality
+
+python3 tools/bench/run_kv_cache_quality.py \
+  --artifact out/qwen3_8_27b_nvfp4.ninfer \
+  --loop-only --kv-dtype kvarn --mode mtp3 \
+  --max-context 180000 --kv-capacity 360064 --max-concurrency 2 \
+  --loop-output-tokens 80000 \
+  --output profiles/bench/kv-cache-loop
+
+python3 tools/bench/run_kv_cache_quality.py \
+  --artifact out/qwen3_8_27b_nvfp4.ninfer \
+  --preset max-needles --needle-count 64 --needle-layout 0 \
+  --kv-dtype kvarn --mode mtp3 \
+  --max-context 262144 --kv-capacity 262144 --max-concurrency 1 \
+  --output profiles/bench/kv-cache-max-needles
+```
+
+The default matched comparison uses one explicit logical capacity for every KV format in a mode.
+MTP3 defaults to 86,016 tokens because the BF16 cache plus resident MTP state cannot fit the MTP0
+98,304-token allocation on a 32 GiB card. `--kv-capacity` is an explicit diagnostic override; use it
+only when a target-specific production profile, rather than a matched cross-format comparison, is
+the intended claim.
+
+The `max-needles` preset is a KVarN maximum-context qualification unless `--kv-dtype` is supplied
+explicitly. It generates three deterministic layouts each with 32 and 64 simultaneous composite-key
+needles, distributes them across the complete document with local near-match distractors, and asks
+for every value in a permuted order. Before generation, the runner uses the serving token-count
+endpoint to choose the largest document that leaves a 2,048-token output budget and 128-token safety
+margin under `--max-context`. Reports retain strict whole-response equality, parsed per-needle
+recall, misses and incorrect labels, early/middle/late recall, and terminal repetition. Do not claim
+a same-context cross-format comparison when another cache format cannot allocate that capacity on
+the measured GPU.
 
 ## Concurrent serving benchmark
 

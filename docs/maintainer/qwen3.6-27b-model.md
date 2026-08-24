@@ -146,11 +146,11 @@ x = x + o_projection(a)
 ```
 
 Prefill appends all K/V columns and evaluates causal attention for the chunk. Decode appends one
-column and attends over the resident prefix. KV storage may be BF16 or INT8-G64. The exact runtime
-cache codec and the common ideal attention oracle are defined by the repository-internal
-[`gqa_attention.h`](../../include/ninfer/ops/gqa_attention.h) contract. Both cache formats and their
-optimized compute profiles are judged by that one oracle construction rather than by
-implementation-mirroring references.
+column and attends over the resident prefix. KV storage may be BF16, INT8-G64, or KVarN
+NVFP4-K/V2-G64. The exact runtime cache codecs and the common ideal attention oracle are defined by
+the repository-internal [`gqa_attention.h`](../../include/ninfer/ops/gqa_attention.h) contract. All
+cache formats and their optimized compute profiles are judged by that one oracle construction
+rather than by implementation-mirroring references.
 
 Text-only positions use the same scalar position for temporal, height, and width MRoPE sections.
 Multimodal prefill supplies distinct three-axis positions. Only 64 of each 256-dimensional head are
@@ -395,6 +395,11 @@ remain consistent.
 - the target's INT8 attention path intentionally quantizes Q to Q8-G64 for production computation;
   this native compute profile does not replace BF16 Q in the common ideal oracle, and its delta is
   accepted through the separate named INT8-cache compute-profile criterion;
+- KVarN stores Hadamard-rotated K4/V2 represented values with FP8/FP16 metadata for complete
+  64-token pages and lossless rotated BF16 values in two lane-private tail slots; its ideal logical
+  K/V values are an independent exact decode followed by the inverse orthonormal transform;
+- KVarN BF16 decode staging is a private implementation profile. Its implementation error and
+  cache-compression quality are accepted through separate named criteria against the common oracle;
 - the full target `lm_head` is used for prefill, verification, and ordinary decode regardless of
   draft-head mode.
 
@@ -405,7 +410,7 @@ route and accepted against the Op's criterion for that implementation profile.
 
 GQA numerical qualification covers both registered geometries, supported prompt and small-T
 regimes, the maintained conformance matrix, and target-representative activation ranges. Its
-BF16-cache and INT8-cache compute-profile criteria are explicitly named in the GQA conformance
+BF16-cache, INT8-cache, and KVarN implementation/quality criteria are explicitly named in the GQA conformance
 suite; they are not claimed as pointwise bounds for every arbitrary or adversarial BF16 tensor. A1
 append-and-attend and A3 cached-only attention are each checked directly against the common ideal
 oracle. Equality between those different numerical paths is not a contract or acceptance test.

@@ -54,7 +54,8 @@ PagedKVPoolLayout plan_paged_kv_pool(LayoutBuilder& builder, const PagedKVPoolSp
     layout.planes.reserve(spec.planes.size());
     for (std::size_t index = 0; index < spec.planes.size(); ++index) {
         const PagedKVPlaneSpec& plane = spec.planes[index];
-        if (plane.leading_extent <= 0 || plane.head_extent <= 0) {
+        if (plane.leading_extent <= 0 || plane.head_extent <= 0 || plane.page_extent <= 0 ||
+            plane.page_extent > kPagedKVPageSize) {
             throw std::invalid_argument("Paged KV plane extents must be positive");
         }
         const std::string label = "Paged KV plane " + std::to_string(index);
@@ -63,12 +64,12 @@ PagedKVPoolLayout plan_paged_kv_pool(LayoutBuilder& builder, const PagedKVPoolSp
         if (spec.plane_order == PagedKVPlaneOrder::PageMajor) {
             planned.storage = builder.add_tensor(
                 plane.dtype,
-                {plane.leading_extent, kPagedKVPageSize, plane.head_extent, physical_pages},
+                {plane.leading_extent, plane.page_extent, plane.head_extent, physical_pages},
                 plane.alignment, label);
         } else {
             planned.storage = builder.add_tensor(
                 plane.dtype,
-                {plane.leading_extent, kPagedKVPageSize, physical_pages, plane.head_extent},
+                {plane.leading_extent, plane.page_extent, physical_pages, plane.head_extent},
                 plane.alignment, label);
         }
         layout.planes.push_back(planned);
@@ -104,7 +105,8 @@ PagedKVPool::PagedKVPool(DeviceSpan backing, const PagedKVPoolLayout& layout)
         const PagedKVPlaneLayout& plane = layout.planes[index];
         if (plane.spec.dtype != spec_.planes[index].dtype ||
             plane.spec.leading_extent != spec_.planes[index].leading_extent ||
-            plane.spec.head_extent != spec_.planes[index].head_extent) {
+            plane.spec.head_extent != spec_.planes[index].head_extent ||
+            plane.spec.page_extent != spec_.planes[index].page_extent) {
             throw std::logic_error("Paged KV plane layout does not match its spec");
         }
         planes_.push_back(plane.storage.bind(backing));

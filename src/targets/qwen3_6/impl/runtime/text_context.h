@@ -217,6 +217,9 @@ public:
                              const Tensor& kv_table_rows, const Tensor& linear_state_slots,
                              ops::GqaExecutionEnvelope envelope, Tensor& hidden, Tensor& logits,
                              Tensor& target_tokens, DFlashFeatureSink& sink);
+    void commit_target_kvarn_pages(const Tensor& cache_positions,
+                                   const Tensor& committed_columns,
+                                   const Tensor& kv_table_rows);
     void mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidden,
                                   const Tensor& cache_positions, const Tensor& rope_positions,
                                   const Tensor& valid_columns, const Tensor& kv_table_rows,

@@ -304,7 +304,7 @@ All three registered model IDs support:
 - chunked prefill and CUDA Graph decode;
 - startup-bounded small-scale concurrent serving with true batched decode;
 - MTP speculative decoding with draft windows from one to five;
-- BF16 and INT8 group-64 KV cache;
+- BF16, INT8 group-64, and KVarN NVFP4-K/V2 group-64 KV cache;
 - model- and thinking-mode-aware official sampling defaults, with explicit greedy, temperature,
   top-k, top-p, min-p, and presence/frequency-penalty overrides;
 - compatible-prefix reuse;

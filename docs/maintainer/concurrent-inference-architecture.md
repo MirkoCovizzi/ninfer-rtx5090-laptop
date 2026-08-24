@@ -692,6 +692,14 @@ context 不要求连续。Concurrent engine 只操作 bundle handle、logical fr
 GPU work in-flight 期间，per-request state handle 和 view 的含义必须稳定。Page size、slab layout、
 block-table 和 allocator 的 contract 属于 Paged KV Context Store，不在本并发文档重复定义。
 
+KVarN profile 的两个 BF16 tail slots 和 logical-page markers 属于 lane-affine fixed continuation
+state，而 encoded pages 仍属于 shared growing pools。Retained prefix 保留原 lane，因此 tail payload 与
+markers 原样继续；rewrite-checkpoint truncate 保留其 frontier 所在 partial page。只有 cold/fresh lane
+初始化才把该 row 的 Text/MTP markers 全部失效，不能在 retained claim 时清除。一个 Text 或 MTP
+execution unit 在所有 affected full-attention layers 后集中 retire full tails；speculative target 先完成
+accept，再以 accepted prefix flush，不能让 provisional verification width retire marker。Round membership、
+table rows 和 mappings 在 flush 完成前保持冻结。
+
 ### 6.4 Prefix reuse
 
 Retained prefix 是从已结束 request 中分离出来的、单一 owner 的 SequenceState。它留在原 physical lane，

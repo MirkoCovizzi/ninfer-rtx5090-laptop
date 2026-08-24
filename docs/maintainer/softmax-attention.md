@@ -128,6 +128,13 @@ ideal[:,h,i] = Σ(j ∈ A(i)) p(i,h,j) * V[:,kh,j]
 Softmax、Flash tiling、split-KV、私有低精度 staging 或不同归约树，但不得改变可见集合、cache
 编码、公开输出和状态效果。
 
+KVarN cache 的公共 represented values 是其 stored K4/V2 codes 与 FP8/FP16 scales/zeros 的精确
+FP32 decode；位于两个 live tail slots 的 positions 则是 Hadamard-rotated BF16 值。KVarN production
+profile 在 head-dimension 上对 Q/K/V 应用同一 orthonormal Hadamard transform，并在 Attention 输出后
+应用 self-inverse transform，因此 ideal model-space oracle 仍以原 BF16 Q 和 cache represented K/V
+计算。实现 profile 可以在 tile 内 decode 到 BF16 staging，但 qualification 必须独立解码存储表示，不能
+复制 production staging casts 或 reduction tree。
+
 `scale` 是显式语义参数。当前注册 domain 可只接受对应 geometry 的 `1/sqrt(D)`，但不能把
 scale 隐藏在 Vision、Text 或某个 kernel 名称中。
 
@@ -137,8 +144,8 @@ scale 隐藏在 Vision、Text 或某个 kernel 名称中。
 
 | 使用位置 | geometry | cache/布局 | 迁移后 entry |
 |---|---:|---|---|
-| Qwen3.6-27B Text/MTP | `D256/Hq24/Hkv4` | BF16 或 INT8-G64 线性 cache | `causal_softmax_attention` |
-| Qwen3.6-35B-A3B Text/MTP | `D256/Hq16/Hkv2` | BF16 或 INT8-G64 线性 cache | `causal_softmax_attention` |
+| Qwen3.6-27B Text/MTP | `D256/Hq24/Hkv4` | BF16、INT8-G64 或 KVarN 线性 cache | `causal_softmax_attention` |
+| Qwen3.6-35B-A3B Text/MTP | `D256/Hq16/Hkv2` | BF16、INT8-G64 或 KVarN 线性 cache | `causal_softmax_attention` |
 | Qwen3.6 Vision | `D72/Hq16/Hkv16` | packed BF16 Q/K/V | `packed_softmax_attention` |
 | Qwen3.6-35B-A3B DFlash full | `D128/Hq32/Hkv8` | 只读 BF16 context + query K/V | `context_softmax_attention` |
 | Qwen3.6-35B-A3B DFlash local | `D128/Hq32/Hkv8` | 只读 BF16 cyclic context + query K/V | `sliding_window_attention` |
@@ -242,6 +249,14 @@ causal_softmax_attention_workspace_capacity_bytes(
 
 `positions` 决定精确因果可见域；execution envelope 仅保证 graph-safe launch capacity，不是
 mask 参数。
+
+KVarN append-and-attend 先写 row-private BF16 tail；已经完整编码的 pages 与最多两个 BF16 tail slots
+可以在同一 causal domain 中混合读取。Small-T route 在 Attention 前编码刚填满的 page、保留 BF16
+marker，并按 query column 选择 current-page tail 或 encoded predecessor；其 representation transition 与
+顺序 T=1 execution 一致。Full-marker retirement 是 execution-unit 末尾、speculative accept 之后的独立
+state transition，不属于 Attention 公式，也不能让尚未发布的 frontier 对下一 unit 可见。`B=1` prompt
+使用以 64-query、64-key tile 摊销 page decode 的 BF16-MMA profile；`B=1..8,W<=16` 使用 small-T
+profile。这些都是私有 implementation profiles，不创建新的 semantic entry。
 
 ### 4.4 Context + query dense Attention
 
@@ -532,13 +547,15 @@ Oracle 必须从 geometry 和 entry 可见集合计算 Head 映射，不复制�
 必须覆盖：
 
 - 四个当前注册 geometry；
-- BF16 与 INT8-G64 causal cache profile；
+- BF16、INT8-G64 与 KVarN causal cache profile；
 - append-and-attend、cached-only 和 standalone append；
 - plain single-segment entry，以及 packed 非等长与等长 segments；
 - context 为零和非零时的 context+query 可见域；
 - window 边界 `distance=window-1` 包含、`distance=window` 排除；
 - CUDA Graph execution envelope 的有效 replay；
 - cache code/scale bits、只读输入和全部声明的状态写入。
+- KVarN represented-value decode、compressed/BF16-tail 混合读取、两 tail slots、跨 layer full-page
+  flush、fragmented table rows、marker retire/retain 和 fresh-row reset。
 
 不同实现 profile 可以拥有不同命名 tolerance，但全部直接对同一个理想 Attention oracle
 负责。

@@ -18,8 +18,14 @@
 #include <math_constants.h>
 
 #include "ops/kernel/gqa_attention_prefill_common.cuh"
+#include "ops/kernel/gqa_attention_prefill_kvarn.cuh"
 
 namespace ninfer::ops {
+
+struct GqaPrefillBf16Storage {
+    const __nv_bfloat16* k;
+    const __nv_bfloat16* v;
+};
 
 template <typename Geometry, typename Metadata>
 __global__ void gqa_attention_prefill_fill_bf16_kernel(
@@ -60,18 +66,17 @@ __global__ void gqa_attention_prefill_fill_bf16_kernel(
 // swizzled smem buffer. Keys beyond max_query_abs (which the causal mask always
 // drops) are zeroed so the padded/uninitialized cache tail never feeds NaNs into
 // the tensor cores. Mirrors FA's predicated K/V cp.async + Clear_OOB path.
-template <typename Geometry>
-__device__ __forceinline__ void gqa_prefill_stage_kv(__nv_bfloat16* dst, const __nv_bfloat16* cache,
-                                                     int kv_head, int k0, int max_query_abs,
-                                                     int physical_page, int tid) {
+template <typename Geometry, int Bc, int Threads, bool Key>
+__device__ __forceinline__ void gqa_prefill_stage_kv(
+    __nv_bfloat16* dst, const GqaPrefillBf16Storage& storage, int kv_head, int k0,
+    int max_query_abs, int physical_page, int, int tid) {
     constexpr int D         = kGqaPrefillHeadDim;
-    constexpr int Bc        = kGqaPrefillBc;
-    constexpr int Threads   = kGqaPrefillThreads;
     constexpr int VecPerRow = D / 8; // 8 bf16 per 16B cp.async
     const bool full_tile    = (k0 + Bc - 1) <= max_query_abs;
     // Block base pointer computed once (int64); per-element offsets stay 32-bit.
     const __nv_bfloat16* cache_block =
-        cache + paged_kv_element_offset<kGqaPrefillHeadDim, Geometry::KVHeads>(
+        (Key ? storage.k : storage.v) +
+        paged_kv_element_offset<kGqaPrefillHeadDim, Geometry::KVHeads>(
                     physical_page, kv_head, k0 & kPagedKVPageMask, 0);
     if (full_tile) {
 #pragma unroll
@@ -99,18 +104,15 @@ __device__ __forceinline__ void gqa_prefill_stage_kv(__nv_bfloat16* dst, const _
 // FlashAttention-2 forward, one CTA per (query 64-row block, query head). Grid is
 // (ceil(tokens/64), q_heads). seqlen_q = tokens, seqlen_k = base_pos + tokens, with
 // bottom-right causal alignment (query row i sees keys [0, base_pos + i]).
-template <typename Geometry, typename Metadata>
-__launch_bounds__(kGqaPrefillThreads, 1) __global__
+template <typename Geometry, typename Metadata, typename Storage, int Br = kGqaPrefillBr,
+          int Bc = kGqaPrefillBc, int Threads = kGqaPrefillThreads>
+__launch_bounds__(Threads, 1) __global__
     void gqa_attention_prefill_bf16_kernel(const __nv_bfloat16* __restrict__ q,
-                                           const __nv_bfloat16* __restrict__ cache_k,
-                                           const __nv_bfloat16* __restrict__ cache_v,
+                                           Storage storage,
                                            Metadata metadata,
                                            const std::int32_t* __restrict__ positions, float scale,
                                            __nv_bfloat16* __restrict__ out, std::int32_t width) {
     constexpr int D             = kGqaPrefillHeadDim; // 256
-    constexpr int Br            = kGqaPrefillBr;      // 64 query rows
-    constexpr int Bc            = kGqaPrefillBc;      // 64 key cols
-    constexpr int Threads       = kGqaPrefillThreads; // 128
     constexpr int QKNt          = Bc / 8;             // 8  QK score n-tiles
     constexpr int QKKs          = D / 16;             // 16 QK contraction steps over head_dim
     constexpr int PVNt          = D / 8;              // 32 PV output n-tiles
@@ -118,12 +120,16 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__
     constexpr float Log2E       = 1.4426950408889634074f;
     constexpr unsigned FullMask = 0xffffffffu;
 
-    static_assert(Threads == 128);
+    static_assert(Br == Threads / 2);
+    static_assert(Bc == 32 || Bc == 64);
 
     extern __shared__ __align__(16) __nv_bfloat16 gqa_smem[];
     __nv_bfloat16* q_s = gqa_smem;     // [Br, D] swizzled
     __nv_bfloat16* k_s = q_s + Br * D; // [Bc, D] swizzled
     __nv_bfloat16* v_s = k_s + Bc * D; // [Bc, D] swizzled
+    __shared__ std::int32_t kvarn_tail_pages_s[kKvarnTailSlots];
+    __shared__ float2 kvarn_k_channels_s[D / 2];
+    __shared__ float2 kvarn_v_channels_s[D / 2];
 
     const int q_block = static_cast<int>(blockIdx.x);
     const int q_head  = static_cast<int>(blockIdx.y);
@@ -141,6 +147,29 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__
     }
     const int base_pos              = positions[0];
     const std::int32_t* block_table = metadata.block_table();
+    if constexpr (requires { storage.cached_tail_pages; }) {
+        if (tid < kKvarnTailSlots) {
+            const std::int64_t marker =
+                (static_cast<std::int64_t>(metadata.table_row()) * kKvarnTailSlots + tid) *
+                    storage.heads +
+                kv_head;
+            kvarn_tail_pages_s[tid] = storage.tail_logical_pages[marker];
+        }
+        if (tid < D / 2) {
+            const std::int64_t record =
+                static_cast<std::int64_t>(block_table[0]) * storage.heads + kv_head;
+            const int d           = tid * 2;
+            const int channel_idx = ((d & 7) / 2) * 32 + d / 8;
+            kvarn_k_channels_s[channel_idx] = __half22float2(*reinterpret_cast<const __half2*>(
+                storage.k_channel_scales + record * D + d));
+            kvarn_v_channels_s[channel_idx] = __half22float2(*reinterpret_cast<const __half2*>(
+                storage.v_channel_scales + record * D + d));
+        }
+        __syncthreads();
+        storage.cached_tail_pages = kvarn_tail_pages_s;
+        storage.cached_k_channels = kvarn_k_channels_s;
+        storage.cached_v_channels = kvarn_v_channels_s;
+    }
 
     const int gid = lane >> 2;
     const int lid = lane & 3;
@@ -222,19 +251,23 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__
 
     // Prologue: commit Q, then kick off K(0). The loop's wait<0> below drains both.
     ninfer::ops::cp_commit();
-    gqa_prefill_stage_kv<Geometry>(k_s, cache_k, kv_head, 0, max_query_abs, physical_page, tid);
+    gqa_prefill_stage_kv<Geometry, Bc, Threads, true>(k_s, storage, kv_head, 0, max_query_abs,
+                                                       physical_page, metadata.table_row(), tid);
     ninfer::ops::cp_commit();
 
     for (int kb = 0; kb < n_block_max; ++kb) {
         const int k0                 = kb * Bc;
-        const int next_physical_page = (kb + 1 < n_block_max) ? block_table[kb + 1] : physical_page;
+        const int next_physical_page =
+            (kb + 1 < n_block_max) ? block_table[((kb + 1) * Bc) >> kPagedKVPageShift]
+                                   : physical_page;
 
         ninfer::ops::cp_wait<0>(); // K(kb) landed (also publishes q_s / prev PV done)
         __syncthreads();
 
         // Overlap V(kb) load against the QK MMA below.
-        gqa_prefill_stage_kv<Geometry>(v_s, cache_v, kv_head, k0, max_query_abs, physical_page,
-                                       tid);
+        gqa_prefill_stage_kv<Geometry, Bc, Threads, false>(v_s, storage, kv_head, k0,
+                                                           max_query_abs, physical_page,
+                                                           metadata.table_row(), tid);
         ninfer::ops::cp_commit();
 
         // S = Q Kᵀ for this warp's 16 rows over all Bc keys, in registers.
@@ -389,8 +422,26 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__
         // Prefetch K(kb+1) into the (now-free) K buffer, overlapping the PV MMA.
         if (kb + 1 < n_block_max) {
             physical_page = next_physical_page;
-            gqa_prefill_stage_kv<Geometry>(k_s, cache_k, kv_head, (kb + 1) * Bc, max_query_abs,
-                                           physical_page, tid);
+            if constexpr (requires { storage.cached_k_channels; }) {
+                if ((((kb + 1) * Bc) & kPagedKVPageMask) == 0) {
+                    if (tid < D / 2) {
+                        const std::int64_t record =
+                            static_cast<std::int64_t>(physical_page) * storage.heads + kv_head;
+                        const int d           = tid * 2;
+                        const int channel_idx = ((d & 7) / 2) * 32 + d / 8;
+                        kvarn_k_channels_s[channel_idx] =
+                            __half22float2(*reinterpret_cast<const __half2*>(
+                                storage.k_channel_scales + record * D + d));
+                        kvarn_v_channels_s[channel_idx] =
+                            __half22float2(*reinterpret_cast<const __half2*>(
+                                storage.v_channel_scales + record * D + d));
+                    }
+                    __syncthreads();
+                }
+            }
+            gqa_prefill_stage_kv<Geometry, Bc, Threads, true>(
+                k_s, storage, kv_head, (kb + 1) * Bc, max_query_abs, physical_page,
+                metadata.table_row(), tid);
             ninfer::ops::cp_commit();
         }
 

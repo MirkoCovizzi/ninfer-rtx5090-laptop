@@ -755,8 +755,8 @@ encoder or audio projection tower. Token presence is not evidence of an audio in
   matrix. Proposal selection may use the existing full `lm_head` or the artifact's existing
   optimized proposal head; neither is a private companion parameter.
 - Public activation, cache, and recurrent-state dtypes are stated by their owning Op/state contract.
-  In particular, GDN recurrent matrices and decay controls are FP32, while registered BF16/INT8 KV
-  formats remain real persistent representation boundaries.
+  In particular, GDN recurrent matrices and decay controls are FP32, while registered BF16,
+  INT8-G64, and KVarN NVFP4-K/V2-G64 KV formats remain real persistent representation boundaries.
 - Every floating-point Op uses one independent naive FP32/FP64 mathematical oracle over its logical
   inputs. Packed weights are decoded from their stored codes and exact stored scales. Exact
   transforms and codecs use exact oracles.

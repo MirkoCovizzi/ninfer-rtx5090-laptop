@@ -5,6 +5,7 @@
 // implementation details and never enter this benchmark's dispatch or output schema.
 
 #include "ninfer/ops/gqa_attention.h"
+#include "ninfer/ops/kvarn.h"
 
 #include "core/device.h"
 #include "core/paged_kv_cache.h"
@@ -12,6 +13,8 @@
 
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -39,7 +42,7 @@ constexpr double kRtx5090DramGBs    = 1792.0;
 
 enum class Entry : std::uint8_t { Append, Cached, Both };
 enum class GeometryChoice : std::uint8_t { H24Kv4, H16Kv2, All };
-enum class KvChoice : std::uint8_t { Bf16, Int8, All };
+enum class KvChoice : std::uint8_t { Bf16, Int8, Kvarn, All };
 enum class Execution : std::uint8_t { Eager, Graph, Both };
 enum class CacheMode : std::uint8_t { Cold, Warm, Both };
 enum class CacheState : std::uint8_t { Cold, Warm };
@@ -91,13 +94,81 @@ struct Result {
     bench::ColdTiming timing;
 };
 
+__global__ void initialize_bf16_plane(__nv_bfloat16* values, std::size_t count, float phase) {
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < count) {
+        const float x = phase + 0.015625F * static_cast<float>(static_cast<int>(index % 29) - 14);
+        values[index] = __float2bfloat16(x);
+    }
+}
+
+__global__ void initialize_i8_plane(std::int8_t* values, std::size_t count, int phase) {
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < count) {
+        values[index] = static_cast<std::int8_t>((static_cast<int>(index % 23) + phase) % 17 - 8);
+    }
+}
+
+__global__ void initialize_u8_codes(std::uint8_t* values, std::size_t count, std::uint8_t a,
+                                    std::uint8_t b) {
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < count) { values[index] = (index & 1U) == 0U ? a : b; }
+}
+
+__global__ void initialize_half_plane(__half* values, std::size_t count, float base, float step) {
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < count) {
+        values[index] = __float2half_rn(base + step * static_cast<float>(index % 11));
+    }
+}
+
+void initialize_representative_cache(DeviceBuffer& k, DeviceBuffer& v, DeviceBuffer& k_scale,
+                                     DeviceBuffer& v_scale, DeviceBuffer& k_channel,
+                                     DeviceBuffer& v_channel, DeviceBuffer& v_zero, DType dtype) {
+    constexpr int block = 256;
+    const auto grid = [](std::size_t count) {
+        return static_cast<unsigned>((count + block - 1) / block);
+    };
+    if (dtype == DType::BF16) {
+        const std::size_t count = k.bytes / sizeof(__nv_bfloat16);
+        initialize_bf16_plane<<<grid(count), block>>>(static_cast<__nv_bfloat16*>(k.p), count,
+                                                       0.03125F);
+        initialize_bf16_plane<<<grid(count), block>>>(static_cast<__nv_bfloat16*>(v.p), count,
+                                                       -0.0625F);
+    } else if (dtype == DType::I8) {
+        initialize_i8_plane<<<grid(k.bytes), block>>>(static_cast<std::int8_t*>(k.p), k.bytes, 3);
+        initialize_i8_plane<<<grid(v.bytes), block>>>(static_cast<std::int8_t*>(v.p), v.bytes, 9);
+        const std::size_t scale_count = k_scale.bytes / sizeof(__half);
+        initialize_half_plane<<<grid(scale_count), block>>>(static_cast<__half*>(k_scale.p),
+                                                             scale_count, 0.006F, 0.0005F);
+        initialize_half_plane<<<grid(scale_count), block>>>(static_cast<__half*>(v_scale.p),
+                                                             scale_count, 0.018F, 0.001F);
+    } else {
+        initialize_u8_codes<<<grid(k.bytes), block>>>(static_cast<std::uint8_t*>(k.p), k.bytes,
+                                                       0x21U, 0x9aU);
+        initialize_u8_codes<<<grid(v.bytes), block>>>(static_cast<std::uint8_t*>(v.p), v.bytes,
+                                                       0xe4U, 0x1bU);
+        initialize_u8_codes<<<grid(k_scale.bytes), block>>>(
+            static_cast<std::uint8_t*>(k_scale.p), k_scale.bytes, 0x30U, 0x38U);
+        initialize_half_plane<<<grid(k_channel.bytes / sizeof(__half)), block>>>(
+            static_cast<__half*>(k_channel.p), k_channel.bytes / sizeof(__half), 0.45F, 0.025F);
+        initialize_half_plane<<<grid(v_channel.bytes / sizeof(__half)), block>>>(
+            static_cast<__half*>(v_channel.p), v_channel.bytes / sizeof(__half), 0.65F, 0.02F);
+        initialize_half_plane<<<grid(v_scale.bytes / sizeof(__half)), block>>>(
+            static_cast<__half*>(v_scale.p), v_scale.bytes / sizeof(__half), 0.08F, 0.006F);
+        initialize_half_plane<<<grid(v_zero.bytes / sizeof(__half)), block>>>(
+            static_cast<__half*>(v_zero.p), v_zero.bytes / sizeof(__half), -0.16F, 0.004F);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
 [[noreturn]] void usage(const char* message) {
     std::fprintf(stderr,
                  "error: %s\n"
                  "usage: ninfer_causal_softmax_attention_bench "
                  "[--entry append|cached|both] "
                  "[--geometry d256-h24-kv4|d256-h16-kv2|all] "
-                 "[--kv-dtype bf16|int8|all] [--batch B,...] [--tokens W,...] "
+                  "[--kv-dtype bf16|int8|kvarn|all] [--batch B,...] [--tokens W,...] "
                  "[--context L,...] [--row-contexts L0,...] [--valid-columns V0,...] "
                  "[--table-rows R0,...] "
                  "[--execution eager|graph|both] [--cache cold|warm|both] "
@@ -170,10 +241,12 @@ Options parse_options(int argc, char** argv) {
                 options.kv = KvChoice::Bf16;
             else if (value == "int8")
                 options.kv = KvChoice::Int8;
+            else if (value == "kvarn")
+                options.kv = KvChoice::Kvarn;
             else if (value == "all")
                 options.kv = KvChoice::All;
             else
-                usage("--kv-dtype expects bf16, int8, or all");
+                usage("--kv-dtype expects bf16, int8, kvarn, or all");
         } else if (argument == "--tokens") {
             options.tokens = parse_list(next("--tokens requires a value"), 1, 262144, "--tokens");
         } else if (argument == "--batch") {
@@ -291,8 +364,11 @@ Options parse_options(int argc, char** argv) {
 
 std::int32_t align_context(std::int32_t visible) { return ((visible + 127) / 128) * 128; }
 
-std::size_t cache_plane_bytes(const Geometry& geometry, DType dtype, std::int32_t physical_pages) {
-    return static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * kPagedKVPageSize *
+std::size_t cache_plane_bytes(const Geometry& geometry, DType dtype, bool key,
+                              std::int32_t physical_pages) {
+    const std::int32_t leading =
+        dtype == DType::U8 ? kHeadDim / (key ? 2 : 4) : kHeadDim;
+    return static_cast<std::size_t>(leading) * geometry.kv_heads * kPagedKVPageSize *
            physical_pages * dtype_size(dtype);
 }
 
@@ -302,31 +378,66 @@ std::size_t scale_plane_bytes(const Geometry& geometry, std::int32_t physical_pa
 }
 
 PagedKVLayerView make_cache_view(DeviceBuffer& k, DeviceBuffer& v, DeviceBuffer& k_scale,
-                                 DeviceBuffer& v_scale, DeviceBuffer& block_table,
-                                 const Geometry& geometry, DType dtype, std::int32_t padded) {
+                                  DeviceBuffer& v_scale, DeviceBuffer& k_channel,
+                                  DeviceBuffer& v_channel, DeviceBuffer& v_zero,
+                                  DeviceBuffer& tail_k, DeviceBuffer& tail_v,
+                                  DeviceBuffer& tail_pages, DeviceBuffer& block_table,
+                                  const Geometry& geometry, DType dtype, std::int32_t padded) {
     const bool quantized              = dtype == DType::I8;
+    const bool kvarn                  = dtype == DType::U8;
     const std::int32_t logical_pages  = padded / kPagedKVPageSize;
+    const std::int32_t k_leading      = kvarn ? kHeadDim / 2 : kHeadDim;
+    const std::int32_t v_leading      = kvarn ? kHeadDim / 4 : kHeadDim;
     const std::int32_t physical_pages = static_cast<std::int32_t>(
-        k.bytes / (static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * kPagedKVPageSize *
+        k.bytes / (static_cast<std::size_t>(k_leading) * geometry.kv_heads * kPagedKVPageSize *
                    dtype_size(dtype)));
     return {
         .k_pages =
-            Tensor(k.p, dtype, {kHeadDim, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+            Tensor(k.p, dtype, {k_leading, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
         .v_pages =
-            Tensor(v.p, dtype, {kHeadDim, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+            Tensor(v.p, dtype, {v_leading, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
         .k_scale_pages = quantized ? Tensor(k_scale.p, DType::FP16,
-                                            {kHeadDim / kKvGroup, kPagedKVPageSize,
-                                             geometry.kv_heads, physical_pages})
-                                   : Tensor(),
+                                             {kHeadDim / kKvGroup, kPagedKVPageSize,
+                                              geometry.kv_heads, physical_pages})
+                                    : kvarn ? Tensor(k_scale.p, DType::FP8_E4M3FN,
+                                                     {kHeadDim / 16, kPagedKVPageSize,
+                                                      geometry.kv_heads, physical_pages})
+                                            : Tensor(),
         .v_scale_pages = quantized ? Tensor(v_scale.p, DType::FP16,
-                                            {kHeadDim / kKvGroup, kPagedKVPageSize,
-                                             geometry.kv_heads, physical_pages})
-                                   : Tensor(),
+                                             {kHeadDim / kKvGroup, kPagedKVPageSize,
+                                              geometry.kv_heads, physical_pages})
+                                    : kvarn ? Tensor(v_scale.p, DType::FP16,
+                                                     {1, kPagedKVPageSize, geometry.kv_heads,
+                                                      physical_pages})
+                                            : Tensor(),
+        .k_channel_scale_pages =
+            kvarn ? Tensor(k_channel.p, DType::FP16,
+                           {kHeadDim, 1, geometry.kv_heads, physical_pages})
+                  : Tensor(),
+        .v_channel_scale_pages =
+            kvarn ? Tensor(v_channel.p, DType::FP16,
+                           {kHeadDim, 1, geometry.kv_heads, physical_pages})
+                  : Tensor(),
+        .v_zero_pages = kvarn ? Tensor(v_zero.p, DType::FP16,
+                                       {1, kPagedKVPageSize, geometry.kv_heads, physical_pages})
+                              : Tensor(),
+        .tail_k = kvarn ? Tensor(tail_k.p, DType::BF16,
+                                  {kHeadDim, kPagedKVPageSize,
+                                   geometry.kv_heads * kKvarnTailSlots})
+                         : Tensor(),
+        .tail_v = kvarn ? Tensor(tail_v.p, DType::BF16,
+                                  {kHeadDim, kPagedKVPageSize,
+                                   geometry.kv_heads * kKvarnTailSlots})
+                         : Tensor(),
+        .tail_logical_page =
+            kvarn ? Tensor(tail_pages.p, DType::I32,
+                           {geometry.kv_heads * kKvarnTailSlots})
+                  : Tensor(),
         .block_table   = Tensor(block_table.p, DType::I32, {logical_pages}),
         .head_dim      = kHeadDim,
         .num_kv_heads  = geometry.kv_heads,
         .dtype         = dtype,
-        .quant_group   = quantized ? kKvGroup : 0,
+        .quant_group   = (quantized || kvarn) ? kKvGroup : 0,
     };
 }
 
@@ -336,6 +447,15 @@ PagedKVBatchLayerView make_batch_cache_view(const PagedKVLayerView& cache) {
         .v_pages       = cache.v_pages,
         .k_scale_pages = cache.k_scale_pages,
         .v_scale_pages = cache.v_scale_pages,
+        .k_channel_scale_pages = cache.k_channel_scale_pages,
+        .v_channel_scale_pages = cache.v_channel_scale_pages,
+        .v_zero_pages = cache.v_zero_pages,
+        .tail_k = cache.tail_k.view(
+            {cache.tail_k.ne[0], cache.tail_k.ne[1], cache.tail_k.ne[2], 1}),
+        .tail_v = cache.tail_v.view(
+            {cache.tail_v.ne[0], cache.tail_v.ne[1], cache.tail_v.ne[2], 1}),
+        .tail_logical_pages = cache.tail_logical_page.view(
+            {cache.tail_logical_page.ne[0], 1}),
         .block_tables  = cache.block_table.view({cache.block_table.ne[0], 1}),
         .head_dim      = cache.head_dim,
         .num_kv_heads  = cache.num_kv_heads,
@@ -345,14 +465,29 @@ PagedKVBatchLayerView make_batch_cache_view(const PagedKVLayerView& cache) {
 }
 
 PagedKVBatchLayerView make_batch_cache_view(DeviceBuffer& k, DeviceBuffer& v, DeviceBuffer& k_scale,
-                                            DeviceBuffer& v_scale, DeviceBuffer& block_tables,
-                                            const Geometry& geometry, DType dtype,
-                                            std::int32_t padded, std::int32_t table_rows) {
+                                             DeviceBuffer& v_scale, DeviceBuffer& k_channel,
+                                             DeviceBuffer& v_channel, DeviceBuffer& v_zero,
+                                             DeviceBuffer& tail_k, DeviceBuffer& tail_v,
+                                             DeviceBuffer& tail_pages, DeviceBuffer& block_tables,
+                                             const Geometry& geometry, DType dtype,
+                                             std::int32_t padded, std::int32_t table_rows) {
     const PagedKVLayerView direct =
-        make_cache_view(k, v, k_scale, v_scale, block_tables, geometry, dtype, padded);
+        make_cache_view(k, v, k_scale, v_scale, k_channel, v_channel, v_zero, tail_k, tail_v,
+                        tail_pages, block_tables, geometry, dtype, padded);
     PagedKVBatchLayerView result = make_batch_cache_view(direct);
     result.block_tables =
         Tensor(block_tables.p, DType::I32, {padded / kPagedKVPageSize, table_rows});
+    if (dtype == DType::U8) {
+        result.tail_k = Tensor(tail_k.p, DType::BF16,
+                                {kHeadDim, kPagedKVPageSize,
+                                 geometry.kv_heads * kKvarnTailSlots, table_rows});
+        result.tail_v = Tensor(tail_v.p, DType::BF16,
+                                {kHeadDim, kPagedKVPageSize,
+                                 geometry.kv_heads * kKvarnTailSlots, table_rows});
+        result.tail_logical_pages =
+            Tensor(tail_pages.p, DType::I32,
+                   {geometry.kv_heads * kKvarnTailSlots, table_rows});
+    }
     return result;
 }
 
@@ -394,12 +529,48 @@ public:
           positions_(static_cast<std::size_t>(tokens) * batch_ * sizeof(std::int32_t)),
           valid_columns_(static_cast<std::size_t>(batch_) * sizeof(std::int32_t)),
           table_rows_(static_cast<std::size_t>(batch_) * sizeof(std::int32_t)),
-          cache_k_(bench::make_zeros(cache_plane_bytes(geometry, dtype, physical_pages_))),
-          cache_v_(bench::make_zeros(cache_plane_bytes(geometry, dtype, physical_pages_))),
+          cache_k_(bench::make_zeros(cache_plane_bytes(geometry, dtype, true, physical_pages_))),
+          cache_v_(bench::make_zeros(cache_plane_bytes(geometry, dtype, false, physical_pages_))),
           cache_k_scale_(bench::make_zeros(
-              dtype == DType::I8 ? scale_plane_bytes(geometry, physical_pages_) : std::size_t{1})),
+              dtype == DType::I8
+                  ? scale_plane_bytes(geometry, physical_pages_)
+                  : dtype == DType::U8
+                        ? static_cast<std::size_t>(kHeadDim / 16) * kPagedKVPageSize *
+                              geometry.kv_heads * physical_pages_
+                        : std::size_t{1})),
           cache_v_scale_(bench::make_zeros(
-              dtype == DType::I8 ? scale_plane_bytes(geometry, physical_pages_) : std::size_t{1})),
+              dtype == DType::I8
+                  ? scale_plane_bytes(geometry, physical_pages_)
+                  : dtype == DType::U8
+                        ? static_cast<std::size_t>(kPagedKVPageSize) * geometry.kv_heads *
+                              physical_pages_ * sizeof(std::uint16_t)
+                        : std::size_t{1})),
+          cache_k_channel_(bench::make_zeros(
+              dtype == DType::U8 ? static_cast<std::size_t>(kHeadDim) * geometry.kv_heads *
+                                       physical_pages_ * sizeof(std::uint16_t)
+                                 : std::size_t{1})),
+          cache_v_channel_(bench::make_zeros(
+              dtype == DType::U8 ? static_cast<std::size_t>(kHeadDim) * geometry.kv_heads *
+                                       physical_pages_ * sizeof(std::uint16_t)
+                                 : std::size_t{1})),
+          cache_v_zero_(bench::make_zeros(
+              dtype == DType::U8 ? static_cast<std::size_t>(kPagedKVPageSize) * geometry.kv_heads *
+                                       physical_pages_ * sizeof(std::uint16_t)
+                                 : std::size_t{1})),
+           tail_k_(bench::make_zeros(
+               dtype == DType::U8 ? static_cast<std::size_t>(kHeadDim) * kPagedKVPageSize *
+                                        geometry.kv_heads * kKvarnTailSlots * batch_ *
+                                        sizeof(std::uint16_t)
+                                  : std::size_t{1})),
+           tail_v_(bench::make_zeros(
+               dtype == DType::U8 ? static_cast<std::size_t>(kHeadDim) * kPagedKVPageSize *
+                                        geometry.kv_heads * kKvarnTailSlots * batch_ *
+                                        sizeof(std::uint16_t)
+                                  : std::size_t{1})),
+           tail_pages_(bench::make_zeros(
+               dtype == DType::U8 ? static_cast<std::size_t>(geometry.kv_heads) *
+                                        kKvarnTailSlots * batch_ * sizeof(std::int32_t)
+                                  : std::size_t{1})),
           block_table_(static_cast<std::size_t>(logical_pages_) * batch_ * sizeof(std::int32_t)),
           output_(bench::make_zeros(static_cast<std::size_t>(kHeadDim) * geometry.query_heads *
                                     tokens * batch_ * 2)),
@@ -413,10 +584,13 @@ public:
           table_rows_tensor_(table_rows_.p, DType::I32, {batch_}),
           output_tensor_(output_.p, DType::BF16, {kHeadDim, geometry.query_heads, tokens, batch_}),
           cache_view_(make_cache_view(cache_k_, cache_v_, cache_k_scale_, cache_v_scale_,
-                                      block_table_, geometry, dtype, padded_)),
+                                      cache_k_channel_, cache_v_channel_, cache_v_zero_, tail_k_,
+                                      tail_v_, tail_pages_, block_table_, geometry, dtype, padded_)),
           batch_cache_view_(make_batch_cache_view(cache_k_, cache_v_, cache_k_scale_,
-                                                  cache_v_scale_, block_table_, geometry, dtype,
-                                                  padded_, batch_)),
+                                                   cache_v_scale_, cache_k_channel_,
+                                                   cache_v_channel_, cache_v_zero_, tail_k_, tail_v_,
+                                                   tail_pages_, block_table_, geometry, dtype,
+                                                   padded_, batch_)),
           envelope_{static_cast<std::uint32_t>(visible_), static_cast<std::uint32_t>(visible_)} {
         std::vector<std::int32_t> host_positions(static_cast<std::size_t>(tokens) * batch_, 0);
         for (std::int32_t row = 0; row < batch_; ++row) {
@@ -446,7 +620,16 @@ public:
         CUDA_CHECK(cudaMemcpy(valid_columns_.p, valid_columns.data(), valid_columns_.bytes,
                               cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(table_rows_.p, table_rows.data(), table_rows_.bytes,
-                              cudaMemcpyHostToDevice));
+                               cudaMemcpyHostToDevice));
+        initialize_representative_cache(cache_k_, cache_v_, cache_k_scale_, cache_v_scale_,
+                                        cache_k_channel_, cache_v_channel_, cache_v_zero_, dtype);
+        if (dtype == DType::U8) {
+            CUDA_CHECK(cudaMemset(tail_pages_.p, 0xff, tail_pages_.bytes));
+            ops::kvarn_hadamard(q_tensor_, q_tensor_, nullptr);
+            ops::kvarn_hadamard(k_tensor_, k_tensor_, nullptr);
+            ops::kvarn_hadamard(v_tensor_, v_tensor_, nullptr);
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
     }
 
     void launch(Entry entry, cudaStream_t stream) {
@@ -481,6 +664,12 @@ private:
     DeviceBuffer cache_v_;
     DeviceBuffer cache_k_scale_;
     DeviceBuffer cache_v_scale_;
+    DeviceBuffer cache_k_channel_;
+    DeviceBuffer cache_v_channel_;
+    DeviceBuffer cache_v_zero_;
+    DeviceBuffer tail_k_;
+    DeviceBuffer tail_v_;
+    DeviceBuffer tail_pages_;
     DeviceBuffer block_table_;
     DeviceBuffer output_;
     std::size_t workspace_bytes_;
@@ -499,7 +688,10 @@ private:
 
 const char* entry_name(Entry entry) { return entry == Entry::Append ? "append" : "cached"; }
 
-const char* dtype_name(DType dtype) { return dtype == DType::BF16 ? "bf16" : "int8"; }
+const char* dtype_name(DType dtype) {
+    if (dtype == DType::BF16) { return "bf16"; }
+    return dtype == DType::I8 ? "int8" : "kvarn";
+}
 
 const char* execution_name(Execution execution) {
     return execution == Execution::Eager ? "eager" : "graph";
@@ -521,10 +713,18 @@ std::string profile_name(std::span<const std::int32_t> values) {
 }
 
 double cache_vector_bytes(DType dtype) {
-    return dtype == DType::BF16
-               ? static_cast<double>(kHeadDim * dtype_size(DType::BF16))
-               : static_cast<double>(kHeadDim * dtype_size(DType::I8) +
-                                     (kHeadDim / kKvGroup) * dtype_size(DType::FP16));
+    if (dtype == DType::BF16) {
+        return static_cast<double>(kHeadDim * dtype_size(DType::BF16));
+    }
+    if (dtype == DType::I8) {
+        return static_cast<double>(kHeadDim * dtype_size(DType::I8) +
+                                   (kHeadDim / kKvGroup) * dtype_size(DType::FP16));
+    }
+    const double k_bytes = kHeadDim / 2.0 + kHeadDim / 16.0 +
+                           kHeadDim * dtype_size(DType::FP16) / kPagedKVPageSize;
+    const double v_bytes = kHeadDim / 4.0 + 2.0 * dtype_size(DType::FP16) +
+                           kHeadDim * dtype_size(DType::FP16) / kPagedKVPageSize;
+    return 0.5 * (k_bytes + v_bytes);
 }
 
 double causal_key_sum(std::int32_t tokens, std::int32_t context) {
@@ -660,7 +860,8 @@ std::vector<Geometry> selected_geometries(GeometryChoice choice) {
 std::vector<DType> selected_dtypes(KvChoice choice) {
     if (choice == KvChoice::Bf16) { return {DType::BF16}; }
     if (choice == KvChoice::Int8) { return {DType::I8}; }
-    return {DType::BF16, DType::I8};
+    if (choice == KvChoice::Kvarn) { return {DType::U8}; }
+    return {DType::BF16, DType::I8, DType::U8};
 }
 
 struct RowProfile {

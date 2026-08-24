@@ -13,6 +13,7 @@
 namespace ninfer {
 
 inline constexpr std::int32_t kPagedKVPageSize = 64;
+inline constexpr std::int32_t kKvarnTailSlots   = 2;
 
 /**
  * Non-owning, single-sequence view consumed by growing-cache Ops.
@@ -25,6 +26,12 @@ struct PagedKVLayerView {
     Tensor v_pages;
     Tensor k_scale_pages;
     Tensor v_scale_pages;
+    Tensor k_channel_scale_pages;
+    Tensor v_channel_scale_pages;
+    Tensor v_zero_pages;
+    Tensor tail_k;
+    Tensor tail_v;
+    Tensor tail_logical_page;
     Tensor block_table;
     std::int32_t head_dim     = 0;
     std::int32_t num_kv_heads = 0;
@@ -44,6 +51,12 @@ struct PagedKVBatchLayerView {
     Tensor v_pages;
     Tensor k_scale_pages;
     Tensor v_scale_pages;
+    Tensor k_channel_scale_pages;
+    Tensor v_channel_scale_pages;
+    Tensor v_zero_pages;
+    Tensor tail_k;
+    Tensor tail_v;
+    Tensor tail_logical_pages;
     Tensor block_tables;
     std::int32_t head_dim     = 0;
     std::int32_t num_kv_heads = 0;
@@ -57,6 +70,9 @@ struct PagedKVPlaneSpec {
     std::int32_t leading_extent = 0;
     std::int32_t head_extent    = 0;
     std::size_t alignment       = 256;
+    // Number of records carried by one physical page group. Ordinary per-token planes use P=64;
+    // tile metadata can use one record without wasting a 64x token axis.
+    std::int32_t page_extent    = kPagedKVPageSize;
 };
 
 enum class PagedKVPlaneOrder : std::uint8_t {

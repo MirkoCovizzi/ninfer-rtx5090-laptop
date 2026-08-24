@@ -47,7 +47,7 @@ q36::DecoderStateSpec decoder_spec(ninfer::DType dtype, bool mtp) {
         .kv_heads                  = 2,
         .attention_head_dim        = 64,
         .kv_dtype                  = dtype,
-        .kv_quant_group            = dtype == ninfer::DType::I8 ? q36::kKvQuantGroup : 0,
+        .kv_quant_group            = dtype == ninfer::DType::BF16 ? 0 : q36::kKvQuantGroup,
         .enable_mtp                = mtp,
         .text_physical_page_groups = 5,
         .mtp_physical_page_groups  = mtp ? 4U : 0U,
@@ -103,7 +103,26 @@ void test_decoder_layout() {
                int8.mtp_kv->pool.planes[3].spec.dtype == ninfer::DType::FP16,
            "INT8 MTP KV has scale planes");
     expect(int8.kv_payload_bytes() == int8.text_kv.payload_bytes() + int8.mtp_kv->payload_bytes(),
-           "INT8 Text/MTP KV payload accounting");
+            "INT8 Text/MTP KV payload accounting");
+
+    ninfer::LayoutBuilder kvarn_builder;
+    const q36::DecoderStateLayout kvarn =
+        q36::plan_decoder_state(kvarn_builder, decoder_spec(ninfer::DType::U8, true));
+    (void)kvarn_builder.finish(256);
+    expect(kvarn.text_kv.pool.planes.size() == 14 &&
+               kvarn.text_kv.pool.planes[0].spec.leading_extent == 32 &&
+               kvarn.text_kv.pool.planes[1].spec.leading_extent == 16 &&
+               kvarn.text_kv.pool.planes[2].spec.page_extent == 64 &&
+               kvarn.text_kv.pool.planes[3].spec.page_extent == 1 &&
+               kvarn.text_kv.pool.planes[6].spec.page_extent == 64,
+           "KVarN Text KV has K4/V2 codes and page-scoped channel metadata");
+    expect(kvarn.text_kv.kvarn_tail_k.region.bytes != 0 &&
+               kvarn.text_kv.kvarn_tail_v.region.bytes != 0 &&
+               kvarn.text_kv.kvarn_tail_logical_pages.region.bytes != 0,
+           "KVarN Text KV owns two lossless tail slots and markers");
+    expect(kvarn.mtp_kv.has_value() && kvarn.mtp_kv->pool.planes.size() == 7 &&
+               kvarn.mtp_kv->kvarn_tail_logical_pages.region.bytes != 0,
+           "KVarN MTP KV uses the same represented storage contract");
 }
 
 void test_round_layout() {

@@ -31,6 +31,8 @@ struct GqaPrefillDirectMetadata {
     __device__ __forceinline__ std::int32_t valid_tokens(std::int32_t width) const { return width; }
 
     __device__ __forceinline__ const std::int32_t* block_table() const { return table; }
+
+    __device__ __forceinline__ std::int32_t table_row() const { return 0; }
 };
 
 template <bool Masked>
@@ -51,6 +53,8 @@ struct GqaPrefillBatchMetadata {
     __device__ __forceinline__ const std::int32_t* block_table() const {
         return tables + static_cast<std::int64_t>(table_rows[0]) * table_stride;
     }
+
+    __device__ __forceinline__ std::int32_t table_row() const { return table_rows[0]; }
 };
 
 template <typename Geometry>

@@ -79,6 +79,49 @@ finish reason, and fixture-level structural requirements are audited separately 
 that exhausts its output budget or enters a repetition loop remains useful as a sustained-decode
 stress sample, but is not presented as a successfully completed task.
 
+## Qwen3.8-27B KVarN qualification
+
+The KVarN NVFP4-K/V2-G64 cache was qualified on the RTX 5090 with CUDA 13.1 and the registered
+Qwen3.8-27B NVFP4 artifact. The deterministic ledger corpus uses only same-schema, numerically dense
+records. Targets and near misses share vocabulary and differ only in composite fields; cases cover
+single and multi-record lookup, a later conflicting revision, and an absent composite key.
+
+At approximately 13.2K prompt tokens, BF16, INT8-G64, and KVarN each answered all four cases exactly.
+At approximately 64.3K tokens, BF16 remained 4/4 while INT8-G64 and KVarN were 3/4: both compressed
+caches replaced the first result of the three-record query with the same valid near-match. MTP3
+reproduced the MTP0 answers exactly, locating this difference in represented KV precision rather
+than speculative acceptance or commit behavior. A separate 48-request MTP0 slice at approximately
+32.2K and 80.3K tokens, 10% and 90% depths, and all four variants passed exactly for every cache;
+the 64K miss is content/margin-specific rather than a monotonic length failure. On the 64K cases,
+mean prefill rates were 2,708, 2,707, and 2,049 tok/s for BF16, INT8-G64, and KVarN respectively. The
+32K/80K slice averaged 3,004, 3,005, and 2,348 tok/s. KVarN therefore trades both retrieval margin
+and current prefill speed for capacity; it is not a BF16-equivalent quality mode.
+
+A separate exact-recall stress used the production KVarN shape: 180,000-token context,
+360,064-token shared capacity, two resident request slots, MTP3, optimized proposal head, and greedy
+sampling. Its 87,897-token prompt requested verbatim reproduction of a same-pattern SVG longer than
+the 80,000-token output budget. The request reached that output limit at 77.4 decode tok/s with 89.7%
+MTP acceptance. After removing one opening Markdown fence, all 116,496 emitted payload characters
+were the exact source prefix through record 2,428, and the periodic-suffix scan found no cycle. This
+test does not reproduce an 80K generation loop; it specifically rules out deterministic KVarN
+cache-state or MTP-commit corruption for this represented workload, not model-level looping for all
+prompts.
+
+A maximum-context multi-needle qualification used a 262,144-token context and KVarN capacity on an
+RTX 5090 Laptop GPU with 24 GiB, MTP0 and MTP `k=3`, the optimized proposal head for MTP, greedy
+decoding, thinking disabled, prefix reuse disabled, and FP64 phase reduction for Text RoPE before
+FP32 trigonometric evaluation. The tokenizer-calibrated prompt contained 259,961 tokens, 64
+stratified composite-key needles spanning 1.46% through 98.78% document depth, twelve local
+near-match distractors per needle, and a 2,048-token output allowance. MTP0 and MTP3 emitted the
+same 1,013-token response and stopped naturally. Both emitted every requested label exactly once and
+recalled 63/64 values: early and middle thirds were 21/21 and 22/22, while the late third was 20/21
+with one wrong value at 74.05% depth. Neither response had detected terminal repetition. MTP0
+measured 745.7 prefill tok/s and 26.4 decode tok/s; MTP3 measured 742.8 prefill tok/s and 39.4 decode
+tok/s with 731/852 accepted drafts (85.8%). A focused real-artifact test also produced exact greedy
+token parity for BF16, INT8-G64, and KVarN with every MTP draft window from one through five. This is
+not a same-context cache-format comparison; the 24 GiB device cannot hold this artifact's
+262,144-token INT8 pool.
+
 ## Qwen3.8-27B NVFP4 concurrent MTP3 corpus makespan
 
 This campaign uses the complete speculative-decode corpus described above: three long-reasoning

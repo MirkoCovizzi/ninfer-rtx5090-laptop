@@ -19,7 +19,7 @@ Op 的状态效果、kernel 寻址约束和性能准入条件。具体 allocator
 - active request 一旦 admission，其声明范围内的 prefill、decode 和 speculative temporary growth
   都有 completion capacity guarantee；
 - 一个 GPU execution unit 期间，page mappings 和 logical valid frontiers 保持稳定；
-- BF16、INT8-G64 以及 target 定义的其他固定 bytes-per-token layouts 使用同一管理语义；
+- BF16、INT8-G64、KVarN NVFP4-K/V2-G64 以及 target 定义的其他 closed layouts 使用同一管理语义；
 - common allocator 不理解 GQA、MHA、MLA、MTP 或 DFlash 等模型语义；
 - single-sequence prefill/cached consumers 和 batched ordinary/MTP/DFlash decode consumers 都直接消费
   paged KV，不要求任何 sequence 的 growing KV 物理连续；
@@ -240,8 +240,8 @@ allocator、runtime repartition 或 compaction。
 
 | Pool | Grouped planes | Pool frontier |
 |---|---|---|
-| Main Text | 所有 target full-attention layers 的 K、V 和 optional code/scale planes | target materialized KV frontier |
-| MTP | MTP layer 的 K、V 和 optional code/scale planes | MTP KV frontier |
+| Main Text | 所有 target full-attention layers 的 K、V 和 optional code/scale/tile-metadata planes | target materialized KV frontier |
+| MTP | MTP layer 的 K、V 和 optional code/scale/tile-metadata planes | MTP KV frontier |
 | DFlash Full | DFlash full-context layer 的 K、V planes | DFlash context frontier |
 
 Text、MTP 和 DFlash 不组成同一个 physical page group，因为它们可以具有不同 valid/provisional
@@ -304,8 +304,10 @@ DFlash Full: K[d,h,p] = k_pages[d,o,g,h]
              V[d,h,p] = v_pages[d,o,g,h]
 ```
 
-INT8 code 使用同一公式；scale 把 `d` 换成 quant group `d/64`。K、V、code 和 scale 不保存各自的
-page pointer table，而是使用同一个 pool-local page-group ID `g`。
+INT8 code 使用同一公式；scale 把 `d` 换成 quant group `d/64`。KVarN 的 token-indexed code、K16
+scale 和 V token scale/zero 同样使用该公式；每个完整 64-token tile 的 K/V channel scale 使用
+`page_extent=1`，由 `g` 和 head 直接选择。K、V、code 和全部 metadata planes 不保存各自的 page
+pointer table，而是使用同一个 pool-local page-group ID `g`。
 
 Common allocator 接收已经确定的 closed plane order、bytes、strides 和 alignment，不从中推导 head、codec
 或 Attention 语义。Production wrapper 只接受其 route 对应的上述 closed stride formula。Kernel 在
@@ -363,7 +365,17 @@ BF16 bytes/token
 INT8-G64 bytes/token
     = 2(K,V) * L * H * D
     + 2(K,V) * L * H * (D/64) * sizeof(FP16 scale)
+
+KVarN NVFP4-K/V2-G64 bytes/token over a complete page
+    = L * H * (D/2 K-code + D/16 FP8 K-block-scale
+               + D/4 V-code + 2 FP16 V-token metadata
+               + 2*D*sizeof(FP16)/64 K/V channel metadata)
 ```
+
+KVarN 另外按 active table row 为每层、每个 KV head 固定持有两个 BF16 K/V tail slots 和两个 I32
+logical-page markers。它们不随 shared physical page-group capacity 增长，因此属于 persistent
+sequence-state layout，而不计入上式 pool bytes/token。两个 slots 允许同一 execution unit 跨过 page
+boundary：旧 slot 在 unit 末尾变成完整 tile 并压缩，新 slot 保留新的部分页。
 
 一个 homogeneous pool 的 logical page-group payload 是其全部 grouped planes 的 bytes/token 之和乘以
 该 pool 的 `P`。Startup physical pool bytes 则由 registered plane storage spans 之和再加 slab/head
@@ -600,12 +612,16 @@ blocks；其 Full pool 使用 §4.3 的 head-major page-run order。两者保留
 |---|---|---:|---:|---:|
 | 27B Main Text | BF16 | 65536 | 4.0000 MiB | 3.9375 MiB |
 | 27B Main Text | INT8-G64 | 33792 | 2.0625 MiB | 2.0303 MiB |
+| 27B Main Text | KVarN NVFP4-K/V2-G64 | 14592 | 0.8906 MiB | 0.8767 MiB |
 | 35B-A3B Main Text | BF16 | 20480 | 1.2500 MiB | 1.2305 MiB |
 | 35B-A3B Main Text | INT8-G64 | 10560 | 0.6445 MiB | 0.6345 MiB |
+| 35B-A3B Main Text | KVarN NVFP4-K/V2-G64 | 4560 | 0.2783 MiB | 0.2740 MiB |
 | 27B MTP | BF16 | 4096 | 0.2500 MiB | 0.2461 MiB |
 | 27B MTP | INT8-G64 | 2112 | 0.1289 MiB | 0.1269 MiB |
+| 27B MTP | KVarN NVFP4-K/V2-G64 | 912 | 0.0557 MiB | 0.0548 MiB |
 | 35B-A3B MTP | BF16 | 2048 | 0.1250 MiB | 0.1230 MiB |
 | 35B-A3B MTP | INT8-G64 | 1056 | 0.0645 MiB | 0.0634 MiB |
+| 35B-A3B MTP | KVarN NVFP4-K/V2-G64 | 456 | 0.0278 MiB | 0.0274 MiB |
 | 35B-A3B DFlash Full | BF16 | 4096 | 0.2500 MiB | 0.2461 MiB |
 
 27B Main Text BF16 的 4 MiB page group 分布在全部 full-attention planes。单层单个 K 或 V plane
@@ -698,6 +714,14 @@ materialize 所需 pages。Chunk 成功后，target 才推进对应 pool frontie
 
 Chunk 内部分 layers 已写、但 unit 未成功完成时，不发布新的 frontier；GPU/state-integrity failure 按
 Engine-wide failure 处理。
+
+KVarN append 先对 Q/K/V 的 head-dimension 向量应用 orthonormal Hadamard rotation，并把本 unit
+触及的 partial page 写入 row/layer/head-private BF16 tail slot。Small-T append-and-attend 在 Attention 前
+编码本 unit 填满的 64-token tile，但保留对应 marker：跨 page 的 earlier query column 从自己的 BF16
+current-page tail 读取，later column 从 encoded predecessor page 读取，因而与逐 column T=1 transition
+一致。全部 affected full-attention layers 完成后，target 执行一次 cross-layer flush 并 retire committed
+full markers；partial marker 保留。Speculative unit 必须先完成 accept，再用 accepted prefix 执行 retire，
+不能用 provisional verification width 清除 marker。Frontier 只能在整个 unit 和 commit-aware flush 成功后发布。
 
 ### 9.3 Ordinary decode
 
@@ -820,7 +844,9 @@ backend pool 获取，只是与 Main Text pool 物理分离。
 ```
 
 不同 requests 接受不同 proposal length，只改变各自 bundle frontiers，不形成新的 pool type。Rejected
-bytes 可以留在部分尾页；后续 append 在它们重新变为 valid 前必须完整覆盖对应 code 和 scale planes。
+bytes 可以留在部分尾页；后续 append 在它们重新变为 valid 前必须完整覆盖对应 K/V、code、scale、
+zero 或 BF16-tail payload。KVarN rollback/truncate 不把 tile marker 当成 frontier；保留页内 continuation
+时保留对应 tail，fresh lane reuse 则先把该 row 的全部 tail markers 重置为 invalid。
 
 KV Store 不理解 proposal、verify 或 acceptance，也不推导 Main Text、MTP 与 DFlash frontiers 之间的
 关系。Target 把每个 pool 的最终 frontier 作为 transaction result 提交。
@@ -883,7 +909,8 @@ fixed unit；new admission 可以 claim 或先驱逐 retained entry，不能降�
 4. admission 对完整 pool reservation vector 原子成功或失败；
 5. 一个 execution unit 内所有 pool mappings 不变；
 6. operator 只能读取对应 pool valid frontier 内的 positions；
-7. frontier publish 前，该 pool position 的完整 K/V 以及必要 code/scale planes 必须已经写入；
+7. frontier publish 前，该 pool position 的完整 K/V 以及必要 code/scale/zero planes 或合法 BF16 tail
+   representation 必须已经写入；
 8. page recycle 不要求清零，但新 owner 不得从旧 frontier 或 stale bytes 推导有效状态；
 9. page mapping 使用 cache ordinal，不使用 RoPE/MRoPE coordinate；
 10. prefix hit 必须由完整 SequenceState 证明，KV token match 或 page match 本身不构成 hit；
@@ -903,7 +930,9 @@ fixed unit；new admission 可以 claim 或先驱逐 retained entry，不能降�
 19. DFlash local 与 boundary-local 分别拥有 §12.1 的完整 fixed cyclic payload；absolute position 只通过
     `p mod 4096` 选择 physical slot，两者不共享可写 backing storage；
 20. MTP Vision prefill，以及任一 selected backend 下的 prefix reuse 和 ordinary tail round，都不得把
-    sequence 降级为缺少该 backend continuation state。
+    sequence 降级为缺少该 backend continuation state；
+21. KVarN full-page marker 只能在全部 represented planes 发布后清除；partial marker 必须跟随同一
+    lane/layer/head continuation，fresh lane reuse 必须先失效该 row 的旧 markers。
 
 ---
 
@@ -955,10 +984,11 @@ PagedKVLayerView
 ├── v_pages           Tensor (route-closed physical axes)
 ├── k_scale_pages     optional Tensor (same pool order)
 ├── v_scale_pages     optional Tensor (same pool order)
+├── KVarN channel-scale/zero planes and BF16 two-tail view (KVarN only)
 ├── block_table       I32 Tensor [Nlogical]
 ├── head_dim          D
 ├── num_kv_heads      Hkv
-├── dtype             BF16 or I8
+├── dtype             BF16, I8, or U8 (KVarN closed profile)
 └── quant_group       0 or 64
 ```
 
@@ -988,6 +1018,7 @@ Batched growing KV consumer 使用同一组 typed plane tensors 和完整 block-
 PagedKVBatchLayerView
 ├── k_pages / v_pages
 ├── optional k_scale_pages / v_scale_pages
+├── optional KVarN channel-scale/zero planes and row-indexed BF16 two-tail views
 ├── block_tables       I32 Tensor [Nlogical,C]
 ├── head_dim / num_kv_heads
 └── dtype / quant_group
@@ -1029,6 +1060,12 @@ INT8 scale 使用 quant group `d/64` 作为第一维坐标，并使用 scale Ten
 取得 `physical_page` 后，同一 pool 的 K、V、code 和 scale 都复用该 page-group ID。Exact strides 由
 §4.2 对该 pool 唯一确定。
 
+KVarN 使用同一个 `physical_page` 选择 K4/V2 code、K-block scale、K/V channel scale 和 V token
+scale/zero。若 `(logical_page,head)` 匹配当前 row 的一个 tail marker，consumer 改读该 slot 的 BF16 K/V；
+否则必须读完整 encoded tile。Small-T A1 在 page transition 中允许 full tail marker 与已发布 encoded
+planes 暂时共存；每个 query column 仅把自己的 current logical page 解释为 BF16 tail，之前的完整 page
+解释为 encoded tile。Marker lookup 不改变逻辑 valid frontier。
+
 上述公式是 Op contract，不要求 production kernel 在每个 element 上执行四次通用整数乘法。Wrapper
 验证 route-closed strides；CTA 在 page/head 粒度计算 base 并广播，inner loop 继续使用静态 row/vector
 offsets。Production kernel 不检查 page ID 是否为 sentinel；mapping completeness 已由 execution-unit
@@ -1066,6 +1103,7 @@ storage/view boundary。
 | `gqa_attention` | writable `PagedKVBatchLayerView` + `table_rows[B]` | 为 `B` 条独立 sequences append valid K/V columns，并执行一次 ragged causal Attention |
 | `gqa_attention_cached` | read-only `PagedKVLayerView` | 只读已经 populated 的 paged cache |
 | `gqa_kv_append` | writable `PagedKVLayerView` | 写入全部 supplied rows，BF16 copy 或 INT8-G64 encode |
+| `gqa_kvarn_flush_full_pages` | 同 geometry 的 writable KVarN layer views | 跨 layers 压缩 committed prefix 填满的 tail tiles，并 retire full markers；speculative caller 在 accept 后提供 committed columns |
 | `kv_cache_append_prefix` growing entry | writable `PagedKVBatchLayerView` + counts/table rows | 只写每行 device count 选择的 exact prefix |
 | `bidirectional_gqa_attention` | read-only `PagedKVBatchLayerView` + table rows | batched 读取 DFlash Full pool；query K/V 仍是 transient Tensor |
 | `kv_cache_append_prefix` cyclic entry | batched `CyclicKVCacheLayerView` + lane selectors | DFlash local fixed window，不属于 growing pool |

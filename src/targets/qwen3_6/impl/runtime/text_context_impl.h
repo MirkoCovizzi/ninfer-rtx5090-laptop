@@ -16,6 +16,7 @@
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/gqa_attention.h"
+#include "ninfer/ops/kvarn.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_pair.h"
@@ -385,6 +386,13 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
     ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
 
     Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
+    const PagedKVBatchLayerView mtp_cache = batch_mtp_kv_->batch_layer_view(0);
+    const bool kvarn = mtp_cache.dtype == DType::U8;
+    if (kvarn) {
+        ops::kvarn_hadamard(qn, qn, s);
+        ops::kvarn_hadamard(kn, kn, s);
+        ops::kvarn_hadamard(v, v, s);
+    }
     if (active_sequence_batch_ != 0) {
         const std::int32_t width = active_sequence_width_;
         if (width <= 0 || width * active_sequence_batch_ != T ||
@@ -397,12 +405,23 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
         Tensor a_batch        = a.view({kCfg.head_dim, kCfg.n_q, width, active_sequence_batch_});
         Tensor position_batch = positions.view({width, active_sequence_batch_});
         ops::gqa_attention(q_batch, k_batch, v_batch, position_batch, *active_valid_columns_,
-                           *active_backend_kv_table_rows_, kAttnScale,
-                           batch_mtp_kv_->batch_layer_view(0), envelope, work_, a_batch, s);
+                           *active_backend_kv_table_rows_, kAttnScale, mtp_cache, envelope, work_,
+                           a_batch, s);
+        if (kvarn) {
+            const std::array<PagedKVBatchLayerView, 1> layers{mtp_cache};
+            ops::gqa_kvarn_flush_full_pages(layers, position_batch, *active_valid_columns_,
+                                            *active_backend_kv_table_rows_, s);
+        }
     } else {
         ops::gqa_attention(qn, kn, v, positions, Tensor{}, io_.backend_kv_table_row, kAttnScale,
-                           batch_mtp_kv_->batch_layer_view(0), envelope, work_, a, s);
+                           mtp_cache, envelope, work_, a, s);
+        if (kvarn) {
+            const std::array<PagedKVBatchLayerView, 1> layers{mtp_cache};
+            ops::gqa_kvarn_flush_full_pages(layers, positions.view({T, 1}), Tensor{},
+                                            io_.backend_kv_table_row.view({1}), s);
+        }
     }
+    if (kvarn) { ops::kvarn_hadamard(a, a, s); }
     ops::sigmoid_mul(gate, a, s);
 
     const auto post = workspace_recipe::mtp_post_attention<TextConfig>(work_, T);
@@ -487,6 +506,11 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         Tensor kn = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_kv, T});
         ops::rmsnorm(k, *mtp_.k_norm, kCfg.rms_eps, true, kn, s);
         ops::rope(rope_positions, kCfg.rotary_dim, kCfg.rope_theta, kn, s);
+        const bool kvarn = mtp_kv_.layer_view(0).dtype == DType::U8;
+        if (kvarn) {
+            ops::kvarn_hadamard(kn, kn, s);
+            ops::kvarn_hadamard(v, v, s);
+        }
         ops::gqa_kv_append(kn, v, positions, mtp_kv_.layer_view(0), s);
 
         if (final_chunk) {
@@ -529,8 +553,11 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         ops::rope(last_rope_position, kCfg.rotary_dim, kCfg.rope_theta, qn, s);
 
         Tensor a = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_q, 1});
+        const bool kvarn = mtp_kv_.layer_view(0).dtype == DType::U8;
+        if (kvarn) { ops::kvarn_hadamard(qn, qn, s); }
         ops::gqa_attention_cached(qn, last_position, kAttnScale, mtp_kv_.layer_view(0), envelope,
                                   work_, a, s);
+        if (kvarn) { ops::kvarn_hadamard(a, a, s); }
         ops::sigmoid_mul(gate, a, s);
 
         Tensor o = work_.alloc(DType::BF16, {kCfg.hidden, 1});
@@ -545,6 +572,11 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         }
         ops::rmsnorm(x_last, *mtp_.norm, kCfg.rms_eps, true, *final_hidden, s);
         proposal_argmax(*final_hidden, *logits, *draft_token);
+    }
+    if (mtp_kv_.layer_view(0).dtype == DType::U8) {
+        const std::array<PagedKVBatchLayerView, 1> layers{batch_mtp_kv_->batch_layer_view(0)};
+        ops::gqa_kvarn_flush_full_pages(layers, positions.view({T, 1}), Tensor{},
+                                        io_.backend_kv_table_row.view({1}), s);
     }
 }
 
@@ -747,7 +779,22 @@ void TextContext::target_verify_batch(const Tensor& ids, const Tensor& cache_pos
                                       Tensor& logits, Tensor& target_tokens,
                                       DFlashFeatureSink& sink) {
     target_verify_batch_impl(ids, cache_positions, rope_positions, valid_columns, kv_table_rows,
-                             linear_state_slots, envelope, hidden, logits, target_tokens, sink);
+                              linear_state_slots, envelope, hidden, logits, target_tokens, sink);
+}
+
+void TextContext::commit_target_kvarn_pages(const Tensor& cache_positions,
+                                            const Tensor& committed_columns,
+                                            const Tensor& kv_table_rows) {
+    const PagedKVBatchLayerView first_cache = batch_text_kv_->batch_layer_view(0);
+    if (first_cache.dtype != DType::U8) { return; }
+
+    std::array<PagedKVBatchLayerView, TextConfig::full_attention_layers()> layers{};
+    layers[0] = first_cache;
+    for (std::size_t layer = 1; layer < layers.size(); ++layer) {
+        layers[layer] = batch_text_kv_->batch_layer_view(static_cast<std::uint32_t>(layer));
+    }
+    ops::gqa_kvarn_flush_full_pages(layers, cache_positions, committed_columns, kv_table_rows,
+                                    ctx_.stream);
 }
 
 void TextContext::mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidden,
@@ -824,6 +871,16 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
 
     Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
+    PagedKVBatchLayerView cache = batch_text_kv_->batch_layer_view(fidx);
+    const bool kvarn            = cache.dtype == DType::U8;
+    if (kvarn) {
+        // KVarN stores K and V in the orthonormal Hadamard frame. Rotating Q preserves QK, and
+        // applying the same self-inverse transform to the attention result restores the model's
+        // original V/output frame.
+        ops::kvarn_hadamard(qn, qn, s);
+        ops::kvarn_hadamard(kn, kn, s);
+        ops::kvarn_hadamard(v, v, s);
+    }
     const Tensor& kv_table_rows =
         active_kv_table_rows_ != nullptr ? *active_kv_table_rows_ : io_.text_kv_table_row;
     if (active_sequence_batch_ != 0) {
@@ -838,13 +895,14 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
         Tensor position_batch = cache_positions.view({width, active_sequence_batch_});
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
         ops::gqa_attention(q_batch, k_batch, v_batch, position_batch, valid, kv_table_rows,
-                           kAttnScale, batch_text_kv_->batch_layer_view(fidx),
+                            kAttnScale, cache,
                            *active_gqa_envelope_, work_, a_batch, s);
     } else {
         ops::gqa_attention(qn, kn, v, cache_positions, Tensor{}, kv_table_rows, kAttnScale,
-                           batch_text_kv_->batch_layer_view(fidx), *active_gqa_envelope_, work_, a,
-                           s);
+                            cache, *active_gqa_envelope_, work_, a,
+                            s);
     }
+    if (kvarn) { ops::kvarn_hadamard(a, a, s); }
     ops::sigmoid_mul(gate, a, s);
 
     Variant::attention_output_projection(a.view({kCfg.q_size, T}), *w.o_proj, x, ph, work_, s);
@@ -1011,6 +1069,24 @@ void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
                 if constexpr (Tap::enabled) { tap.capture_layer(layer, x, ctx_.stream); }
             }
         }
+    }
+    const PagedKVBatchLayerView first_cache = batch_text_kv_->batch_layer_view(0);
+    if (first_cache.dtype == DType::U8 && active_valid_columns_ == nullptr) {
+        std::array<PagedKVBatchLayerView, TextConfig::full_attention_layers()> layers{};
+        layers[0] = first_cache;
+        for (std::size_t layer = 1; layer < layers.size(); ++layer) {
+            layers[layer] = batch_text_kv_->batch_layer_view(static_cast<std::uint32_t>(layer));
+        }
+        const Tensor& positions =
+            active_cache_positions_ != nullptr ? *active_cache_positions_ : io_.pos;
+        const Tensor& rows =
+            active_kv_table_rows_ != nullptr ? *active_kv_table_rows_ : io_.text_kv_table_row;
+        const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
+        const std::int32_t batch = active_sequence_batch_ != 0 ? active_sequence_batch_ : 1;
+        const std::int32_t width = active_sequence_batch_ != 0 ? active_sequence_width_
+                                                               : positions.ne[0];
+        ops::gqa_kvarn_flush_full_pages(layers, positions.view({width, batch}), valid,
+                                        rows.view({batch}), ctx_.stream);
     }
 }
 

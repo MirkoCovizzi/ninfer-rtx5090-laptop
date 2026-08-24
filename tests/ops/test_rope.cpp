@@ -22,7 +22,7 @@ constexpr float kVisionTheta = 10'000.0F;
 // Either member of a rotated pair can approach zero through cancellation. The scale-invariant
 // RoPE BF16 profile therefore bounds each output by the FP64 norm of its public input pair rather
 // than by the cancelled output value.
-constexpr double kRopePointwisePairRtol = 6.9e-3;
+constexpr double kRopePointwisePairRtol = 4.1e-3;
 
 struct Geometry {
     const char* label;
@@ -423,6 +423,8 @@ int main() {
     // Text pair form: both registered checkpoint geometries, decode/prefill, and 1-D/MRoPE.
     failures += run_pair_case({"27b text decode", 256, 64, 1, 1, kTextTheta}, 24, 4, 31);
     failures += run_pair_case({"27b text mrope prefill", 256, 64, 3, 128, kTextTheta}, 24, 4, 4096);
+    failures +=
+        run_pair_case({"27b text late context", 256, 64, 1, 7, kTextTheta}, 24, 4, 252'128);
     failures +=
         run_pair_case({"35b text native-context tail", 256, 64, 1, 7, kTextTheta}, 16, 2, 262'137);
     failures += run_pair_case({"35b text mrope", 256, 64, 3, 7, kTextTheta}, 16, 2, 2048, 16, 8);

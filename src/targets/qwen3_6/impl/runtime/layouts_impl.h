@@ -27,6 +27,18 @@
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {
 namespace {
 
+DType kv_storage_dtype(KvCacheStorage storage) {
+    switch (storage) {
+    case KvCacheStorage::BFloat16:
+        return DType::BF16;
+    case KvCacheStorage::Int8Group64:
+        return DType::I8;
+    case KvCacheStorage::KvarnNvfp4V2Group64:
+        return DType::U8;
+    }
+    throw std::invalid_argument("unsupported KV cache storage");
+}
+
 constexpr std::size_t kMiB        = 1024ULL * 1024ULL;
 constexpr std::size_t kArenaAlign = 256ULL;
 
@@ -695,7 +707,7 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
         .draft_window        = options.speculative.draft_tokens,
         .speculative_backend = options.speculative.backend,
-        .kv_dtype       = options.kv_cache == KvCacheStorage::BFloat16 ? DType::BF16 : DType::I8,
+        .kv_dtype       = kv_storage_dtype(options.kv_cache),
         .kv_quant_group = options.kv_cache == KvCacheStorage::BFloat16 ? 0 : qwen3_6::kKvQuantGroup,
         .proposal_head  = options.speculative.proposal_head,
         .features       = qwen3_6::startup_features(options),

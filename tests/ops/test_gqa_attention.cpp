@@ -1,7 +1,9 @@
 #include "core/arena.h"
 #include "core/paged_kv_cache.h"
 #include "ninfer/ops/gqa_attention.h"
+#include "ninfer/ops/kvarn.h"
 #include "ops/op_tester.h"
+#include "ops/quantized_weight.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,6 +13,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <span>
 #include <string>
 #include <vector>
@@ -38,6 +41,21 @@ constexpr ReductionCriterion kAttentionInt8Criterion{
     /*relative_l2*/ 3.15e-3,
     /*gross_absolute*/ 1.1e-3,
     /*gross_relative_to_max_reference*/ 2.2e-3,
+};
+
+constexpr ReductionCriterion kAttentionKvarnImplementationCriterion{
+    // The production route stages exact represented K4/V2 values through BF16 before BF16 MMA.
+    // Representation loss is excluded: the reference independently decodes the stored planes.
+    /*relative_l2*/ 4.0e-3,
+    /*gross_absolute*/ 1.5e-3,
+    /*gross_relative_to_max_reference*/ 4.0e-3,
+};
+
+constexpr ReductionCriterion kAttentionKvarnQualityCriterion{
+    // Separately records the admitted K4/V2 quality profile against uncompressed BF16 attention.
+    /*relative_l2*/ 5.6e-1,
+    /*gross_absolute*/ 1.1,
+    /*gross_relative_to_max_reference*/ 1.12,
 };
 
 struct Geometry {
@@ -1316,9 +1334,799 @@ int run_geometry(const Geometry& geometry) {
     return failures;
 }
 
+struct RepresentedKvarnCache {
+    std::vector<double> k;
+    std::vector<double> v;
+};
+
+RepresentedKvarnCache snapshot_kvarn_cache(
+    const Geometry& geometry, std::int32_t logical_capacity,
+    std::span<const std::int32_t> block_table, const GuardedDeviceBuffer& k_codes_device,
+    const GuardedDeviceBuffer& v_codes_device, const GuardedDeviceBuffer& k_blocks_device,
+    const GuardedDeviceBuffer& k_channels_device, const GuardedDeviceBuffer& v_channels_device,
+    const GuardedDeviceBuffer& v_scales_device, const GuardedDeviceBuffer& v_zeros_device,
+    const GuardedDeviceBuffer& tail_k_device, const GuardedDeviceBuffer& tail_v_device,
+    const GuardedDeviceBuffer& markers_device) {
+    const auto k_codes = copy_from_guarded<std::uint8_t>(k_codes_device, k_codes_device.bytes());
+    const auto v_codes = copy_from_guarded<std::uint8_t>(v_codes_device, v_codes_device.bytes());
+    const auto k_blocks =
+        copy_from_guarded<std::uint8_t>(k_blocks_device, k_blocks_device.bytes());
+    const auto k_channels = copy_from_guarded<std::uint16_t>(
+        k_channels_device, k_channels_device.bytes() / sizeof(std::uint16_t));
+    const auto v_channels = copy_from_guarded<std::uint16_t>(
+        v_channels_device, v_channels_device.bytes() / sizeof(std::uint16_t));
+    const auto v_scales = copy_from_guarded<std::uint16_t>(
+        v_scales_device, v_scales_device.bytes() / sizeof(std::uint16_t));
+    const auto v_zeros = copy_from_guarded<std::uint16_t>(
+        v_zeros_device, v_zeros_device.bytes() / sizeof(std::uint16_t));
+    const auto tail_k = copy_from_guarded<std::uint16_t>(
+        tail_k_device, tail_k_device.bytes() / sizeof(std::uint16_t));
+    const auto tail_v = copy_from_guarded<std::uint16_t>(
+        tail_v_device, tail_v_device.bytes() / sizeof(std::uint16_t));
+    const auto markers = copy_from_guarded<std::int32_t>(
+        markers_device, markers_device.bytes() / sizeof(std::int32_t));
+
+    RepresentedKvarnCache result{
+        std::vector<double>(cache_elements(geometry, logical_capacity)),
+        std::vector<double>(cache_elements(geometry, logical_capacity))};
+    for (std::int32_t head = 0; head < geometry.kv_heads; ++head) {
+        for (std::int32_t position = 0; position < logical_capacity; ++position) {
+            const std::int32_t logical_page = position / kPagedKVPageSize;
+            const std::int32_t page_offset  = position & (kPagedKVPageSize - 1);
+            std::int32_t tail_slot          = -1;
+            for (std::int32_t slot = 0; slot < kKvarnTailSlots; ++slot) {
+                if (markers[static_cast<std::size_t>(slot) * geometry.kv_heads + head] ==
+                    logical_page) {
+                    tail_slot = slot;
+                }
+            }
+            const std::int32_t physical_page = block_table[logical_page];
+            const std::size_t record =
+                static_cast<std::size_t>(physical_page) * geometry.kv_heads + head;
+            for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                const std::size_t output =
+                    cache_index(geometry, logical_capacity, head, position, d);
+                if (tail_slot >= 0) {
+                    const std::size_t tail =
+                        ((static_cast<std::size_t>(tail_slot) * geometry.kv_heads + head) *
+                             kPagedKVPageSize +
+                         page_offset) *
+                            kHeadDim +
+                        d;
+                    result.k[output] = bf16_to_f32(tail_k[tail]);
+                    result.v[output] = bf16_to_f32(tail_v[tail]);
+                    continue;
+                }
+                const std::size_t k_byte =
+                    (record * kPagedKVPageSize + page_offset) * (kHeadDim / 2) + d / 2;
+                const std::uint8_t k_code =
+                    (k_codes[k_byte] >> (4 * (d & 1))) & 0x0fU;
+                const std::size_t k_scale =
+                    (record * kPagedKVPageSize + page_offset) * (kHeadDim / 16) + d / 16;
+                result.k[output] = quantized_weight::detail::decode_e2m1(k_code) *
+                                   quantized_weight::detail::decode_e4m3fn(k_blocks[k_scale]) *
+                                   f16_bits_to_f32(k_channels[record * kHeadDim + d]);
+
+                const std::size_t v_byte =
+                    (record * kPagedKVPageSize + page_offset) * (kHeadDim / 4) + d / 4;
+                const std::uint8_t v_code = (v_codes[v_byte] >> (2 * (d & 3))) & 3U;
+                const float token_scale =
+                    f16_bits_to_f32(v_scales[record * kPagedKVPageSize + page_offset]);
+                const float token_zero =
+                    f16_bits_to_f32(v_zeros[record * kPagedKVPageSize + page_offset]);
+                result.v[output] =
+                    (static_cast<float>(v_code) * token_scale + token_zero) *
+                    f16_bits_to_f32(v_channels[record * kHeadDim + d]);
+            }
+        }
+    }
+    return result;
+}
+
+std::vector<double> ideal_attention_values(const std::vector<float>& q, const Geometry& geometry,
+                                           std::int32_t logical_capacity,
+                                           const std::vector<double>& k,
+                                           const std::vector<double>& v,
+                                           const std::vector<std::int32_t>& positions) {
+    const std::int32_t tokens = static_cast<std::int32_t>(positions.size());
+    std::vector<double> output(static_cast<std::size_t>(kHeadDim) * geometry.q_heads * tokens);
+    std::vector<double> scores(static_cast<std::size_t>(positions.back()) + 1);
+    std::vector<double> probabilities(scores.size());
+    for (std::int32_t token = 0; token < tokens; ++token) {
+        const std::int32_t visible = positions[token] + 1;
+        for (std::int32_t q_head = 0; q_head < geometry.q_heads; ++q_head) {
+            const std::int32_t kv_head = q_head / geometry.query_group();
+            double maximum             = -std::numeric_limits<double>::infinity();
+            for (std::int32_t position = 0; position < visible; ++position) {
+                double dot = 0.0;
+                for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                    dot += static_cast<double>(q[q_index(geometry, q_head, d, token)]) *
+                           k[cache_index(geometry, logical_capacity, kv_head, position, d)];
+                }
+                scores[position] = dot * static_cast<double>(kAttentionScale);
+                maximum          = std::max(maximum, scores[position]);
+            }
+            double sum = 0.0;
+            for (std::int32_t position = 0; position < visible; ++position) {
+                probabilities[position] = std::exp(scores[position] - maximum);
+                sum += probabilities[position];
+            }
+            for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                double value = 0.0;
+                for (std::int32_t position = 0; position < visible; ++position) {
+                    value += probabilities[position] / sum *
+                             v[cache_index(geometry, logical_capacity, kv_head, position, d)];
+                }
+                output[q_index(geometry, q_head, d, token)] = value;
+            }
+        }
+    }
+    return output;
+}
+
+int run_kvarn_page_tail_case(const Geometry& geometry, std::int32_t tokens, bool flush_full_tail) {
+    constexpr std::int32_t logical_pages  = 2;
+    constexpr std::int32_t physical_pages = 3;
+    constexpr std::int32_t table_rows     = 1;
+    const std::size_t q_elements =
+        static_cast<std::size_t>(kHeadDim) * geometry.q_heads * tokens;
+    const std::size_t kv_elements =
+        static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * tokens;
+    std::vector<float> q = make_bf16_values(q_elements, 0x8101u + geometry.q_heads, -0.25F, 0.25F);
+    std::vector<float> k = make_bf16_values(kv_elements, 0x8102u + geometry.q_heads, -0.25F, 0.25F);
+    std::vector<float> v = make_bf16_values(kv_elements, 0x8103u + geometry.q_heads, -1.0F, 1.0F);
+    std::vector<std::int32_t> positions(tokens);
+    for (std::int32_t token = 0; token < tokens; ++token) { positions[token] = token; }
+
+    HostCache expected = make_cache(geometry, DType::BF16, 128, 0x8120u);
+    append_cache(expected, k, v, positions);
+    const std::vector<double> reference = ideal_attention(q, expected, positions);
+
+    const std::size_t records =
+        static_cast<std::size_t>(physical_pages) * geometry.kv_heads;
+    GuardedDeviceBuffer k_codes(records * kPagedKVPageSize * (kHeadDim / 2));
+    GuardedDeviceBuffer v_codes(records * kPagedKVPageSize * (kHeadDim / 4));
+    GuardedDeviceBuffer k_blocks(records * kPagedKVPageSize * (kHeadDim / 16));
+    GuardedDeviceBuffer k_channels(records * kHeadDim * sizeof(std::uint16_t));
+    GuardedDeviceBuffer v_channels(records * kHeadDim * sizeof(std::uint16_t));
+    GuardedDeviceBuffer v_scales(records * kPagedKVPageSize * sizeof(std::uint16_t));
+    GuardedDeviceBuffer v_zeros(records * kPagedKVPageSize * sizeof(std::uint16_t));
+    GuardedDeviceBuffer tail_k(static_cast<std::size_t>(table_rows) * geometry.kv_heads *
+                               kKvarnTailSlots *
+                               kPagedKVPageSize * kHeadDim * sizeof(std::uint16_t));
+    GuardedDeviceBuffer tail_v(tail_k.bytes());
+    GuardedDeviceBuffer markers(static_cast<std::size_t>(table_rows) * geometry.kv_heads *
+                                 kKvarnTailSlots *
+                                 sizeof(std::int32_t));
+    GuardedDeviceBuffer block_tables(logical_pages * table_rows * sizeof(std::int32_t));
+    const std::vector<std::int32_t> marker_initial(geometry.kv_heads * kKvarnTailSlots, -1);
+    const std::vector<std::int32_t> mapping{2, 0};
+    markers.copy_from_host(marker_initial.data(), markers.bytes());
+    block_tables.copy_from_host(mapping.data(), block_tables.bytes());
+
+    PagedKVBatchLayerView cache{
+        .k_pages = Tensor(k_codes.data(), DType::U8,
+                          {kHeadDim / 2, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .v_pages = Tensor(v_codes.data(), DType::U8,
+                          {kHeadDim / 4, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .k_scale_pages =
+            Tensor(k_blocks.data(), DType::FP8_E4M3FN,
+                   {kHeadDim / 16, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .v_scale_pages = Tensor(v_scales.data(), DType::FP16,
+                                {1, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .k_channel_scale_pages =
+            Tensor(k_channels.data(), DType::FP16,
+                   {kHeadDim, 1, geometry.kv_heads, physical_pages}),
+        .v_channel_scale_pages =
+            Tensor(v_channels.data(), DType::FP16,
+                   {kHeadDim, 1, geometry.kv_heads, physical_pages}),
+        .v_zero_pages = Tensor(v_zeros.data(), DType::FP16,
+                               {1, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .tail_k = Tensor(tail_k.data(), DType::BF16,
+                          {kHeadDim, kPagedKVPageSize,
+                           geometry.kv_heads * kKvarnTailSlots, table_rows}),
+        .tail_v = Tensor(tail_v.data(), DType::BF16,
+                          {kHeadDim, kPagedKVPageSize,
+                           geometry.kv_heads * kKvarnTailSlots, table_rows}),
+        .tail_logical_pages =
+            Tensor(markers.data(), DType::I32,
+                   {geometry.kv_heads * kKvarnTailSlots, table_rows}),
+        .block_tables = Tensor(block_tables.data(), DType::I32, {logical_pages, table_rows}),
+        .head_dim = kHeadDim,
+        .num_kv_heads = geometry.kv_heads,
+        .dtype = DType::U8,
+        .quant_group = kQuantGroup,
+    };
+
+    const auto q_bits = to_bf16_bits(q);
+    const auto k_bits = to_bf16_bits(k);
+    const auto v_bits = to_bf16_bits(v);
+    GuardedDeviceBuffer dq(q_bits.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dk(k_bits.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dv(v_bits.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dp(positions.size() * sizeof(std::int32_t));
+    GuardedDeviceBuffer drow(sizeof(std::int32_t));
+    GuardedDeviceBuffer dout(q_bits.size() * sizeof(std::uint16_t));
+    dq.copy_from_host(q_bits.data(), dq.bytes());
+    dk.copy_from_host(k_bits.data(), dk.bytes());
+    dv.copy_from_host(v_bits.data(), dv.bytes());
+    dp.copy_from_host(positions.data(), dp.bytes());
+    const std::int32_t row = 0;
+    drow.copy_from_host(&row, sizeof(row));
+    Tensor tq(dq.data(), DType::BF16, {kHeadDim, geometry.q_heads, tokens});
+    Tensor tk(dk.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
+    Tensor tv(dv.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
+    Tensor tp(dp.data(), DType::I32, {tokens});
+    Tensor tr(drow.data(), DType::I32, {1});
+    Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, tokens});
+    ops::kvarn_hadamard(tq, tq, nullptr);
+    ops::kvarn_hadamard(tk, tk, nullptr);
+    ops::kvarn_hadamard(tv, tv, nullptr);
+
+    const ops::GqaExecutionEnvelope envelope{static_cast<std::uint32_t>(tokens), 128};
+    const std::size_t prompt_workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+        geometry.q_heads, DType::U8, envelope, 1, tokens, tokens);
+    const std::size_t decode_workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+        geometry.q_heads, DType::U8, envelope, 1, 1, 1);
+    const std::size_t workspace_bytes =
+        std::max(prompt_workspace_bytes, decode_workspace_bytes);
+    GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
+    WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
+    ops::gqa_attention(tq, tk, tv, tp, Tensor{}, tr, kAttentionScale, cache, envelope, workspace,
+                       tout, nullptr);
+    cuda_synchronize();
+
+    const auto transformed_q_bits = copy_from_guarded<std::uint16_t>(dq, q_bits.size());
+    std::vector<float> transformed_q(transformed_q_bits.size());
+    for (std::size_t index = 0; index < transformed_q.size(); ++index) {
+        transformed_q[index] = bf16_to_f32(transformed_q_bits[index]);
+    }
+    const RepresentedKvarnCache staged = snapshot_kvarn_cache(
+        geometry, 128, mapping, k_codes, v_codes, k_blocks, k_channels, v_channels, v_scales,
+        v_zeros, tail_k, tail_v, markers);
+    const std::vector<double> staged_reference = ideal_attention_values(
+        transformed_q, geometry, 128, staged.k, staged.v, positions);
+    const std::string label = std::string("gqa_attention KVarN ") +
+                              (flush_full_tail ? "full-tail flush " : "page+tail ") +
+                              geometry.name;
+    int failures = verify_attention(
+        label + " represented staged", bf16_bits_to_double(copy_from_guarded<std::uint16_t>(
+                                             dout, q_bits.size())),
+        staged_reference, kAttentionKvarnImplementationCriterion);
+
+    if (flush_full_tail) {
+        const std::array<PagedKVBatchLayerView, 1> layers{cache};
+        ops::gqa_kvarn_flush_full_pages(layers, tp.view({tokens, 1}), Tensor{}, tr, nullptr);
+        PagedKVLayerView direct{
+            .k_pages = cache.k_pages,
+            .v_pages = cache.v_pages,
+            .k_scale_pages = cache.k_scale_pages,
+            .v_scale_pages = cache.v_scale_pages,
+            .k_channel_scale_pages = cache.k_channel_scale_pages,
+            .v_channel_scale_pages = cache.v_channel_scale_pages,
+            .v_zero_pages = cache.v_zero_pages,
+            .tail_k = cache.tail_k.view(
+                {kHeadDim, kPagedKVPageSize, geometry.kv_heads * kKvarnTailSlots, 1}),
+            .tail_v = cache.tail_v.view(
+                {kHeadDim, kPagedKVPageSize, geometry.kv_heads * kKvarnTailSlots, 1}),
+            .tail_logical_page = cache.tail_logical_pages.view(
+                {geometry.kv_heads * kKvarnTailSlots}),
+            .block_table = cache.block_tables.view({logical_pages}),
+            .head_dim = kHeadDim,
+            .num_kv_heads = geometry.kv_heads,
+            .dtype = DType::U8,
+            .quant_group = kQuantGroup,
+        };
+        ops::gqa_attention_cached(tq, tp, kAttentionScale, direct, envelope, workspace, tout,
+                                  nullptr);
+        cuda_synchronize();
+        const RepresentedKvarnCache compressed = snapshot_kvarn_cache(
+            geometry, 128, mapping, k_codes, v_codes, k_blocks, k_channels, v_channels, v_scales,
+            v_zeros, tail_k, tail_v, markers);
+        const std::vector<double> compressed_reference = ideal_attention_values(
+            transformed_q, geometry, 128, compressed.k, compressed.v, positions);
+        failures += verify_attention(
+            label + " represented compressed prompt",
+            bf16_bits_to_double(copy_from_guarded<std::uint16_t>(dout, q_bits.size())),
+            compressed_reference, kAttentionKvarnImplementationCriterion);
+
+        Tensor last_q   = tq.slice(2, tokens - 1, 1);
+        Tensor last_pos = tp.slice(0, tokens - 1, 1);
+        Tensor last_out = tout.slice(2, tokens - 1, 1);
+        ops::gqa_attention_cached(last_q, last_pos, kAttentionScale, direct, envelope, workspace,
+                                  last_out, nullptr);
+        cuda_synchronize();
+        std::vector<float> last_q_host(static_cast<std::size_t>(kHeadDim) * geometry.q_heads);
+        for (std::int32_t head = 0; head < geometry.q_heads; ++head) {
+            for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                last_q_host[q_index(geometry, head, d, 0)] =
+                    transformed_q[q_index(geometry, head, d, tokens - 1)];
+            }
+        }
+        const std::vector<double> decode_reference = ideal_attention_values(
+            last_q_host, geometry, 128, compressed.k, compressed.v, {positions.back()});
+        const auto decode_all =
+            bf16_bits_to_double(copy_from_guarded<std::uint16_t>(dout, q_bits.size()));
+        std::vector<double> decode_actual(static_cast<std::size_t>(kHeadDim) * geometry.q_heads);
+        for (std::int32_t head = 0; head < geometry.q_heads; ++head) {
+            for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                decode_actual[q_index(geometry, head, d, 0)] =
+                    decode_all[q_index(geometry, head, d, tokens - 1)];
+            }
+        }
+        failures += verify_attention(label + " represented compressed decode", decode_actual,
+                                     decode_reference, kAttentionKvarnImplementationCriterion);
+    }
+    ops::kvarn_hadamard(tout, tout, nullptr);
+    cuda_synchronize();
+
+    const auto output_bits = copy_from_guarded<std::uint16_t>(dout, q_bits.size());
+    const auto actual = bf16_bits_to_double(output_bits);
+    failures += verify_attention(label + " compression quality", actual, reference,
+                                 kAttentionKvarnQualityCriterion);
+    const auto marker_result =
+        copy_from_guarded<std::int32_t>(markers, geometry.kv_heads * kKvarnTailSlots);
+    std::vector<std::int32_t> marker_expected(geometry.kv_heads * kKvarnTailSlots, -1);
+    if (!flush_full_tail) { std::fill_n(marker_expected.begin(), geometry.kv_heads, 1); }
+    failures +=
+        verify_exact((label + " tail markers").c_str(), marker_result, marker_expected);
+    failures += workspace_buffer.verify_guards((label + " workspace").c_str());
+    return failures;
+}
+
+int run_kvarn_long_context_split_case(const Geometry& geometry, std::int32_t position) {
+    const std::int32_t visible        = position + 1;
+    const std::int32_t late_begin     = std::max(0, visible - 769);
+    const std::int32_t logical_pages  = (visible + kPagedKVPageSize - 1) / kPagedKVPageSize;
+    const std::int32_t physical_pages = logical_pages;
+    const std::size_t records = static_cast<std::size_t>(physical_pages) * geometry.kv_heads;
+
+    std::vector<std::uint8_t> k_codes(records * kPagedKVPageSize * (kHeadDim / 2), 0);
+    std::vector<std::uint8_t> v_codes(records * kPagedKVPageSize * (kHeadDim / 4), 0);
+    std::vector<std::uint8_t> k_blocks(records * kPagedKVPageSize * (kHeadDim / 16), 0);
+    std::vector<std::uint16_t> k_channels(records * kHeadDim, f32_to_f16_bits(1.0F));
+    std::vector<std::uint16_t> v_channels(records * kHeadDim, f32_to_f16_bits(1.0F));
+    std::vector<std::uint16_t> v_scales(records * kPagedKVPageSize, f32_to_f16_bits(1.0F));
+    std::vector<std::uint16_t> v_zeros(records * kPagedKVPageSize, f32_to_f16_bits(0.0F));
+    for (std::int32_t token = late_begin; token < visible; ++token) {
+        const std::int32_t page       = token / kPagedKVPageSize;
+        const std::int32_t page_token = token & (kPagedKVPageSize - 1);
+        for (std::int32_t head = 0; head < geometry.kv_heads; ++head) {
+            const std::size_t record = static_cast<std::size_t>(page) * geometry.kv_heads + head;
+            const std::size_t base =
+                (record * kPagedKVPageSize + page_token) * (kHeadDim / 4);
+            std::fill_n(v_codes.begin() + static_cast<std::ptrdiff_t>(base), kHeadDim / 4, 0xffU);
+        }
+    }
+    std::vector<std::int32_t> mapping(logical_pages);
+    std::iota(mapping.begin(), mapping.end(), 0);
+    std::vector<std::int32_t> markers(geometry.kv_heads * kKvarnTailSlots, -1);
+
+    GuardedDeviceBuffer dk_codes(k_codes.size());
+    GuardedDeviceBuffer dv_codes(v_codes.size());
+    GuardedDeviceBuffer dk_blocks(k_blocks.size());
+    GuardedDeviceBuffer dk_channels(k_channels.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dv_channels(v_channels.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dv_scales(v_scales.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dv_zeros(v_zeros.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer tail_k(static_cast<std::size_t>(geometry.kv_heads) * kKvarnTailSlots *
+                               kPagedKVPageSize * kHeadDim * sizeof(std::uint16_t));
+    GuardedDeviceBuffer tail_v(tail_k.bytes());
+    GuardedDeviceBuffer dmarkers(markers.size() * sizeof(std::int32_t));
+    GuardedDeviceBuffer dtable(mapping.size() * sizeof(std::int32_t));
+    GuardedDeviceBuffer dq(static_cast<std::size_t>(geometry.q_heads) * kHeadDim *
+                           sizeof(std::uint16_t));
+    GuardedDeviceBuffer dpos(sizeof(std::int32_t));
+    GuardedDeviceBuffer dout(static_cast<std::size_t>(geometry.q_heads) * kHeadDim *
+                             sizeof(std::uint16_t));
+    dk_codes.copy_from_host(k_codes.data(), k_codes.size());
+    dv_codes.copy_from_host(v_codes.data(), v_codes.size());
+    dk_blocks.copy_from_host(k_blocks.data(), k_blocks.size());
+    dk_channels.copy_from_host(k_channels.data(), dk_channels.bytes());
+    dv_channels.copy_from_host(v_channels.data(), dv_channels.bytes());
+    dv_scales.copy_from_host(v_scales.data(), dv_scales.bytes());
+    dv_zeros.copy_from_host(v_zeros.data(), dv_zeros.bytes());
+    dmarkers.copy_from_host(markers.data(), dmarkers.bytes());
+    dtable.copy_from_host(mapping.data(), dtable.bytes());
+    const std::vector<std::uint16_t> zero_q(static_cast<std::size_t>(geometry.q_heads) * kHeadDim,
+                                             0);
+    dq.copy_from_host(zero_q.data(), dq.bytes());
+    dpos.copy_from_host(&position, sizeof(position));
+
+    PagedKVLayerView cache{
+        .k_pages = Tensor(dk_codes.data(), DType::U8,
+                          {kHeadDim / 2, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .v_pages = Tensor(dv_codes.data(), DType::U8,
+                          {kHeadDim / 4, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .k_scale_pages = Tensor(dk_blocks.data(), DType::FP8_E4M3FN,
+                                {kHeadDim / 16, kPagedKVPageSize, geometry.kv_heads,
+                                 physical_pages}),
+        .v_scale_pages = Tensor(dv_scales.data(), DType::FP16,
+                                {1, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .k_channel_scale_pages = Tensor(dk_channels.data(), DType::FP16,
+                                        {kHeadDim, 1, geometry.kv_heads, physical_pages}),
+        .v_channel_scale_pages = Tensor(dv_channels.data(), DType::FP16,
+                                        {kHeadDim, 1, geometry.kv_heads, physical_pages}),
+        .v_zero_pages = Tensor(dv_zeros.data(), DType::FP16,
+                               {1, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+        .tail_k = Tensor(tail_k.data(), DType::BF16,
+                         {kHeadDim, kPagedKVPageSize, geometry.kv_heads * kKvarnTailSlots, 1}),
+        .tail_v = Tensor(tail_v.data(), DType::BF16,
+                         {kHeadDim, kPagedKVPageSize, geometry.kv_heads * kKvarnTailSlots, 1}),
+        .tail_logical_page =
+            Tensor(dmarkers.data(), DType::I32, {geometry.kv_heads * kKvarnTailSlots}),
+        .block_table = Tensor(dtable.data(), DType::I32, {logical_pages}),
+        .head_dim = kHeadDim,
+        .num_kv_heads = geometry.kv_heads,
+        .dtype = DType::U8,
+        .quant_group = kQuantGroup,
+    };
+    const ops::GqaExecutionEnvelope envelope{static_cast<std::uint32_t>(visible),
+                                               static_cast<std::uint32_t>(visible)};
+    const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+        geometry.q_heads, DType::U8, envelope, 1, 1, 1);
+    GuardedDeviceBuffer workspace_buffer(workspace_bytes);
+    WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
+    Tensor tq(dq.data(), DType::BF16, {kHeadDim, geometry.q_heads, 1});
+    Tensor tp(dpos.data(), DType::I32, {1});
+    Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, 1});
+    ops::gqa_attention_cached(tq, tp, kAttentionScale, cache, envelope, workspace, tout, nullptr);
+    cuda_synchronize();
+
+    const double expected = 3.0 * static_cast<double>(visible - late_begin) / visible;
+    const auto actual = bf16_bits_to_double(
+        copy_from_guarded<std::uint16_t>(dout, zero_q.size()));
+    int failures = 0;
+    for (const double value : actual) {
+        if (std::abs(value - expected) > 0.01) {
+            std::cerr << "gqa_attention KVarN long-context split mismatch at visible=" << visible
+                      << ": expected " << expected << ", got " << value << '\n';
+            ++failures;
+            break;
+        }
+    }
+    failures += workspace_buffer.verify_guards(
+        ("gqa_attention KVarN long-context workspace visible=" + std::to_string(visible)).c_str());
+    return failures;
+}
+
+class KvarnLifecycleLayer {
+public:
+    static constexpr std::int32_t kLogicalPages  = 4;
+    static constexpr std::int32_t kPhysicalPages = 4;
+
+    explicit KvarnLifecycleLayer(const Geometry& geometry)
+        : geometry_(geometry), records_(static_cast<std::size_t>(kPhysicalPages) * geometry.kv_heads),
+          k_codes_(records_ * kPagedKVPageSize * (kHeadDim / 2)),
+          v_codes_(records_ * kPagedKVPageSize * (kHeadDim / 4)),
+          k_blocks_(records_ * kPagedKVPageSize * (kHeadDim / 16)),
+          k_channels_(records_ * kHeadDim * sizeof(std::uint16_t)),
+          v_channels_(records_ * kHeadDim * sizeof(std::uint16_t)),
+          v_scales_(records_ * kPagedKVPageSize * sizeof(std::uint16_t)),
+          v_zeros_(records_ * kPagedKVPageSize * sizeof(std::uint16_t)),
+          tail_k_(static_cast<std::size_t>(geometry.kv_heads) * kKvarnTailSlots *
+                  kPagedKVPageSize * kHeadDim * sizeof(std::uint16_t)),
+          tail_v_(tail_k_.bytes()),
+          markers_(static_cast<std::size_t>(geometry.kv_heads) * kKvarnTailSlots *
+                   sizeof(std::int32_t)),
+          block_table_(kLogicalPages * sizeof(std::int32_t)) {
+        const std::vector<std::int32_t> markers(geometry.kv_heads * kKvarnTailSlots, -1);
+        markers_.copy_from_host(markers.data(), markers_.bytes());
+        block_table_.copy_from_host(mapping_.data(), block_table_.bytes());
+    }
+
+    PagedKVLayerView direct() {
+        return {
+            .k_pages = Tensor(k_codes_.data(), DType::U8,
+                              {kHeadDim / 2, kPagedKVPageSize, geometry_.kv_heads, kPhysicalPages}),
+            .v_pages = Tensor(v_codes_.data(), DType::U8,
+                              {kHeadDim / 4, kPagedKVPageSize, geometry_.kv_heads, kPhysicalPages}),
+            .k_scale_pages =
+                Tensor(k_blocks_.data(), DType::FP8_E4M3FN,
+                       {kHeadDim / 16, kPagedKVPageSize, geometry_.kv_heads, kPhysicalPages}),
+            .v_scale_pages = Tensor(v_scales_.data(), DType::FP16,
+                                    {1, kPagedKVPageSize, geometry_.kv_heads, kPhysicalPages}),
+            .k_channel_scale_pages =
+                Tensor(k_channels_.data(), DType::FP16,
+                       {kHeadDim, 1, geometry_.kv_heads, kPhysicalPages}),
+            .v_channel_scale_pages =
+                Tensor(v_channels_.data(), DType::FP16,
+                       {kHeadDim, 1, geometry_.kv_heads, kPhysicalPages}),
+            .v_zero_pages = Tensor(v_zeros_.data(), DType::FP16,
+                                   {1, kPagedKVPageSize, geometry_.kv_heads, kPhysicalPages}),
+            .tail_k = Tensor(tail_k_.data(), DType::BF16,
+                             {kHeadDim, kPagedKVPageSize,
+                              geometry_.kv_heads * kKvarnTailSlots}),
+            .tail_v = Tensor(tail_v_.data(), DType::BF16,
+                             {kHeadDim, kPagedKVPageSize,
+                              geometry_.kv_heads * kKvarnTailSlots}),
+            .tail_logical_page =
+                Tensor(markers_.data(), DType::I32,
+                       {geometry_.kv_heads * kKvarnTailSlots}),
+            .block_table = Tensor(block_table_.data(), DType::I32, {kLogicalPages}),
+            .head_dim = kHeadDim,
+            .num_kv_heads = geometry_.kv_heads,
+            .dtype = DType::U8,
+            .quant_group = kQuantGroup,
+        };
+    }
+
+    PagedKVBatchLayerView batch() {
+        PagedKVLayerView layer = direct();
+        return {
+            .k_pages = layer.k_pages,
+            .v_pages = layer.v_pages,
+            .k_scale_pages = layer.k_scale_pages,
+            .v_scale_pages = layer.v_scale_pages,
+            .k_channel_scale_pages = layer.k_channel_scale_pages,
+            .v_channel_scale_pages = layer.v_channel_scale_pages,
+            .v_zero_pages = layer.v_zero_pages,
+            .tail_k = layer.tail_k.view(
+                {kHeadDim, kPagedKVPageSize, geometry_.kv_heads * kKvarnTailSlots, 1}),
+            .tail_v = layer.tail_v.view(
+                {kHeadDim, kPagedKVPageSize, geometry_.kv_heads * kKvarnTailSlots, 1}),
+            .tail_logical_pages = layer.tail_logical_page.view(
+                {geometry_.kv_heads * kKvarnTailSlots, 1}),
+            .block_tables = layer.block_table.view({kLogicalPages, 1}),
+            .head_dim = kHeadDim,
+            .num_kv_heads = geometry_.kv_heads,
+            .dtype = DType::U8,
+            .quant_group = kQuantGroup,
+        };
+    }
+
+    std::vector<std::int32_t> markers() const {
+        return copy_from_guarded<std::int32_t>(markers_, geometry_.kv_heads * kKvarnTailSlots);
+    }
+
+    RepresentedKvarnCache snapshot() const {
+        return snapshot_kvarn_cache(geometry_, kLogicalPages * kPagedKVPageSize, mapping_, k_codes_,
+                                    v_codes_, k_blocks_, k_channels_, v_channels_, v_scales_,
+                                    v_zeros_, tail_k_, tail_v_, markers_);
+    }
+
+private:
+    Geometry geometry_;
+    std::size_t records_;
+    const std::array<std::int32_t, kLogicalPages> mapping_{3, 1, 2, 0};
+    GuardedDeviceBuffer k_codes_;
+    GuardedDeviceBuffer v_codes_;
+    GuardedDeviceBuffer k_blocks_;
+    GuardedDeviceBuffer k_channels_;
+    GuardedDeviceBuffer v_channels_;
+    GuardedDeviceBuffer v_scales_;
+    GuardedDeviceBuffer v_zeros_;
+    GuardedDeviceBuffer tail_k_;
+    GuardedDeviceBuffer tail_v_;
+    GuardedDeviceBuffer markers_;
+    GuardedDeviceBuffer block_table_;
+};
+
+int run_kvarn_page_transition_parity_case(const Geometry& geometry) {
+    KvarnLifecycleLayer batched(geometry);
+    KvarnLifecycleLayer sequential(geometry);
+
+    const auto append = [&](KvarnLifecycleLayer& layer, const std::vector<std::uint16_t>& k,
+                            const std::vector<std::uint16_t>& v,
+                            const std::vector<std::int32_t>& positions) {
+        GuardedDeviceBuffer dk(k.size() * sizeof(std::uint16_t));
+        GuardedDeviceBuffer dv(v.size() * sizeof(std::uint16_t));
+        GuardedDeviceBuffer dp(positions.size() * sizeof(std::int32_t));
+        dk.copy_from_host(k.data(), dk.bytes());
+        dv.copy_from_host(v.data(), dv.bytes());
+        dp.copy_from_host(positions.data(), dp.bytes());
+        ops::gqa_kv_append(
+            Tensor(dk.data(), DType::BF16,
+                   {kHeadDim, geometry.kv_heads, static_cast<std::int32_t>(positions.size())}),
+            Tensor(dv.data(), DType::BF16,
+                   {kHeadDim, geometry.kv_heads, static_cast<std::int32_t>(positions.size())}),
+            Tensor(dp.data(), DType::I32, {static_cast<std::int32_t>(positions.size())}),
+            layer.direct(), nullptr);
+        cuda_synchronize();
+    };
+
+    constexpr std::int32_t prefix_tokens = kPagedKVPageSize - 1;
+    const std::size_t prefix_elements =
+        static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * prefix_tokens;
+    const auto prefix_k =
+        to_bf16_bits(make_bf16_values(prefix_elements, 0xa100U + geometry.q_heads, -0.4F, 0.4F));
+    const auto prefix_v =
+        to_bf16_bits(make_bf16_values(prefix_elements, 0xa200U + geometry.q_heads, -1.0F, 1.0F));
+    std::vector<std::int32_t> prefix_positions(prefix_tokens);
+    for (std::int32_t token = 0; token < prefix_tokens; ++token) {
+        prefix_positions[token] = token;
+    }
+    append(batched, prefix_k, prefix_v, prefix_positions);
+    append(sequential, prefix_k, prefix_v, prefix_positions);
+
+    constexpr std::int32_t tokens = 2;
+    const std::size_t q_elements =
+        static_cast<std::size_t>(kHeadDim) * geometry.q_heads * tokens;
+    const std::size_t kv_elements =
+        static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * tokens;
+    const auto q =
+        to_bf16_bits(make_bf16_values(q_elements, 0xa300U + geometry.q_heads, -0.3F, 0.3F));
+    const auto k =
+        to_bf16_bits(make_bf16_values(kv_elements, 0xa400U + geometry.q_heads, -0.4F, 0.4F));
+    const auto v =
+        to_bf16_bits(make_bf16_values(kv_elements, 0xa500U + geometry.q_heads, -1.0F, 1.0F));
+    const std::array<std::int32_t, tokens> positions{kPagedKVPageSize - 1, kPagedKVPageSize};
+    const std::int32_t row = 0;
+
+    GuardedDeviceBuffer dq(q.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dk(k.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dv(v.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dp(positions.size() * sizeof(std::int32_t));
+    GuardedDeviceBuffer dr(sizeof(std::int32_t));
+    GuardedDeviceBuffer batch_out(q.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer sequential_out(q.size() * sizeof(std::uint16_t));
+    dq.copy_from_host(q.data(), dq.bytes());
+    dk.copy_from_host(k.data(), dk.bytes());
+    dv.copy_from_host(v.data(), dv.bytes());
+    dp.copy_from_host(positions.data(), dp.bytes());
+    dr.copy_from_host(&row, sizeof(row));
+
+    Tensor tq(dq.data(), DType::BF16, {kHeadDim, geometry.q_heads, tokens});
+    Tensor tk(dk.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
+    Tensor tv(dv.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
+    Tensor tp(dp.data(), DType::I32, {tokens, 1});
+    Tensor tr(dr.data(), DType::I32, {1});
+    Tensor batch_result(batch_out.data(), DType::BF16, {kHeadDim, geometry.q_heads, tokens});
+    Tensor sequential_result(sequential_out.data(), DType::BF16,
+                             {kHeadDim, geometry.q_heads, tokens});
+    constexpr ops::GqaExecutionEnvelope envelope{1, 128};
+    const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+        geometry.q_heads, DType::U8, envelope, 1, 1, tokens);
+    GuardedDeviceBuffer workspace_buffer(workspace_bytes);
+    WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
+
+    PagedKVBatchLayerView batch_cache = batched.batch();
+    ops::gqa_attention(tq, tk, tv, tp, Tensor{}, tr, kAttentionScale, batch_cache, envelope,
+                       workspace, batch_result, nullptr);
+    const std::array<PagedKVBatchLayerView, 1> batch_layers{batch_cache};
+    ops::gqa_kvarn_flush_full_pages(batch_layers, tp, Tensor{}, tr, nullptr);
+
+    PagedKVBatchLayerView sequential_cache = sequential.batch();
+    const std::array<PagedKVBatchLayerView, 1> sequential_layers{sequential_cache};
+    for (std::int32_t token = 0; token < tokens; ++token) {
+        Tensor token_pos = tp.slice(0, token, 1);
+        Tensor token_out = sequential_result.slice(2, token, 1);
+        ops::gqa_attention(tq.slice(2, token, 1), tk.slice(2, token, 1), tv.slice(2, token, 1),
+                           token_pos, Tensor{}, tr, kAttentionScale, sequential_cache, envelope,
+                           workspace, token_out, nullptr);
+        ops::gqa_kvarn_flush_full_pages(sequential_layers, token_pos, Tensor{}, tr, nullptr);
+    }
+    cuda_synchronize();
+
+    const std::string label = std::string("KVarN page-transition T=2/T=1 parity ") + geometry.name;
+    int failures = verify_exact(label.c_str(),
+                                copy_from_guarded<std::uint16_t>(batch_out, q.size()),
+                                copy_from_guarded<std::uint16_t>(sequential_out, q.size()));
+
+    GuardedDeviceBuffer batch_cached_out(q_elements / tokens * sizeof(std::uint16_t));
+    GuardedDeviceBuffer sequential_cached_out(q_elements / tokens * sizeof(std::uint16_t));
+    Tensor last_q = tq.slice(2, 1, 1);
+    Tensor last_pos = tp.slice(0, 1, 1);
+    Tensor batch_cached(batch_cached_out.data(), DType::BF16, {kHeadDim, geometry.q_heads, 1});
+    Tensor sequential_cached(sequential_cached_out.data(), DType::BF16,
+                             {kHeadDim, geometry.q_heads, 1});
+    ops::gqa_attention_cached(last_q, last_pos, kAttentionScale, batched.direct(), envelope,
+                              workspace, batch_cached, nullptr);
+    ops::gqa_attention_cached(last_q, last_pos, kAttentionScale, sequential.direct(), envelope,
+                              workspace, sequential_cached, nullptr);
+    cuda_synchronize();
+    failures += verify_exact(
+        (label + " persisted cache").c_str(),
+        copy_from_guarded<std::uint16_t>(batch_cached_out, q_elements / tokens),
+        copy_from_guarded<std::uint16_t>(sequential_cached_out, q_elements / tokens));
+    failures += workspace_buffer.verify_guards((label + " workspace").c_str());
+    return failures;
+}
+
+int run_kvarn_multilayer_lifecycle_case(const Geometry& geometry) {
+    KvarnLifecycleLayer layer0(geometry);
+    KvarnLifecycleLayer layer1(geometry);
+    const auto append = [&](KvarnLifecycleLayer& layer, std::int32_t base, std::int32_t tokens,
+                            std::uint32_t seed) {
+        const std::size_t elements =
+            static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * tokens;
+        const auto k = to_bf16_bits(make_bf16_values(elements, seed, -0.4F, 0.4F));
+        const auto v = to_bf16_bits(make_bf16_values(elements, seed + 1U, -1.2F, 1.2F));
+        std::vector<std::int32_t> positions(tokens);
+        for (std::int32_t token = 0; token < tokens; ++token) { positions[token] = base + token; }
+        GuardedDeviceBuffer dk(k.size() * sizeof(std::uint16_t));
+        GuardedDeviceBuffer dv(v.size() * sizeof(std::uint16_t));
+        GuardedDeviceBuffer dp(positions.size() * sizeof(std::int32_t));
+        dk.copy_from_host(k.data(), dk.bytes());
+        dv.copy_from_host(v.data(), dv.bytes());
+        dp.copy_from_host(positions.data(), dp.bytes());
+        Tensor tk(dk.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
+        Tensor tv(dv.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
+        Tensor tp(dp.data(), DType::I32, {tokens});
+        ops::gqa_kv_append(tk, tv, tp, layer.direct(), nullptr);
+        cuda_synchronize();
+    };
+
+    append(layer0, 0, 63, 0x9200U);
+    append(layer1, 0, 63, 0x9300U);
+    std::vector<std::int32_t> first_expected(geometry.kv_heads * kKvarnTailSlots, -1);
+    std::fill_n(first_expected.begin(), geometry.kv_heads, 0);
+    int failures = verify_exact("KVarN first partial marker layer0", layer0.markers(),
+                                first_expected);
+    failures += verify_exact("KVarN first partial marker layer1", layer1.markers(),
+                             first_expected);
+
+    append(layer0, 63, 70, 0x9400U);
+    append(layer1, 63, 70, 0x9500U);
+    std::vector<std::int32_t> two_tail_expected(geometry.kv_heads * kKvarnTailSlots, 2);
+    std::fill_n(two_tail_expected.begin(), geometry.kv_heads, 0);
+    failures += verify_exact("KVarN two tails layer0", layer0.markers(), two_tail_expected);
+    failures += verify_exact("KVarN two tails layer1", layer1.markers(), two_tail_expected);
+
+    std::vector<std::int32_t> positions(70);
+    for (std::int32_t token = 0; token < 70; ++token) { positions[token] = 63 + token; }
+    GuardedDeviceBuffer dp(positions.size() * sizeof(std::int32_t));
+    GuardedDeviceBuffer dr(sizeof(std::int32_t));
+    dp.copy_from_host(positions.data(), dp.bytes());
+    const std::int32_t row = 0;
+    dr.copy_from_host(&row, sizeof(row));
+    Tensor tp(dp.data(), DType::I32, {70, 1});
+    Tensor tr(dr.data(), DType::I32, {1});
+    PagedKVBatchLayerView layer0_batch = layer0.batch();
+    PagedKVBatchLayerView layer1_batch = layer1.batch();
+    layer1_batch.block_tables          = layer0_batch.block_tables;
+    const std::array<PagedKVBatchLayerView, 2> layers{layer0_batch, layer1_batch};
+    ops::gqa_kvarn_flush_full_pages(layers, tp, Tensor{}, tr, nullptr);
+    cuda_synchronize();
+    std::vector<std::int32_t> flushed_expected(geometry.kv_heads * kKvarnTailSlots, 2);
+    std::fill_n(flushed_expected.begin(), geometry.kv_heads, -1);
+    failures += verify_exact("KVarN full marker cleared layer0", layer0.markers(),
+                             flushed_expected);
+    failures += verify_exact("KVarN full marker cleared layer1", layer1.markers(),
+                             flushed_expected);
+
+    // Re-appending after speculative rollback overwrites the reachable portion of the retained
+    // partial tail; stale positions above the new frontier remain physically present but masked.
+    append(layer0, 128, 5, 0x9600U);
+    failures += verify_exact("KVarN retained partial after rewrite", layer0.markers(),
+                             flushed_expected);
+
+    const std::size_t q_elements = static_cast<std::size_t>(kHeadDim) * geometry.q_heads;
+    const auto q_bits = to_bf16_bits(make_bf16_values(q_elements, 0x9700U, -0.3F, 0.3F));
+    GuardedDeviceBuffer dq(q_bits.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dpos(sizeof(std::int32_t));
+    GuardedDeviceBuffer dout(q_bits.size() * sizeof(std::uint16_t));
+    dq.copy_from_host(q_bits.data(), dq.bytes());
+    const std::int32_t query_position = 132;
+    dpos.copy_from_host(&query_position, sizeof(query_position));
+    Tensor tq(dq.data(), DType::BF16, {kHeadDim, geometry.q_heads, 1});
+    Tensor tpos(dpos.data(), DType::I32, {1});
+    Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, 1});
+    const ops::GqaExecutionEnvelope envelope{133, 133};
+    const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+        geometry.q_heads, DType::U8, envelope, 1, 1, 1);
+    GuardedDeviceBuffer workspace_buffer(workspace_bytes);
+    WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
+    ops::gqa_attention_cached(tq, tpos, kAttentionScale, layer0.direct(), envelope, workspace, tout,
+                              nullptr);
+    cuda_synchronize();
+    const RepresentedKvarnCache represented = layer0.snapshot();
+    std::vector<float> q(q_bits.size());
+    for (std::size_t index = 0; index < q.size(); ++index) { q[index] = bf16_to_f32(q_bits[index]); }
+    const auto reference = ideal_attention_values(q, geometry,
+                                                  KvarnLifecycleLayer::kLogicalPages *
+                                                      kPagedKVPageSize,
+                                                  represented.k, represented.v, {query_position});
+    failures += verify_attention(
+        "KVarN fragmented compressed/tail lifecycle attention",
+        bf16_bits_to_double(copy_from_guarded<std::uint16_t>(dout, q_bits.size())), reference,
+        kAttentionKvarnImplementationCriterion);
+    return failures;
+}
+
 int verify_workspace_capacity_contract() {
     int failures = 0;
-    for (const DType dtype : {DType::BF16, DType::I8}) {
+    for (const DType dtype : {DType::BF16, DType::I8, DType::U8}) {
         constexpr ops::GqaExecutionEnvelope envelope{1, 1025};
         const std::size_t interval =
             ops::gqa_attention_workspace_capacity_bytes(16, dtype, envelope, 1, 1, 17);
@@ -1359,6 +2167,30 @@ int main() {
     int failures = 0;
     failures += verify_workspace_capacity_contract();
     for (const Geometry& geometry : kGeometries) { failures += run_geometry(geometry); }
+    for (const Geometry& geometry : kGeometries) {
+        failures += run_kvarn_page_tail_case(geometry, 70, false);
+        // W=97 selects the prompt kernel and crosses both halves of a 64-token encoded page.
+        failures += run_kvarn_page_tail_case(geometry, 97, false);
+        failures += run_kvarn_page_tail_case(geometry, 64, true);
+        failures += run_kvarn_page_tail_case(geometry, 128, true);
+        failures += run_kvarn_page_transition_parity_case(geometry);
+        failures += run_kvarn_multilayer_lifecycle_case(geometry);
+    }
+    constexpr std::array<std::int32_t, 6> kLongContextPositions{
+        8197,  // Last visible-key count before the KVarN-specific split policy.
+        8198,  // First KVarN-specific split count.
+        9000,  // Original reducer/producer mismatch reproduction.
+        16390, // Upper split-planning tier transition.
+        65535,
+        79999,
+    };
+    for (const Geometry& geometry : kGeometries) {
+        for (const std::int32_t position : kLongContextPositions) {
+            failures += run_kvarn_long_context_split_case(geometry, position);
+        }
+    }
+    failures += run_kvarn_long_context_split_case(
+        kGeometries[0], static_cast<std::int32_t>(ops::kGqaAttentionMaximumVisibleKeys) - 1);
     failures += run_batch_cases();
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " gqa_attention public-contract correctness\n";

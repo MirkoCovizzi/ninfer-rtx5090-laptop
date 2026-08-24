@@ -8,9 +8,14 @@
 #include "core/device.h" // CUDA_CHECK
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
+
+constexpr int kGqaPrefillKvarnBr      = 128;
+constexpr int kGqaPrefillKvarnBc      = 32;
+constexpr int kGqaPrefillKvarnThreads = 256;
 
 template <typename Geometry, typename CacheView, typename Metadata>
 void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& positions,
@@ -20,10 +25,16 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
     const Tensor& cache_k = cache.k_pages;
     const Tensor& cache_v = cache.v_pages;
     // Both dtype-specialized kernels exceed the default 48 KiB dynamic-smem ceiling.
-    static const cudaError_t attr_bf16 =
-        cudaFuncSetAttribute(gqa_attention_prefill_bf16_kernel<Geometry, Metadata>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillSmemBytes);
+    static const cudaError_t attr_bf16 = cudaFuncSetAttribute(
+        gqa_attention_prefill_bf16_kernel<Geometry, Metadata, GqaPrefillBf16Storage>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillSmemBytes);
     CUDA_CHECK(attr_bf16);
+    static const cudaError_t attr_kvarn = cudaFuncSetAttribute(
+        gqa_attention_prefill_bf16_kernel<Geometry, Metadata, GqaPrefillKvarnStorage,
+                                           kGqaPrefillKvarnBr, kGqaPrefillKvarnBc,
+                                           kGqaPrefillKvarnThreads>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillSmemBytes);
+    CUDA_CHECK(attr_kvarn);
     static const cudaError_t attr_i8 =
         cudaFuncSetAttribute(gqa_attention_prefill_i8_kernel<Geometry, Metadata>,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillI8SmemBytes);
@@ -44,14 +55,48 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
                 static_cast<const __half*>(cache_v_scale.data), metadata,
                 static_cast<const std::int32_t*>(positions.data), scale,
                 static_cast<__nv_bfloat16*>(out.data), tokens);
+    } else if (cache.dtype == DType::U8) {
+        const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kGqaPrefillKvarnBr)),
+                                   static_cast<unsigned>(Geometry::QHeads), 1u);
+        const GqaPrefillKvarnStorage storage{
+            .k_codes = static_cast<const std::uint8_t*>(cache.k_pages.data),
+            .k_block_scales = static_cast<const std::uint8_t*>(cache.k_scale_pages.data),
+            .k_channel_scales = static_cast<const __half*>(cache.k_channel_scale_pages.data),
+            .v_codes = static_cast<const std::uint8_t*>(cache.v_pages.data),
+            .v_channel_scales = static_cast<const __half*>(cache.v_channel_scale_pages.data),
+            .v_token_scales = static_cast<const __half*>(cache.v_scale_pages.data),
+            .v_token_zeros = static_cast<const __half*>(cache.v_zero_pages.data),
+            .tail_k = static_cast<const __nv_bfloat16*>(cache.tail_k.data),
+            .tail_v = static_cast<const __nv_bfloat16*>(cache.tail_v.data),
+            .tail_logical_pages = static_cast<const std::int32_t*>(
+                [&]() -> const void* {
+                    if constexpr (requires { cache.tail_logical_pages; }) {
+                        return cache.tail_logical_pages.data;
+                    } else {
+                        return cache.tail_logical_page.data;
+                    }
+                }()),
+            .cached_tail_pages = nullptr,
+            .cached_k_channels = nullptr,
+            .cached_v_channels = nullptr,
+            .heads = cache.num_kv_heads,
+        };
+        gqa_attention_prefill_bf16_kernel<Geometry, Metadata, GqaPrefillKvarnStorage,
+                                           kGqaPrefillKvarnBr, kGqaPrefillKvarnBc,
+                                           kGqaPrefillKvarnThreads>
+            <<<attention_grid, kGqaPrefillKvarnThreads, kGqaPrefillSmemBytes, stream>>>(
+                static_cast<const __nv_bfloat16*>(q.data), storage, metadata,
+                static_cast<const std::int32_t*>(positions.data), scale,
+                static_cast<__nv_bfloat16*>(out.data), tokens);
     } else {
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kGqaPrefillBr)),
                                   static_cast<unsigned>(Geometry::QHeads), 1u);
-        gqa_attention_prefill_bf16_kernel<Geometry, Metadata>
+        const GqaPrefillBf16Storage storage{
+            static_cast<const __nv_bfloat16*>(cache_k.data),
+            static_cast<const __nv_bfloat16*>(cache_v.data)};
+        gqa_attention_prefill_bf16_kernel<Geometry, Metadata, GqaPrefillBf16Storage>
             <<<attention_grid, kGqaPrefillThreads, kGqaPrefillSmemBytes, stream>>>(
-                static_cast<const __nv_bfloat16*>(q.data),
-                static_cast<const __nv_bfloat16*>(cache_k.data),
-                static_cast<const __nv_bfloat16*>(cache_v.data), metadata,
+                static_cast<const __nv_bfloat16*>(q.data), storage, metadata,
                 static_cast<const std::int32_t*>(positions.data), scale,
                 static_cast<__nv_bfloat16*>(out.data), tokens);
     }
@@ -64,7 +109,9 @@ void gqa_kv_append_launch_for(const Tensor& k, const Tensor& v, const Tensor& po
     const auto tokens = static_cast<std::int32_t>(k.ne[2]);
     Tensor& cache_k   = cache.k_pages;
     Tensor& cache_v   = cache.v_pages;
-    if (cache.dtype == DType::I8) {
+    if (cache.dtype == DType::U8) {
+        throw std::invalid_argument("gqa_kv_append_launch_for: KVarN uses deferred paged append");
+    } else if (cache.dtype == DType::I8) {
         Tensor& cache_k_scale    = cache.k_scale_pages;
         Tensor& cache_v_scale    = cache.v_scale_pages;
         constexpr int kFillBlock = 256;
@@ -166,6 +213,33 @@ void gqa_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor&
         gqa_kv_append_launch_for<Gqa35Geometry>(k, v, positions, cache, metadata, stream);
         gqa_attention_prompt_attention_launch_for<Gqa35Geometry>(q, positions, scale, cache,
                                                                  metadata, out, stream);
+    };
+    if (valid_columns.data == nullptr) {
+        launch.template operator()<false>();
+    } else {
+        launch.template operator()<true>();
+    }
+}
+
+void gqa_attention_prompt_batch_attention_launch(
+    const Tensor& q, const Tensor& positions, const Tensor& valid_columns,
+    const Tensor& table_rows, float scale, const PagedKVBatchLayerView& cache, Tensor& out,
+    cudaStream_t stream) {
+    const auto launch = [&]<bool Masked>() {
+        const GqaPrefillBatchMetadata<Masked> metadata{
+            .tables = static_cast<const std::int32_t*>(cache.block_tables.data),
+            .valid_columns =
+                Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr,
+            .table_rows   = static_cast<const std::int32_t*>(table_rows.data),
+            .table_stride = cache.block_tables.ne[0],
+        };
+        if (q.ne[1] == Gqa27Geometry::QHeads) {
+            gqa_attention_prompt_attention_launch_for<Gqa27Geometry>(q, positions, scale, cache,
+                                                                      metadata, out, stream);
+            return;
+        }
+        gqa_attention_prompt_attention_launch_for<Gqa35Geometry>(q, positions, scale, cache,
+                                                                  metadata, out, stream);
     };
     if (valid_columns.data == nullptr) {
         launch.template operator()<false>();

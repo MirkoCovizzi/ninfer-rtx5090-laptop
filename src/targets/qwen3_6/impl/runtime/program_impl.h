@@ -1041,6 +1041,13 @@ void ProgramImplCore::set_device_i32(Tensor& tensor, std::int32_t value) {
 }
 
 void ProgramImplCore::ordered_reset(SequenceState& sequence) {
+    // Fresh requests can reuse a lane whose previous owner left a partial KVarN page. Retained
+    // claims do not take this path, so clear only fresh-reset markers and preserve retained tails.
+    decoder->text_kv.reset_kvarn_tail_row(static_cast<std::int32_t>(sequence.lane), device.stream);
+    if (decoder->mtp_cache() != nullptr) {
+        decoder->mtp_cache()->reset_kvarn_tail_row(static_cast<std::int32_t>(sequence.lane),
+                                                   device.stream);
+    }
     decoder->linear_attention.zero_slot(
         LinearStateSlots::current_state_slot(sequence.lane, max_concurrency), device.stream);
     work.reset();
@@ -2209,7 +2216,13 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
     out.device      = device.device;
     out.max_context = capacity;
     out.kv_capacity = kv_capacity;
-    out.kv_cache = kv_dtype == DType::BF16 ? KvCacheStorage::BFloat16 : KvCacheStorage::Int8Group64;
+    if (kv_dtype == DType::BF16) {
+        out.kv_cache = KvCacheStorage::BFloat16;
+    } else if (kv_dtype == DType::I8) {
+        out.kv_cache = KvCacheStorage::Int8Group64;
+    } else {
+        out.kv_cache = KvCacheStorage::KvarnNvfp4V2Group64;
+    }
     DeviceArena& weights = *model.weights_arena;
     out.weights = ArenaMemorySummary{weights.capacity(), weights.used(), weights.peak_used()};
     out.sequence =

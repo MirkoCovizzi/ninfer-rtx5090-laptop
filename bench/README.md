@@ -44,7 +44,7 @@ ninfer_bench --weights <artifact.ninfer>
           [-pg, --prompt-gen <P,G;P,G...>]
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
-          [--kv-dtype <bf16|int8>]
+          [--kv-dtype <bf16|int8|kvarn>]
           [--mtp-draft-tokens <0..5>] [--lm-head-draft]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]
@@ -60,9 +60,9 @@ Example:
   -p 512,2048 -n 128 -pg '2048,128' -r 5 --warmup 1
 ```
 
-`bf16` selects BF16 KV storage and `int8` selects INT8 group-64 KV storage. MTP is enabled with
-`--mtp-draft-tokens`; `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
-enabled by default.
+`bf16` selects BF16 KV storage, `int8` selects INT8 group-64, and `kvarn` selects the compact
+NVFP4-K/V2 group-64 profile. MTP is enabled with `--mtp-draft-tokens`; `--lm-head-draft` selects the
+optimized proposal head. CUDA Graph decode is enabled by default.
 
 `--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
 and `-r 1`, synchronizes after warmup, and brackets only the measured repetition with
@@ -309,8 +309,8 @@ counts, or kernel-name filters in these benchmarks.
 
 `ninfer_causal_softmax_attention_bench` measures the two public causal-cache entries:
 append-and-attend and cached-only. It covers the registered D256 H24/KV4 and H16/KV2 geometries
-with BF16 and INT8-G64 KV storage. Production dispatch receives the caller-visible execution
-envelope and owns all decode, prompt, Small-T, and split-KV choices.
+with BF16, INT8-G64, and KVarN NVFP4-K/V2-G64 KV storage. Production dispatch receives the
+caller-visible execution envelope and owns all decode, prompt, Small-T, and split-KV choices.
 
 Append-and-attend accepts `--batch 1,2,4,8`; each ordinary `--context L` point gives every row the
 same context and all `W` columns are valid. One exact mixed profile uses `--row-contexts`,
@@ -333,7 +333,17 @@ cmake --build build --parallel --target ninfer_causal_softmax_attention_bench
 ./build/bench/ninfer_causal_softmax_attention_bench \
   --entry cached --geometry d256-h16-kv2 --kv-dtype int8 \
   --tokens 16 --context 8192 --execution graph --cache cold --profile
+./build/bench/ninfer_causal_softmax_attention_bench \
+  --entry append --geometry all --kv-dtype kvarn \
+  --batch 8 --tokens 16 --row-contexts 63,127,2048,511,8192,31,16384,0 \
+  --valid-columns 16,12,8,4,2,1,0,16 --table-rows 7,0,5,2,6,1,4,3 \
+  --execution both --cache warm --mapping fragmented --warmup 10 --repeat 61
 ```
+
+The KVarN fixture initializes valid nonzero codes and metadata rather than relying on a zero cache.
+Its logical bandwidth uses represented cache bytes and intentionally excludes private BF16 decode
+staging. Full-page normalization/compression is measured separately by `ninfer_kvarn_bench`; it is
+not hidden inside the timed Attention call.
 
 `ninfer_context_softmax_attention_bench` measures the public read-only context-plus-query contract
 at Q32/KV8/D128 with BF16 context storage. `T` is a complete non-causal query block and `L` is its

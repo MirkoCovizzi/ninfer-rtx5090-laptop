@@ -117,7 +117,11 @@ int test_cli_contract() {
         expect(defaults.size() == 2 && defaults[0].label == "pp512" && defaults[1].label == "tg128",
                "default pp/tg matrix");
     failures += expect(qb::usage_text("ninfer_bench").find("artifact.ninfer") != std::string::npos,
-                       "help names native artifact");
+                        "help names native artifact");
+    const auto kvarn = parse_for_test(
+        {"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "kvarn"});
+    failures += expect(kvarn.kv_cache == ninfer::KvCacheStorage::KvarnNvfp4V2Group64,
+                       "KVarN KV");
     failures += expect(parse_for_test({"ninfer_bench", "--help"}).help_requested, "help flag");
 
     failures += expect_throws<std::invalid_argument>([] { (void)parse_for_test({"ninfer_bench"}); },

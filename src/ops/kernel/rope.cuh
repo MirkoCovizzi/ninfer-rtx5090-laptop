@@ -21,17 +21,7 @@ enum class RopeKernelMode : std::int32_t {
 
 inline constexpr int kRopeMaxHalf = 128;
 
-static __device__ __constant__ float kTextRopeInvFrequency[32] = {
-    1.000000000e+00F, 6.042963902e-01F, 3.651741273e-01F, 2.206734069e-01F, 1.333521432e-01F,
-    8.058421878e-02F, 4.869675252e-02F, 2.942727176e-02F, 1.778279410e-02F, 1.074607828e-02F,
-    6.493816316e-03F, 3.924189758e-03F, 2.371373706e-03F, 1.433012570e-03F, 8.659643234e-04F,
-    5.232991147e-04F, 3.162277660e-04F, 1.910952975e-04F, 1.154781985e-04F, 6.978305849e-05F,
-    4.216965034e-05F, 2.548296748e-05F, 1.539926526e-05F, 9.305720409e-06F, 5.623413252e-06F,
-    3.398208329e-06F, 2.053525026e-06F, 1.240937761e-06F, 7.498942093e-07F, 4.531583638e-07F,
-    2.738419634e-07F, 1.654817100e-07F,
-};
-
-static __device__ __constant__ double kDflashRopeInvFrequency[64] = {
+static __device__ __constant__ double kTextRopeInvFrequency[64] = {
     1.00000000000000000e+00, 7.77365030238775789e-01, 6.04296390238132863e-01,
     4.69758881670649164e-01, 3.65174127254837722e-01, 2.83873596475875456e-01,
     2.20673406908458991e-01, 1.71543789634287902e-01, 1.33352143216332403e-01,
@@ -63,38 +53,31 @@ static __device__ __constant__ float kVisionRopeInvFrequency[18] = {
     4.641588834e-04F, 2.782559402e-04F, 1.668100537e-04F,
 };
 
-template <RopeKernelMode Mode>
-__device__ __forceinline__ void fixed_axis_frequency(int pair, int* axis, float* frequency) {
-    if constexpr (Mode == RopeKernelMode::Vision2D) {
-        *axis      = pair / 18;
-        *frequency = kVisionRopeInvFrequency[pair % 18];
-    } else if constexpr (Mode == RopeKernelMode::DflashText1D) {
-        *axis      = 0;
-        *frequency = static_cast<float>(kDflashRopeInvFrequency[pair]);
-    } else {
-        *axis      = Mode == RopeKernelMode::TextMrope ? pair % 3 : 0;
-        *frequency = kTextRopeInvFrequency[pair];
-    }
+__device__ __forceinline__ void reduced_sincos(double angle, float* sine, float* cosine) {
+    constexpr double kInvTwoPi = 1.59154943091895336e-01;
+    constexpr double kTwoPi    = 6.28318530717958648e+00;
+    const double turns         = angle * kInvTwoPi;
+    const float reduced        = static_cast<float>(angle - nearbyint(turns) * kTwoPi);
+    sincosf(reduced, sine, cosine);
 }
 
 template <RopeKernelMode Mode>
 __device__ __forceinline__ void fixed_sincos(const std::int32_t* positions, int tokens, int token,
                                              int pair, float* sine, float* cosine) {
-    if constexpr (Mode == RopeKernelMode::DflashText1D) {
-        constexpr double kInvTwoPi = 1.59154943091895336e-01;
-        constexpr double kTwoPi    = 6.28318530717958648e+00;
-        const double angle  = static_cast<double>(positions[token]) * kDflashRopeInvFrequency[pair];
-        const double turns  = angle * kInvTwoPi;
-        const float reduced = static_cast<float>(angle - nearbyint(turns) * kTwoPi);
-        sincosf(reduced, sine, cosine);
-    } else {
-        int axis = 0;
-        float frequency;
-        fixed_axis_frequency<Mode>(pair, &axis, &frequency);
+    if constexpr (Mode == RopeKernelMode::Vision2D) {
+        const int axis        = pair / 18;
+        const float frequency = kVisionRopeInvFrequency[pair % 18];
         const float angle =
             static_cast<float>(positions[static_cast<std::int64_t>(axis) * tokens + token]) *
             frequency;
         sincosf(angle, sine, cosine);
+    } else {
+        const int axis = Mode == RopeKernelMode::TextMrope ? pair % 3 : 0;
+        const int frequency_index = Mode == RopeKernelMode::DflashText1D ? pair : pair * 2;
+        const double angle =
+            static_cast<double>(positions[static_cast<std::int64_t>(axis) * tokens + token]) *
+            kTextRopeInvFrequency[frequency_index];
+        reduced_sincos(angle, sine, cosine);
     }
 }
 
