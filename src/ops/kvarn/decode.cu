@@ -26,74 +26,121 @@ struct KvarnPrefillInput {
 
     template <bool Key>
     __device__ __forceinline__ void stage(__nv_bfloat16* destination, int head, int k0,
-                                          int max_query_abs, int physical_page, int tid) const {
-        constexpr int kVecPerRow = D / 8;
+                                           int max_query_abs, int physical_page, int tid) const {
+        static_assert(Group == kGqaPrefillBc);
+        constexpr int Threads = kGqaPrefillThreads;
         const int table_row = table_rows[0];
-        for (int chunk = tid; chunk < Group * kVecPerRow; chunk += kGqaPrefillThreads) {
-            const int token = chunk / kVecPerRow;
-            const int d = (chunk % kVecPerRow) * 8;
-            __nv_bfloat16* output =
-                destination + token * D + gqa_prefill_swz(token, d);
-            const int position = k0 + token;
-            if (position > max_query_abs) {
-                store_vec(output, make_int4(0, 0, 0, 0));
-                continue;
-            }
-            int tail_slot = -1;
+        int tail_slot = -1;
 #pragma unroll
-            for (int slot = 0; slot < kKvarnTailSlots; ++slot) {
-                if (markers[slot + kKvarnTailSlots * table_row] == position / Group) {
-                    tail_slot = slot;
-                }
+        for (int slot = 0; slot < kKvarnTailSlots; ++slot) {
+            if (markers[slot + kKvarnTailSlots * table_row] == k0 / Group) {
+                tail_slot = slot;
             }
-            if (tail_slot >= 0) {
-                const auto* tail = Key ? tail_k : tail_v;
+        }
+        if (tail_slot >= 0) {
+            constexpr int VecPerRow = D / 8;
+            const auto* tail = Key ? tail_k : tail_v;
+            for (int chunk = tid; chunk < Group * VecPerRow; chunk += Threads) {
+                const int token = chunk / VecPerRow;
+                const int d = (chunk % VecPerRow) * 8;
+                __nv_bfloat16* output =
+                    destination + token * D + gqa_prefill_swz(token, d);
+                const int position = k0 + token;
+                if (position > max_query_abs) {
+                    store_vec(output, make_int4(0, 0, 0, 0));
+                    continue;
+                }
                 const std::int64_t source =
                     static_cast<std::int64_t>(d) + static_cast<std::int64_t>(D) *
-                                                       ((position & (Group - 1)) +
-                                                        Group * (head + heads *
-                                                                            (tail_slot +
-                                                                             kKvarnTailSlots *
-                                                                                 table_row)));
+                                                       (token + Group *
+                                                                    (head + heads *
+                                                                                (tail_slot +
+                                                                                 kKvarnTailSlots *
+                                                                                     table_row)));
                 store_vec(output, load_vec<int4>(tail + source));
-                continue;
             }
-            const std::uint8_t* record =
-                records + (static_cast<std::int64_t>(physical_page) * heads + head) *
-                              kKvarnRecordBytes;
-            if constexpr (Key) {
-                const auto* scale = reinterpret_cast<const __half*>(record + kKvarnKScaleOffset);
-                const auto* zero = reinterpret_cast<const __half*>(record + kKvarnKZeroOffset);
-                const auto* token_scale =
-                    reinterpret_cast<const __half*>(record + kKvarnKTokenScaleOffset);
+            return;
+        }
+
+        const std::uint8_t* record =
+            records + (static_cast<std::int64_t>(physical_page) * heads + head) *
+                          kKvarnRecordBytes;
+        if constexpr (Key) {
+            const auto* scale = reinterpret_cast<const __half*>(record + kKvarnKScaleOffset);
+            const auto* zero = reinterpret_cast<const __half*>(record + kKvarnKZeroOffset);
+            const auto* token_scale =
+                reinterpret_cast<const __half*>(record + kKvarnKTokenScaleOffset);
+            for (int dim = tid; dim < D; dim += Threads) {
+                const float column_scale = __half2float(scale[dim]);
+                const float column_zero = __half2float(zero[dim]);
 #pragma unroll
-                for (int item = 0; item < 8; ++item) {
-                    const int dim = d + item;
-                    const std::uint8_t packed =
-                        record[kKvarnKPackedOffset + dim * (Group / 2) + token / 2];
-                    const int code = (packed >> (4 * (token & 1))) & 15;
-                    output[item] = __float2bfloat16_rn(
-                        fmaf(static_cast<float>(code), __half2float(scale[dim]),
-                             __half2float(zero[dim])) *
-                        __half2float(token_scale[token]));
-                }
-            } else {
-                const auto* channel =
-                    reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
-                const auto* scale =
-                    reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
-                const auto* zero = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
+                for (int half = 0; half < 2; ++half) {
+                    const int4 packed = load_vec<int4>(record + kKvarnKPackedOffset +
+                                                       dim * (Group / 2) + half * 16);
 #pragma unroll
-                for (int item = 0; item < 8; ++item) {
-                    const int dim = d + item;
-                    const std::uint8_t packed =
-                        record[kKvarnVPackedOffset + token * (D / 4) + dim / 4];
-                    const int code = (packed >> (2 * (dim & 3))) & 3;
-                    output[item] = __float2bfloat16_rn(
-                        fmaf(static_cast<float>(code), __half2float(scale[token]),
-                             __half2float(zero[token])) *
-                        __half2float(channel[dim]));
+                    for (int pair = 0; pair < 16; ++pair) {
+                        const int word_index = pair >> 2;
+                        const unsigned word =
+                            word_index == 0   ? static_cast<unsigned>(packed.x)
+                            : word_index == 1 ? static_cast<unsigned>(packed.y)
+                            : word_index == 2 ? static_cast<unsigned>(packed.z)
+                                              : static_cast<unsigned>(packed.w);
+                        const unsigned codes = (word >> (8 * (pair & 3))) & 0xffU;
+                        const int token = half * 32 + pair * 2;
+                        const auto token_scales = __half22float2(
+                            *reinterpret_cast<const __half2*>(token_scale + token));
+                        const float decoded0 =
+                            fmaf(static_cast<float>(codes & 15U), column_scale, column_zero) *
+                            token_scales.x;
+                        const float decoded1 =
+                            fmaf(static_cast<float>(codes >> 4), column_scale, column_zero) *
+                            token_scales.y;
+                        destination[token * D + gqa_prefill_swz(token, dim)] =
+                            k0 + token <= max_query_abs ? __float2bfloat16_rn(decoded0)
+                                                        : __float2bfloat16_rn(0.0F);
+                        destination[(token + 1) * D + gqa_prefill_swz(token + 1, dim)] =
+                            k0 + token + 1 <= max_query_abs ? __float2bfloat16_rn(decoded1)
+                                                            : __float2bfloat16_rn(0.0F);
+                    }
                 }
+            }
+        } else {
+            const auto* channel =
+                reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
+            const auto* scale =
+                reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
+            const auto* zero = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
+            for (int packed_item = tid; packed_item < Group * (D / 4);
+                 packed_item += Threads) {
+                const int token = packed_item / (D / 4);
+                const int packed_dim = packed_item - token * (D / 4);
+                const int dim = 4 * packed_dim;
+                __nv_bfloat16* output =
+                    destination + token * D + gqa_prefill_swz(token, dim);
+                if (k0 + token > max_query_abs) {
+                    *reinterpret_cast<uint2*>(output) = make_uint2(0, 0);
+                    continue;
+                }
+                const std::uint8_t packed =
+                    record[kKvarnVPackedOffset + token * (D / 4) + packed_dim];
+                const float row_scale = __half2float(scale[token]);
+                const float row_zero = __half2float(zero[token]);
+                const auto channel01 =
+                    __half22float2(*reinterpret_cast<const __half2*>(channel + dim));
+                const auto channel23 =
+                    __half22float2(*reinterpret_cast<const __half2*>(channel + dim + 2));
+                const float channel_scales[4] = {
+                    channel01.x, channel01.y, channel23.x, channel23.y};
+                unsigned values[4];
+#pragma unroll
+                for (int item = 0; item < 4; ++item) {
+                    const int code = (packed >> (2 * item)) & 3;
+                    values[item] = __bfloat16_as_ushort(__float2bfloat16_rn(
+                        fmaf(static_cast<float>(code), row_scale, row_zero) *
+                        channel_scales[item]));
+                }
+                *reinterpret_cast<uint2*>(output) = make_uint2(
+                    values[0] | (values[1] << 16), values[2] | (values[3] << 16));
             }
         }
     }
