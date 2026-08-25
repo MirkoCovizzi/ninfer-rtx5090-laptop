@@ -14,6 +14,7 @@ namespace ninfer::ops::kvarn {
 namespace detail {
 
 inline constexpr int kDecodeBc = 32;
+inline constexpr int kDecodeWarps = 8;
 inline constexpr int kMetadataHalfValues = 2 * D + Group + D + 2 * Group;
 inline constexpr int kMetadataKScale = 0;
 inline constexpr int kMetadataKZero = kMetadataKScale + D;
@@ -120,8 +121,9 @@ __device__ __forceinline__ void stage_decode_tile(
             key_destination[token * D + gqa_small_t_tc_swz(token, dim)] = value;
         }
     }
-    for (int token = 0; token < Bc; ++token) {
-        const int packed_dim = warp * 32 + lane;
+    for (int item = tid; item < Bc * (D / 4); item += threads) {
+        const int token = item / (D / 4);
+        const int packed_dim = item - token * (D / 4);
         const int record_token = token_base + token;
         const int position = logical_begin + token;
         const std::uint8_t packed =
@@ -150,7 +152,7 @@ __device__ __forceinline__ void stage_decode_tile(
 }
 
 template <typename Geometry, bool MultiBatch, bool Masked>
-__launch_bounds__(64, 2) __global__ void attention_decode_kernel(
+__launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
     const __nv_bfloat16* q, const std::uint8_t* records, const __nv_bfloat16* tail_k,
     const __nv_bfloat16* tail_v, const std::int32_t* markers, const std::int32_t* positions,
     const std::int32_t* block_tables, const std::int32_t* valid_columns,
@@ -158,21 +160,29 @@ __launch_bounds__(64, 2) __global__ void attention_decode_kernel(
     std::int32_t full_width, std::int32_t column_begin, std::int32_t logical_capacity,
     std::int32_t heads, float scale, __nv_bfloat16* partial_acc, float* partial_m,
     float* partial_l) {
-    constexpr int Wc = 2;
-    constexpr int Br = Wc * 16;
+    constexpr int Wc = kDecodeWarps;
+    constexpr int ProducerWarps = 2;
+    constexpr int RowTiles = 2;
+    constexpr int Br = RowTiles * 16;
     constexpr int Bc = kDecodeBc;
     constexpr int Threads = Wc * 32;
     constexpr int QKNt = Bc / 8;
     constexpr int QKKs = D / 16;
     constexpr int PVNt = D / 8;
+    constexpr int ConsumerWarps = Wc - ProducerWarps;
+    constexpr int ConsumerWarpsPerTile = ConsumerWarps / RowTiles;
+    constexpr int PVNtPerWarp = div_up(PVNt, ConsumerWarpsPerTile);
     constexpr int PVKs = Bc / 16;
     constexpr int PageIds = 64;
     constexpr float Log2E = 1.4426950408889634074f;
     constexpr unsigned FullMask = 0xffffffffu;
     static_assert(Group == 2 * Bc);
+    static_assert(ProducerWarps == RowTiles);
+    static_assert(ConsumerWarps % RowTiles == 0);
 
     __shared__ __align__(16) __nv_bfloat16 qkv_s[2 * Bc * D];
-    __shared__ __align__(16) __nv_bfloat16 p_s[Wc * 16 * Bc];
+    __shared__ __align__(16) __nv_bfloat16 p_s[Br * Bc];
+    __shared__ float alpha_s[Br];
     __shared__ __align__(16) __half metadata_s[kMetadataHalfValues];
     __shared__ std::int32_t physical_pages_s[PageIds];
     __nv_bfloat16* k_s = qkv_s;
@@ -266,25 +276,32 @@ __launch_bounds__(64, 2) __global__ void attention_decode_kernel(
     const int a_coloff = (a_mat >> 1) << 3;
     const int b_rin = lane & 7;
     const int b_koff = ((lane >> 3) & 1) << 3;
-    const int warp_row0 = warp * 16;
-    __nv_bfloat16* p_sw = &p_s[warp * 16 * Bc];
-    unsigned query_fragment[QKKs][4];
+    const int producer_row_base = warp * 16;
+    // Warp roles are disjoint; alias their long-lived state to keep two CTAs resident without
+    // spilling either the producer's Q fragments or the consumer's PV accumulator.
+    union {
+        unsigned query_fragment[QKKs][4];
+        float accumulator[PVNtPerWarp][4];
+    } warp_state;
+    if (warp < ProducerWarps) {
 #pragma unroll
-    for (int k = 0; k < QKKs; ++k) {
-        const int row = warp_row0 + a_rowoff;
-        const int col = k * 16 + a_coloff;
-        ldmatrix_x4(query_fragment[k][0], query_fragment[k][1], query_fragment[k][2],
-                    query_fragment[k][3],
-                    smem_addr(&qkv_s[row * D + gqa_small_t_tc_swz(row, col)]));
+        for (int k = 0; k < QKKs; ++k) {
+            const int row = producer_row_base + a_rowoff;
+            const int col = k * 16 + a_coloff;
+            ldmatrix_x4(warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
+                        warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
+                        smem_addr(&qkv_s[row * D + gqa_small_t_tc_swz(row, col)]));
+        }
     }
     __syncthreads();
 
     int physical_page = physical_pages_s[0];
-    float accumulator[PVNt][4];
+    if (warp >= ProducerWarps) {
 #pragma unroll
-    for (int n = 0; n < PVNt; ++n) {
+        for (int n = 0; n < PVNtPerWarp; ++n) {
 #pragma unroll
-        for (int item = 0; item < 4; ++item) { accumulator[n][item] = 0.0f; }
+            for (int item = 0; item < 4; ++item) { warp_state.accumulator[n][item] = 0.0f; }
+        }
     }
     float m0 = -CUDART_INF_F, m1 = -CUDART_INF_F, l0 = 0.0f, l1 = 0.0f;
     for (int block = 0; block < key_blocks; ++block) {
@@ -303,123 +320,147 @@ __launch_bounds__(64, 2) __global__ void attention_decode_kernel(
                           heads, kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end), tid,
                           Threads);
 
-        float score[QKNt][4];
+        if (warp < ProducerWarps) {
+            __nv_bfloat16* p_sw = &p_s[producer_row_base * Bc];
+            float score[QKNt][4];
 #pragma unroll
-        for (int tile = 0; tile < QKNt; ++tile) {
-            score[tile][0] = score[tile][1] = score[tile][2] = score[tile][3] = 0.0f;
+            for (int tile = 0; tile < QKNt; ++tile) {
+                score[tile][0] = score[tile][1] = score[tile][2] = score[tile][3] = 0.0f;
 #pragma unroll
-            for (int k = 0; k < QKKs; ++k) {
-                unsigned key_fragment[2];
-                const int row = tile * 8 + b_rin;
-                const int col = k * 16 + b_koff;
-                ldmatrix_x2(key_fragment[0], key_fragment[1],
-                            smem_addr(&k_s[row * D + gqa_small_t_tc_swz(row, col)]));
-                mma_bf16(score[tile][0], score[tile][1], score[tile][2], score[tile][3],
-                         query_fragment[k][0], query_fragment[k][1], query_fragment[k][2],
-                         query_fragment[k][3], key_fragment[0], key_fragment[1]);
+                for (int k = 0; k < QKKs; ++k) {
+                    unsigned key_fragment[2];
+                    const int row = tile * 8 + b_rin;
+                    const int col = k * 16 + b_koff;
+                    ldmatrix_x2(key_fragment[0], key_fragment[1],
+                                smem_addr(&k_s[row * D + gqa_small_t_tc_swz(row, col)]));
+                    mma_bf16(score[tile][0], score[tile][1], score[tile][2], score[tile][3],
+                             warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
+                             warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
+                             key_fragment[0], key_fragment[1]);
+                }
+            }
+            const int row0 = producer_row_base + gid;
+            const int row1 = row0 + 8;
+            float block_m0 = -CUDART_INF_F, block_m1 = -CUDART_INF_F;
+#pragma unroll
+            for (int tile = 0; tile < QKNt; ++tile) {
+                const int col0 = tile * 8 + 2 * lid;
+                const int col1 = col0 + 1;
+                const int key0 = k0 + col0;
+                const int key1 = k0 + col1;
+                score[tile][0] = row0 < row_count && key0 >= split_start && key0 < split_end &&
+                                         key0 <= query_position
+                                     ? score[tile][0] * scale
+                                     : -CUDART_INF_F;
+                score[tile][1] = row0 < row_count && key1 >= split_start && key1 < split_end &&
+                                         key1 <= query_position
+                                     ? score[tile][1] * scale
+                                     : -CUDART_INF_F;
+                score[tile][2] = row1 < row_count && key0 >= split_start && key0 < split_end &&
+                                         key0 <= query_position
+                                     ? score[tile][2] * scale
+                                     : -CUDART_INF_F;
+                score[tile][3] = row1 < row_count && key1 >= split_start && key1 < split_end &&
+                                         key1 <= query_position
+                                     ? score[tile][3] * scale
+                                     : -CUDART_INF_F;
+                block_m0 = fmaxf(block_m0, fmaxf(score[tile][0], score[tile][1]));
+                block_m1 = fmaxf(block_m1, fmaxf(score[tile][2], score[tile][3]));
+            }
+            block_m0 = warp_max<4>(block_m0, FullMask);
+            block_m1 = warp_max<4>(block_m1, FullMask);
+            const float next_m0 = fmaxf(m0, block_m0);
+            const float next_m1 = fmaxf(m1, block_m1);
+            const float alpha0 =
+                m0 == -CUDART_INF_F ? 0.0f : exp2_approx((m0 - next_m0) * Log2E);
+            const float alpha1 =
+                m1 == -CUDART_INF_F ? 0.0f : exp2_approx((m1 - next_m1) * Log2E);
+            float block_l0 = 0.0f, block_l1 = 0.0f;
+#pragma unroll
+            for (int tile = 0; tile < QKNt; ++tile) {
+                const int col0 = tile * 8 + 2 * lid;
+                const int col1 = col0 + 1;
+                const float p00 = next_m0 > -CUDART_INF_F && score[tile][0] > -CUDART_INF_F
+                                      ? exp2_approx((score[tile][0] - next_m0) * Log2E)
+                                      : 0.0f;
+                const float p01 = next_m0 > -CUDART_INF_F && score[tile][1] > -CUDART_INF_F
+                                      ? exp2_approx((score[tile][1] - next_m0) * Log2E)
+                                      : 0.0f;
+                const float p10 = next_m1 > -CUDART_INF_F && score[tile][2] > -CUDART_INF_F
+                                      ? exp2_approx((score[tile][2] - next_m1) * Log2E)
+                                      : 0.0f;
+                const float p11 = next_m1 > -CUDART_INF_F && score[tile][3] > -CUDART_INF_F
+                                      ? exp2_approx((score[tile][3] - next_m1) * Log2E)
+                                      : 0.0f;
+                block_l0 += p00 + p01;
+                block_l1 += p10 + p11;
+                p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col0)] = __float2bfloat16(p00);
+                p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col1)] = __float2bfloat16(p01);
+                p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col0)] =
+                    __float2bfloat16(p10);
+                p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col1)] =
+                    __float2bfloat16(p11);
+            }
+            block_l0 = warp_sum<4>(block_l0, FullMask);
+            block_l1 = warp_sum<4>(block_l1, FullMask);
+            l0 = l0 * alpha0 + block_l0;
+            l1 = l1 * alpha1 + block_l1;
+            m0 = next_m0;
+            m1 = next_m1;
+            if (lid == 0) {
+                alpha_s[row0] = alpha0;
+                alpha_s[row1] = alpha1;
             }
         }
-        const int row0 = warp_row0 + gid;
-        const int row1 = row0 + 8;
-        float block_m0 = -CUDART_INF_F, block_m1 = -CUDART_INF_F;
+        __syncthreads();
+
+        if (warp >= ProducerWarps) {
+            const int consumer_warp = warp - ProducerWarps;
+            const int consumer_tile = consumer_warp % RowTiles;
+            const int consumer_slice = consumer_warp / RowTiles;
+            const int consumer_row_base = consumer_tile * 16;
+            __nv_bfloat16* p_sw = &p_s[consumer_row_base * Bc];
+            const float alpha0 = alpha_s[consumer_row_base + gid];
+            const float alpha1 = alpha_s[consumer_row_base + gid + 8];
 #pragma unroll
-        for (int tile = 0; tile < QKNt; ++tile) {
-            const int col0 = tile * 8 + 2 * lid;
-            const int col1 = col0 + 1;
-            const int key0 = k0 + col0;
-            const int key1 = k0 + col1;
-            score[tile][0] = row0 < row_count && key0 >= split_start && key0 < split_end &&
-                                     key0 <= query_position
-                                 ? score[tile][0] * scale
-                                 : -CUDART_INF_F;
-            score[tile][1] = row0 < row_count && key1 >= split_start && key1 < split_end &&
-                                     key1 <= query_position
-                                 ? score[tile][1] * scale
-                                 : -CUDART_INF_F;
-            score[tile][2] = row1 < row_count && key0 >= split_start && key0 < split_end &&
-                                     key0 <= query_position
-                                 ? score[tile][2] * scale
-                                 : -CUDART_INF_F;
-            score[tile][3] = row1 < row_count && key1 >= split_start && key1 < split_end &&
-                                     key1 <= query_position
-                                 ? score[tile][3] * scale
-                                 : -CUDART_INF_F;
-            block_m0 = fmaxf(block_m0, fmaxf(score[tile][0], score[tile][1]));
-            block_m1 = fmaxf(block_m1, fmaxf(score[tile][2], score[tile][3]));
-        }
-        block_m0 = warp_max<4>(block_m0, FullMask);
-        block_m1 = warp_max<4>(block_m1, FullMask);
-        const float next_m0 = fmaxf(m0, block_m0);
-        const float next_m1 = fmaxf(m1, block_m1);
-        const float alpha0 = m0 == -CUDART_INF_F ? 0.0f : exp2_approx((m0 - next_m0) * Log2E);
-        const float alpha1 = m1 == -CUDART_INF_F ? 0.0f : exp2_approx((m1 - next_m1) * Log2E);
-        float block_l0 = 0.0f, block_l1 = 0.0f;
+            for (int n = 0; n < PVNtPerWarp; ++n) {
+                warp_state.accumulator[n][0] *= alpha0;
+                warp_state.accumulator[n][1] *= alpha0;
+                warp_state.accumulator[n][2] *= alpha1;
+                warp_state.accumulator[n][3] *= alpha1;
+            }
 #pragma unroll
-        for (int tile = 0; tile < QKNt; ++tile) {
-            const int col0 = tile * 8 + 2 * lid;
-            const int col1 = col0 + 1;
-            const float p00 = next_m0 > -CUDART_INF_F && score[tile][0] > -CUDART_INF_F
-                                  ? exp2_approx((score[tile][0] - next_m0) * Log2E)
-                                  : 0.0f;
-            const float p01 = next_m0 > -CUDART_INF_F && score[tile][1] > -CUDART_INF_F
-                                  ? exp2_approx((score[tile][1] - next_m0) * Log2E)
-                                  : 0.0f;
-            const float p10 = next_m1 > -CUDART_INF_F && score[tile][2] > -CUDART_INF_F
-                                  ? exp2_approx((score[tile][2] - next_m1) * Log2E)
-                                  : 0.0f;
-            const float p11 = next_m1 > -CUDART_INF_F && score[tile][3] > -CUDART_INF_F
-                                  ? exp2_approx((score[tile][3] - next_m1) * Log2E)
-                                  : 0.0f;
-            block_l0 += p00 + p01;
-            block_l1 += p10 + p11;
-            p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col0)] = __float2bfloat16(p00);
-            p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col1)] = __float2bfloat16(p01);
-            p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col0)] =
-                __float2bfloat16(p10);
-            p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col1)] =
-                __float2bfloat16(p11);
-        }
-        block_l0 = warp_sum<4>(block_l0, FullMask);
-        block_l1 = warp_sum<4>(block_l1, FullMask);
-        l0 = l0 * alpha0 + block_l0;
-        l1 = l1 * alpha1 + block_l1;
-        m0 = next_m0;
-        m1 = next_m1;
+            for (int n = 0; n < PVNtPerWarp; ++n) {
+                const int global_n = consumer_slice * PVNtPerWarp + n;
+                if (global_n >= PVNt) { continue; }
 #pragma unroll
-        for (int n = 0; n < PVNt; ++n) {
-            accumulator[n][0] *= alpha0;
-            accumulator[n][1] *= alpha0;
-            accumulator[n][2] *= alpha1;
-            accumulator[n][3] *= alpha1;
-        }
-        __syncwarp();
-#pragma unroll
-        for (int n = 0; n < PVNt; ++n) {
-#pragma unroll
-            for (int k = 0; k < PVKs; ++k) {
-                unsigned probability_fragment[4];
-                const int probability_col = k * 16 + a_coloff;
-                ldmatrix_x4(probability_fragment[0], probability_fragment[1],
-                            probability_fragment[2], probability_fragment[3],
-                            smem_addr(&p_sw[a_rowoff * Bc +
-                                            gqa_small_t_tc_swz32(a_rowoff, probability_col)]));
-                unsigned value_fragment[2];
-                const int value_row = k * 16 + b_koff + b_rin;
-                const int value_col = n * 8;
-                ldmatrix_x2_t(value_fragment[0], value_fragment[1],
-                              smem_addr(&v_s[value_row * D +
-                                              gqa_small_t_tc_swz(value_row, value_col)]));
-                mma_bf16(accumulator[n][0], accumulator[n][1], accumulator[n][2],
-                         accumulator[n][3], probability_fragment[0], probability_fragment[1],
-                         probability_fragment[2], probability_fragment[3], value_fragment[0],
-                         value_fragment[1]);
+                for (int k = 0; k < PVKs; ++k) {
+                    unsigned probability_fragment[4];
+                    const int probability_col = k * 16 + a_coloff;
+                    ldmatrix_x4(
+                        probability_fragment[0], probability_fragment[1],
+                        probability_fragment[2], probability_fragment[3],
+                        smem_addr(&p_sw[a_rowoff * Bc +
+                                        gqa_small_t_tc_swz32(a_rowoff, probability_col)]));
+                    unsigned value_fragment[2];
+                    const int value_row = k * 16 + b_koff + b_rin;
+                    const int value_col = global_n * 8;
+                    ldmatrix_x2_t(value_fragment[0], value_fragment[1],
+                                  smem_addr(&v_s[value_row * D +
+                                                  gqa_small_t_tc_swz(value_row, value_col)]));
+                    mma_bf16(warp_state.accumulator[n][0], warp_state.accumulator[n][1],
+                             warp_state.accumulator[n][2], warp_state.accumulator[n][3],
+                             probability_fragment[0], probability_fragment[1],
+                             probability_fragment[2], probability_fragment[3], value_fragment[0],
+                             value_fragment[1]);
+                }
             }
         }
         __syncthreads();
     }
 
-    if (lid == 0) {
-        const int row0 = warp_row0 + gid;
+    if (warp < ProducerWarps && lid == 0) {
+        const int row0 = producer_row_base + gid;
         const int row1 = row0 + 8;
         if (row0 < row_count) {
             const int q_head = kv_head * Geometry::GroupSize + row0;
@@ -432,19 +473,27 @@ __launch_bounds__(64, 2) __global__ void attention_decode_kernel(
             partial_l[gqa_partial_stat_index<Geometry>(q_head, column, split, tokens)] = l1;
         }
     }
+    if (warp >= ProducerWarps) {
+        const int consumer_warp = warp - ProducerWarps;
+        const int consumer_tile = consumer_warp % RowTiles;
+        const int consumer_slice = consumer_warp / RowTiles;
+        const int consumer_row_base = consumer_tile * 16;
 #pragma unroll
-    for (int n = 0; n < PVNt; ++n) {
-        const int d0 = n * 8 + 2 * lid;
-        const int d1 = d0 + 1;
-        const int row0 = warp_row0 + gid;
-        const int row1 = row0 + 8;
-        if (row0 < row_count) {
-            qkv_s[row0 * D + d0] = __float2bfloat16(accumulator[n][0]);
-            qkv_s[row0 * D + d1] = __float2bfloat16(accumulator[n][1]);
-        }
-        if (row1 < row_count) {
-            qkv_s[row1 * D + d0] = __float2bfloat16(accumulator[n][2]);
-            qkv_s[row1 * D + d1] = __float2bfloat16(accumulator[n][3]);
+        for (int n = 0; n < PVNtPerWarp; ++n) {
+            const int global_n = consumer_slice * PVNtPerWarp + n;
+            if (global_n >= PVNt) { continue; }
+            const int d0 = global_n * 8 + 2 * lid;
+            const int d1 = d0 + 1;
+            const int row0 = consumer_row_base + gid;
+            const int row1 = row0 + 8;
+            if (row0 < row_count) {
+                qkv_s[row0 * D + d0] = __float2bfloat16(warp_state.accumulator[n][0]);
+                qkv_s[row0 * D + d1] = __float2bfloat16(warp_state.accumulator[n][1]);
+            }
+            if (row1 < row_count) {
+                qkv_s[row1 * D + d0] = __float2bfloat16(warp_state.accumulator[n][2]);
+                qkv_s[row1 * D + d1] = __float2bfloat16(warp_state.accumulator[n][3]);
+            }
         }
     }
     __syncthreads();
