@@ -19,6 +19,9 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
                                                cudaStream_t stream) {
     const Tensor& cache_k = cache.k_pages;
     const Tensor& cache_v = cache.v_pages;
+    const GqaPrefillBf16Input<Geometry> bf16_input{
+        static_cast<const __nv_bfloat16*>(cache_k.data),
+        static_cast<const __nv_bfloat16*>(cache_v.data)};
     // Both dtype-specialized kernels exceed the default 48 KiB dynamic-smem ceiling.
     static const cudaError_t attr_bf16 =
         cudaFuncSetAttribute(gqa_attention_prefill_bf16_kernel<Geometry, Metadata>,
@@ -49,9 +52,7 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
                                   static_cast<unsigned>(Geometry::QHeads), 1u);
         gqa_attention_prefill_bf16_kernel<Geometry, Metadata>
             <<<attention_grid, kGqaPrefillThreads, kGqaPrefillSmemBytes, stream>>>(
-                static_cast<const __nv_bfloat16*>(q.data),
-                static_cast<const __nv_bfloat16*>(cache_k.data),
-                static_cast<const __nv_bfloat16*>(cache_v.data), metadata,
+                static_cast<const __nv_bfloat16*>(q.data), bf16_input, metadata,
                 static_cast<const std::int32_t*>(positions.data), scale,
                 static_cast<__nv_bfloat16*>(out.data), tokens);
     }

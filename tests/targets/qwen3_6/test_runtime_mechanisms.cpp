@@ -40,14 +40,20 @@ void test_topology() {
 }
 
 q36::DecoderStateSpec decoder_spec(ninfer::DType dtype, bool mtp) {
+    const ninfer::KvCacheStorage storage =
+        dtype == ninfer::DType::BF16
+            ? ninfer::KvCacheStorage::BFloat16
+            : dtype == ninfer::DType::I8 ? ninfer::KvCacheStorage::Int8Group64
+                                         : ninfer::KvCacheStorage::KvarnK4V2Group64;
     return q36::DecoderStateSpec{
         .full_attention_layers     = 2,
         .mtp_layers                = 1,
         .capacity                  = 129,
         .kv_heads                  = 2,
-        .attention_head_dim        = 64,
+        .attention_head_dim        = dtype == ninfer::DType::U8 ? 256 : 64,
+        .kv_storage                = storage,
         .kv_dtype                  = dtype,
-        .kv_quant_group            = dtype == ninfer::DType::I8 ? q36::kKvQuantGroup : 0,
+        .kv_quant_group            = dtype == ninfer::DType::BF16 ? 0 : q36::kKvQuantGroup,
         .enable_mtp                = mtp,
         .text_physical_page_groups = 5,
         .mtp_physical_page_groups  = mtp ? 4U : 0U,
@@ -103,7 +109,23 @@ void test_decoder_layout() {
                int8.mtp_kv->pool.planes[3].spec.dtype == ninfer::DType::FP16,
            "INT8 MTP KV has scale planes");
     expect(int8.kv_payload_bytes() == int8.text_kv.payload_bytes() + int8.mtp_kv->payload_bytes(),
-           "INT8 Text/MTP KV payload accounting");
+            "INT8 Text/MTP KV payload accounting");
+
+    ninfer::LayoutBuilder kvarn_builder;
+    const q36::DecoderStateLayout kvarn =
+        q36::plan_decoder_state(kvarn_builder, decoder_spec(ninfer::DType::U8, true));
+    (void)kvarn_builder.finish(256);
+    expect(kvarn.text_kv.pool.planes.size() == 2 &&
+               kvarn.text_kv.pool.planes[0].spec.dtype == ninfer::DType::U8 &&
+               kvarn.text_kv.pool.planes[0].spec.leading_extent ==
+                   ninfer::ops::kKvarnRecordBytes / ninfer::kPagedKVPageSize,
+           "KVarN uses one aligned record plane per layer");
+    expect(kvarn.text_kv.kvarn_tail_k.region.bytes != 0 &&
+               kvarn.text_kv.kvarn_tail_v.region.bytes != 0 &&
+               kvarn.text_kv.kvarn_tail_logical_pages.region.bytes != 0,
+           "KVarN owns fixed rotated sink/tail state");
+    expect(kvarn.mtp_kv && kvarn.mtp_kv->pool.planes.size() == 1,
+           "KVarN MTP uses the same record and tail profile");
 }
 
 void test_round_layout() {

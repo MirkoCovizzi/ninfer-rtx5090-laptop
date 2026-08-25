@@ -45,7 +45,11 @@ int main() {
                           defaults.kv_capacity.explicit_tokens == defaults.max_context,
                       "default KV capacity does not follow max context");
     failures += check(defaults.speculative.backend == ninfer::SpeculativeBackend::None,
-                      "speculative decoding is not disabled by default");
+                       "speculative decoding is not disabled by default");
+    const ServeOptions kvarn =
+        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "kvarn"});
+    failures += check(kvarn.kv_cache == ninfer::KvCacheStorage::KvarnK4V2Group64,
+                       "--kv-dtype kvarn did not select KVarN K4V2-G64");
     failures += check(defaults.response_store_max_records == kDefaultResponseStoreRecords &&
                           defaults.response_store_max_bytes == kDefaultResponseStoreBytes,
                       "Responses store defaults mismatch");

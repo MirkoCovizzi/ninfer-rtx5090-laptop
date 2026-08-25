@@ -244,7 +244,10 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
             __nv_bfloat16* k_dst = &k_s[key_l * D + gqa_small_t_tc_swz(key_l, d)];
             __nv_bfloat16* v_dst = &v_s[key_l * D + gqa_small_t_tc_swz(key_l, d)];
             if (key >= split_start && key < split_end) {
-                if constexpr (CacheInput::writes_cache) {
+                if constexpr (CacheInput::kvarn) {
+                    input.stage(k_dst, v_dst, table_row, physical_page, kv_head, key,
+                                key & kPagedKVPageMask, d);
+                } else if constexpr (CacheInput::writes_cache) {
                     const int new_token = key - current_first_pos;
                     const bool from_new = new_token >= 0 && new_token < current_tokens;
                     if (from_new) {

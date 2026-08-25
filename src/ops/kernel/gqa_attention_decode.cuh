@@ -23,12 +23,14 @@ inline constexpr int kGqaHeadDim = 256;
 
 struct GqaAppendInput {
     static constexpr bool writes_cache = true;
+    static constexpr bool kvarn        = false;
     const __nv_bfloat16* k;
     const __nv_bfloat16* v;
 };
 
 struct GqaCachedInput {
     static constexpr bool writes_cache = false;
+    static constexpr bool kvarn        = false;
 };
 
 template <typename Geometry>

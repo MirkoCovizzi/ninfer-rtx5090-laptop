@@ -270,6 +270,11 @@ Main Text/MTP   [D, P, Hkv, Nphysical]  [D/64, P, Hkv, Nphysical]
 DFlash Full     [D, P, Nphysical, Hkv]  not used
 ```
 
+KVarN K4V2-G64 是 Main Text/MTP 的另一个 closed layout。每个 `(layer, physical_page,
+kv_head)` 使用一个 16,384-byte aligned record，其中 14,208 bytes 是 Huawei K4/V2 payload；Tensor
+shape 为 `[16384/P,P,Hkv,Nphysical]` U8。每个 lane/layer 另有两个永久 sink slots 和两个动态 tail
+slots，保存 rotated BF16 K/V；这些 fixed lane states 不属于 growing page-group payload。
+
 Main Text/MTP 使用 contiguous page-major order。对 element bytes `E` 和第一维 extent `X`（K/V/code
 为 `D`，scale 为 `D/64`）：
 
@@ -363,6 +368,9 @@ BF16 bytes/token
 INT8-G64 bytes/token
     = 2(K,V) * L * H * D
     + 2(K,V) * L * H * (D/64) * sizeof(FP16 scale)
+
+KVarN K4V2-G64 bytes/token
+    = L * H * 16384 / 64
 ```
 
 一个 homogeneous pool 的 logical page-group payload 是其全部 grouped planes 的 bytes/token 之和乘以
@@ -600,12 +608,16 @@ blocks；其 Full pool 使用 §4.3 的 head-major page-run order。两者保留
 |---|---|---:|---:|---:|
 | 27B Main Text | BF16 | 65536 | 4.0000 MiB | 3.9375 MiB |
 | 27B Main Text | INT8-G64 | 33792 | 2.0625 MiB | 2.0303 MiB |
+| 27B Main Text | KVarN K4V2-G64 | 16384 | 1.0000 MiB | 0.9844 MiB |
 | 35B-A3B Main Text | BF16 | 20480 | 1.2500 MiB | 1.2305 MiB |
 | 35B-A3B Main Text | INT8-G64 | 10560 | 0.6445 MiB | 0.6345 MiB |
+| 35B-A3B Main Text | KVarN K4V2-G64 | 5120 | 0.3125 MiB | 0.3076 MiB |
 | 27B MTP | BF16 | 4096 | 0.2500 MiB | 0.2461 MiB |
 | 27B MTP | INT8-G64 | 2112 | 0.1289 MiB | 0.1269 MiB |
+| 27B MTP | KVarN K4V2-G64 | 1024 | 0.0625 MiB | 0.0615 MiB |
 | 35B-A3B MTP | BF16 | 2048 | 0.1250 MiB | 0.1230 MiB |
 | 35B-A3B MTP | INT8-G64 | 1056 | 0.0645 MiB | 0.0634 MiB |
+| 35B-A3B MTP | KVarN K4V2-G64 | 512 | 0.0313 MiB | 0.0308 MiB |
 | 35B-A3B DFlash Full | BF16 | 4096 | 0.2500 MiB | 0.2461 MiB |
 
 27B Main Text BF16 的 4 MiB page group 分布在全部 full-attention planes。单层单个 K 或 V plane
@@ -999,6 +1011,10 @@ Op inputs
 `table_rows[b]` 为 compact row `b` 选择一个 active allocation 的 table row。View 不内嵌 `B`、membership、
 context length 或 valid-column metadata；同一 exact-`B` invocation 可以选择任意互不冲突的 active rows。
 Plane bases和table matrix base在Engine lifetime内稳定，row selector和table content是round data。
+
+KVarN consumer 使用独立的 `KvarnPagedLayerView` / `KvarnPagedBatchLayerView`，携带 U8 record plane、
+rotated-BF16 sink/tail planes、tail logical-page markers 和相同的 block-table row/matrix。它不把 record
+伪装成 `PagedKVLayerView` 的 K/V planes；allocator ownership、frontier 和 table-row selection 语义保持相同。
 
 ### 15.3 Device address contract
 

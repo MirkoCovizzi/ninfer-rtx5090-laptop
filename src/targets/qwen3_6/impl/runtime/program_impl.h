@@ -3,6 +3,7 @@
 
 #include "targets/qwen3_6/impl/runtime/schedule.h"
 #include "ninfer/ops/gdn_replay.h"
+#include "ninfer/ops/kvarn_attention.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
 #include "ninfer/ops/scatter.h"
 #include "ninfer/ops/speculative_round.h"
@@ -183,7 +184,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     : model(model_in), device(device_in), capacity(plan.capacity), kv_capacity(plan.kv_capacity),
       max_concurrency(plan.max_concurrency), prefill_chunk(plan.prefill_chunk),
       draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),
-      kv_dtype(plan.kv_dtype), kv_quant_group(plan.kv_quant_group),
+      kv_storage(plan.kv_storage), kv_dtype(plan.kv_dtype),
+      kv_quant_group(plan.kv_quant_group),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
@@ -553,6 +555,7 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
 
         trim_sequence_kv(sequence, base, backend_kv_valid(sequence));
         bind_sequence_kv(sequence);
+        restore_sequence_kvarn_tail(sequence, base, backend_kv_valid(sequence));
         const std::uint32_t backend_materialized =
             speculative_backend == SpeculativeBackend::Mtp
                 ? std::min(capacity,
@@ -1005,7 +1008,7 @@ void ProgramImplCore::materialize_sequence_kv(SequenceState& sequence, std::uint
 }
 
 void ProgramImplCore::trim_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
-                                       std::uint32_t backend_tokens) {
+                                        std::uint32_t backend_tokens) {
     if (!sequence.kv || main_tokens > capacity || backend_tokens > main_tokens) {
         throw std::logic_error("KV trim request is outside the sequence bundle");
     }
@@ -1014,6 +1017,26 @@ void ProgramImplCore::trim_sequence_kv(SequenceState& sequence, std::uint32_t ma
     }
     sequence.kv->text.trim_tokens(main_tokens);
     if (sequence.kv->backend) { sequence.kv->backend->trim_tokens(backend_tokens); }
+    restore_sequence_kvarn_tail(sequence, main_tokens, backend_tokens);
+}
+
+void ProgramImplCore::restore_sequence_kvarn_tail(SequenceState& sequence,
+                                                   std::uint32_t main_tokens,
+                                                   std::uint32_t backend_tokens) {
+    if (!sequence.kv || sequence.kv->text.bound_row() < 0) return;
+    const auto restore = [&](qwen3_6::PagedKVCache& cache, const PagedKVAllocation& allocation,
+                             std::uint32_t frontier) {
+        if (cache.storage() != KvCacheStorage::KvarnK4V2Group64) return;
+        const qwen3_6::PagedKVCacheView view = cache.execution_view(allocation);
+        for (std::uint32_t layer = 0; layer < cache.layers(); ++layer) {
+            ops::kvarn_restore_tail(checked_i32(frontier, "KVarN tail frontier"),
+                                    view.kvarn_layer_view(layer), device.stream);
+        }
+    };
+    restore(decoder->text_kv, sequence.kv->text, main_tokens);
+    if (sequence.kv->backend && decoder->mtp_cache() != nullptr) {
+        restore(*decoder->mtp_cache(), *sequence.kv->backend, backend_tokens);
+    }
 }
 
 void ProgramImplCore::release_sequence_growth_entitlement(SequenceState& sequence) noexcept {
@@ -1043,6 +1066,11 @@ void ProgramImplCore::set_device_i32(Tensor& tensor, std::int32_t value) {
 void ProgramImplCore::ordered_reset(SequenceState& sequence) {
     decoder->linear_attention.zero_slot(
         LinearStateSlots::current_state_slot(sequence.lane, max_concurrency), device.stream);
+    decoder->text_kv.reset_kvarn_tail_row(static_cast<std::int32_t>(sequence.lane), device.stream);
+    if (decoder->mtp_cache() != nullptr) {
+        decoder->mtp_cache()->reset_kvarn_tail_row(static_cast<std::int32_t>(sequence.lane),
+                                                   device.stream);
+    }
     work.reset();
     set_device_i32(io.pos, 0);
     set_device_i32(io.rope_pos, 0);
@@ -2209,7 +2237,7 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
     out.device      = device.device;
     out.max_context = capacity;
     out.kv_capacity = kv_capacity;
-    out.kv_cache = kv_dtype == DType::BF16 ? KvCacheStorage::BFloat16 : KvCacheStorage::Int8Group64;
+    out.kv_cache = kv_storage;
     DeviceArena& weights = *model.weights_arena;
     out.weights = ArenaMemorySummary{weights.capacity(), weights.used(), weights.peak_used()};
     out.sequence =

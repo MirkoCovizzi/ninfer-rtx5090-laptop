@@ -61,50 +61,54 @@ __global__ void gqa_attention_prefill_fill_bf16_kernel(
 // drops) are zeroed so the padded/uninitialized cache tail never feeds NaNs into
 // the tensor cores. Mirrors FA's predicated K/V cp.async + Clear_OOB path.
 template <typename Geometry>
-__device__ __forceinline__ void gqa_prefill_stage_kv(__nv_bfloat16* dst, const __nv_bfloat16* cache,
-                                                     int kv_head, int k0, int max_query_abs,
-                                                     int physical_page, int tid) {
-    constexpr int D         = kGqaPrefillHeadDim;
-    constexpr int Bc        = kGqaPrefillBc;
-    constexpr int Threads   = kGqaPrefillThreads;
-    constexpr int VecPerRow = D / 8; // 8 bf16 per 16B cp.async
-    const bool full_tile    = (k0 + Bc - 1) <= max_query_abs;
-    // Block base pointer computed once (int64); per-element offsets stay 32-bit.
-    const __nv_bfloat16* cache_block =
-        cache + paged_kv_element_offset<kGqaPrefillHeadDim, Geometry::KVHeads>(
-                    physical_page, kv_head, k0 & kPagedKVPageMask, 0);
-    if (full_tile) {
+struct GqaPrefillBf16Input {
+    const __nv_bfloat16* key;
+    const __nv_bfloat16* value;
+
+    template <bool Key>
+    __device__ __forceinline__ void stage(__nv_bfloat16* dst, int kv_head, int k0,
+                                          int max_query_abs, int physical_page, int tid) const {
+        const __nv_bfloat16* cache = Key ? key : value;
+        constexpr int D = kGqaPrefillHeadDim;
+        constexpr int Bc = kGqaPrefillBc;
+        constexpr int Threads = kGqaPrefillThreads;
+        constexpr int VecPerRow = D / 8; // 8 bf16 per 16B cp.async
+        const bool full_tile = (k0 + Bc - 1) <= max_query_abs;
+        // Block base pointer computed once (int64); per-element offsets stay 32-bit.
+        const __nv_bfloat16* cache_block =
+            cache + paged_kv_element_offset<kGqaPrefillHeadDim, Geometry::KVHeads>(
+                        physical_page, kv_head, k0 & kPagedKVPageMask, 0);
+        if (full_tile) {
 #pragma unroll
-        for (int chunk = tid; chunk < Bc * VecPerRow; chunk += Threads) {
-            const int key_l  = chunk >> 5;        // / VecPerRow (32)
-            const int d      = (chunk & 31) << 3; // (chunk % 32) * 8
-            __nv_bfloat16* p = &dst[key_l * D + gqa_prefill_swz(key_l, d)];
-            cp_async<16, Cache::cg>(p, &cache_block[key_l * D + d]);
-        }
-    } else {
-#pragma unroll
-        for (int chunk = tid; chunk < Bc * VecPerRow; chunk += Threads) {
-            const int key_l  = chunk >> 5;        // / VecPerRow (32)
-            const int d      = (chunk & 31) << 3; // (chunk % 32) * 8
-            __nv_bfloat16* p = &dst[key_l * D + gqa_prefill_swz(key_l, d)];
-            if ((k0 + key_l) <= max_query_abs) {
+            for (int chunk = tid; chunk < Bc * VecPerRow; chunk += Threads) {
+                const int key_l  = chunk >> 5;        // / VecPerRow (32)
+                const int d      = (chunk & 31) << 3; // (chunk % 32) * 8
+                __nv_bfloat16* p = &dst[key_l * D + gqa_prefill_swz(key_l, d)];
                 cp_async<16, Cache::cg>(p, &cache_block[key_l * D + d]);
-            } else {
-                store_vec(p, make_int4(0, 0, 0, 0));
+            }
+        } else {
+#pragma unroll
+            for (int chunk = tid; chunk < Bc * VecPerRow; chunk += Threads) {
+                const int key_l  = chunk >> 5;        // / VecPerRow (32)
+                const int d      = (chunk & 31) << 3; // (chunk % 32) * 8
+                __nv_bfloat16* p = &dst[key_l * D + gqa_prefill_swz(key_l, d)];
+                if ((k0 + key_l) <= max_query_abs) {
+                    cp_async<16, Cache::cg>(p, &cache_block[key_l * D + d]);
+                } else {
+                    store_vec(p, make_int4(0, 0, 0, 0));
+                }
             }
         }
     }
-}
+};
 
 // FlashAttention-2 forward, one CTA per (query 64-row block, query head). Grid is
 // (ceil(tokens/64), q_heads). seqlen_q = tokens, seqlen_k = base_pos + tokens, with
 // bottom-right causal alignment (query row i sees keys [0, base_pos + i]).
-template <typename Geometry, typename Metadata>
+template <typename Geometry, typename Metadata, typename CacheInput = GqaPrefillBf16Input<Geometry>>
 __launch_bounds__(kGqaPrefillThreads, 1) __global__
     void gqa_attention_prefill_bf16_kernel(const __nv_bfloat16* __restrict__ q,
-                                           const __nv_bfloat16* __restrict__ cache_k,
-                                           const __nv_bfloat16* __restrict__ cache_v,
-                                           Metadata metadata,
+                                           CacheInput cache, Metadata metadata,
                                            const std::int32_t* __restrict__ positions, float scale,
                                            __nv_bfloat16* __restrict__ out, std::int32_t width) {
     constexpr int D             = kGqaPrefillHeadDim; // 256
@@ -222,7 +226,7 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__
 
     // Prologue: commit Q, then kick off K(0). The loop's wait<0> below drains both.
     ninfer::ops::cp_commit();
-    gqa_prefill_stage_kv<Geometry>(k_s, cache_k, kv_head, 0, max_query_abs, physical_page, tid);
+    cache.template stage<true>(k_s, kv_head, 0, max_query_abs, physical_page, tid);
     ninfer::ops::cp_commit();
 
     for (int kb = 0; kb < n_block_max; ++kb) {
@@ -233,8 +237,7 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__
         __syncthreads();
 
         // Overlap V(kb) load against the QK MMA below.
-        gqa_prefill_stage_kv<Geometry>(v_s, cache_v, kv_head, k0, max_query_abs, physical_page,
-                                       tid);
+        cache.template stage<false>(v_s, kv_head, k0, max_query_abs, physical_page, tid);
         ninfer::ops::cp_commit();
 
         // S = Q Kᵀ for this warp's 16 rows over all Bc keys, in registers.
@@ -389,8 +392,8 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__
         // Prefetch K(kb+1) into the (now-free) K buffer, overlapping the PV MMA.
         if (kb + 1 < n_block_max) {
             physical_page = next_physical_page;
-            gqa_prefill_stage_kv<Geometry>(k_s, cache_k, kv_head, (kb + 1) * Bc, max_query_abs,
-                                           physical_page, tid);
+            cache.template stage<true>(k_s, kv_head, (kb + 1) * Bc, max_query_abs, physical_page,
+                                       tid);
             ninfer::ops::cp_commit();
         }
 
