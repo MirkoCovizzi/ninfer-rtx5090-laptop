@@ -4,6 +4,7 @@
 
 #include "targets/qwen3_6/impl/runtime/schedule.h"
 #include "ninfer/ops/gdn_replay.h"
+#include "ninfer/ops/kvarn_attention.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scatter.h"
@@ -721,7 +722,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
-      speculative_backend(plan.speculative_backend), kv_dtype(plan.kv_dtype),
+      speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
+      kv_dtype(plan.kv_dtype),
       kv_quant_group(plan.kv_quant_group), proposal_head(plan.proposal_head),
       vision_enabled(plan.features.vision), use_cuda_graph(plan.use_cuda_graph),
       kv_payload_bytes(plan.persistent.kv_payload_bytes),
@@ -8794,6 +8796,7 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
         sequence.endpoint_valid = false;
         if (!preserving_source) { trim_sequence_kv(sequence, base, backend_kv_valid(sequence)); }
         bind_sequence_kv(sequence);
+        restore_sequence_kvarn_tail(sequence, base, backend_kv_valid(sequence));
         const std::uint32_t backend_materialized =
             speculative_backend == SpeculativeBackend::Mtp
                 ? std::min(capacity,
@@ -9435,7 +9438,7 @@ void ProgramImplCore::commit_sequence_kv(SequenceState& sequence, std::uint32_t 
 }
 
 void ProgramImplCore::trim_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
-                                       std::uint32_t backend_tokens) {
+                                        std::uint32_t backend_tokens) {
     if (!sequence.kv || main_tokens > capacity || backend_tokens > main_tokens) {
         throw std::logic_error("KV trim request is outside the sequence bundle");
     }
@@ -9445,6 +9448,31 @@ void ProgramImplCore::trim_sequence_kv(SequenceState& sequence, std::uint32_t ma
     text_kv_addresses->destructive_truncate(sequence.kv->text, main_tokens);
     if (sequence.kv->backend) {
         backend_kv_addresses->destructive_truncate(*sequence.kv->backend, backend_tokens);
+    }
+    restore_sequence_kvarn_tail(sequence, main_tokens, backend_tokens);
+}
+
+void ProgramImplCore::restore_sequence_kvarn_tail(SequenceState& sequence,
+                                                   std::uint32_t main_tokens,
+                                                   std::uint32_t backend_tokens) {
+    if (!sequence.kv) { return; }
+    const auto restore = [&](qwen3_6::PagedKVCache& cache, KVAddressSpaceStore& addresses,
+                             KVAddressSpaceHandle address, std::uint32_t frontier) {
+        if (cache.storage() != KvCacheStorage::KvarnK4V2Group64) return;
+        if (!addresses.active(address)) {
+            throw std::logic_error("KVarN tail restore requires an active KV address space");
+        }
+        const qwen3_6::PagedKVCacheView view =
+            cache.execution_view(addresses.execution_row(address));
+        for (std::uint32_t layer = 0; layer < cache.layers(); ++layer) {
+            ops::kvarn_restore_tail(checked_i32(frontier, "KVarN tail frontier"),
+                                    view.kvarn_layer_view(layer), device.stream);
+        }
+    };
+    restore(decoder->text_kv, *text_kv_addresses, sequence.kv->text, main_tokens);
+    if (sequence.kv->backend && decoder->mtp_cache() != nullptr) {
+        restore(*decoder->mtp_cache(), *backend_kv_addresses, *sequence.kv->backend,
+                backend_tokens);
     }
 }
 
@@ -10808,19 +10836,7 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
     out.device      = device.device;
     out.max_context = capacity;
     out.kv_capacity = kv_capacity;
-    switch (kv_dtype) {
-    case DType::BF16:
-        out.kv_cache = KvCacheStorage::BFloat16;
-        break;
-    case DType::I8:
-        out.kv_cache = KvCacheStorage::Int8Group64;
-        break;
-    case DType::FP8_E4M3FN:
-        out.kv_cache = KvCacheStorage::Fp8E4M3Row256;
-        break;
-    default:
-        std::terminate();
-    }
+    out.kv_cache = kv_storage;
     DeviceArena& weights = *model.weights_arena;
     out.weights = ArenaMemorySummary{weights.capacity(), weights.used(), weights.peak_used()};
     out.sequence =

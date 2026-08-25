@@ -70,6 +70,9 @@ add_library(ninfer_ops STATIC
   ops/launcher/embed_gather.cu
   ops/launcher/gdn_gating.cu
   ops/launcher/gelu.cu
+  ops/kvarn/codec.cu
+  ops/kvarn/attention.cu
+  ops/kvarn/decode.cu
   ops/launcher/l2norm.cu
   ops/launcher/layer_norm.cu
   ops/launcher/mtp_pack.cu

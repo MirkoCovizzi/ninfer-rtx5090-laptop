@@ -595,6 +595,7 @@ public:
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
     const SpeculativeBackend speculative_backend;
+    const KvCacheStorage kv_storage;
     const DType kv_dtype;
     const std::int32_t kv_quant_group;
     const ProposalHead proposal_head;
@@ -1109,7 +1110,9 @@ private:
     void materialize_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
                                  std::uint32_t backend_tokens = 0);
     void trim_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
-                          std::uint32_t backend_tokens = 0);
+                           std::uint32_t backend_tokens = 0);
+    void restore_sequence_kvarn_tail(SequenceState& sequence, std::uint32_t main_tokens,
+                                     std::uint32_t backend_tokens);
     void release_sequence_growth_entitlement(SequenceState& sequence) noexcept;
     void release_sequence_kv(SequenceState& sequence) noexcept;
     void commit_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,

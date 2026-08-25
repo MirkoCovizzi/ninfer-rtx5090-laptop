@@ -23,12 +23,14 @@ inline constexpr int kCausalHeadDim = 256;
 
 struct CausalAppendInput {
     static constexpr bool writes_cache = true;
+    static constexpr bool kvarn        = false;
     const __nv_bfloat16* k;
     const __nv_bfloat16* v;
 };
 
 struct CausalCachedInput {
     static constexpr bool writes_cache = false;
+    static constexpr bool kvarn        = false;
 };
 
 template <typename Geometry>
