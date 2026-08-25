@@ -2,9 +2,9 @@
 
 #include "core/device.h"
 #include "ops/kernel/gqa_attention_decode.cuh"
-#include "ops/kernel/gqa_attention_decode_bf16.cuh"
 #include "ops/kernel/gqa_attention_prefill_bf16.cuh"
 #include "ops/kvarn/config.cuh"
+#include "ops/kvarn/decode_kernel.cuh"
 #include "ops/launcher/gqa_attention.h"
 
 #include <cuda_bf16.h>
@@ -15,69 +15,6 @@
 
 namespace ninfer::ops::kvarn {
 namespace {
-
-struct KvarnCachedInput {
-    static constexpr bool writes_cache = false;
-    static constexpr bool kvarn        = true;
-
-    const std::uint8_t* records;
-    const __nv_bfloat16* tail_k;
-    const __nv_bfloat16* tail_v;
-    const std::int32_t* markers;
-    int heads;
-    __device__ void stage(__nv_bfloat16* key_destination, __nv_bfloat16* value_destination,
-                          int table_row, int physical_page, int head, int logical_position,
-                          int token, int d) const {
-        int tail_slot = -1;
-#pragma unroll
-        for (int slot = 0; slot < kKvarnTailSlots; ++slot) {
-            if (markers[slot + kKvarnTailSlots * table_row] == logical_position / Group)
-                tail_slot = slot;
-        }
-        if (tail_slot >= 0) {
-            const std::int64_t source =
-                static_cast<std::int64_t>(d) + static_cast<std::int64_t>(D) *
-                                                   (token + Group *
-                                                                (head + heads *
-                                                                            (tail_slot +
-                                                                             kKvarnTailSlots *
-                                                                                 table_row)));
-            const int4 key_value = *reinterpret_cast<const int4*>(tail_k + source);
-            const int4 value_value = *reinterpret_cast<const int4*>(tail_v + source);
-            *reinterpret_cast<int4*>(key_destination) = key_value;
-            *reinterpret_cast<int4*>(value_destination) = value_value;
-            return;
-        }
-        const std::uint8_t* record =
-            records + (static_cast<std::int64_t>(physical_page) * heads + head) *
-                          kKvarnRecordBytes;
-        const auto* k_scale = reinterpret_cast<const __half*>(record + kKvarnKScaleOffset);
-        const auto* k_zero = reinterpret_cast<const __half*>(record + kKvarnKZeroOffset);
-        const auto* k_token = reinterpret_cast<const __half*>(record + kKvarnKTokenScaleOffset);
-        const auto* v_channel =
-            reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
-        const auto* v_scale = reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
-        const auto* v_zero = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
-#pragma unroll
-        for (int item = 0; item < 8; ++item) {
-            const int dim = d + item;
-            const std::uint8_t kb =
-                record[kKvarnKPackedOffset + dim * (Group / 2) + token / 2];
-            const int kc = (kb >> (4 * (token & 1))) & 15;
-            const std::uint8_t vb =
-                record[kKvarnVPackedOffset + token * (D / 4) + dim / 4];
-            const int vc = (vb >> (2 * (dim & 3))) & 3;
-            key_destination[item] =
-                __float2bfloat16_rn(fmaf(static_cast<float>(kc), __half2float(k_scale[dim]),
-                                        __half2float(k_zero[dim])) *
-                                      __half2float(k_token[token]));
-            value_destination[item] =
-                __float2bfloat16_rn(fmaf(static_cast<float>(vc), __half2float(v_scale[token]),
-                                        __half2float(v_zero[token])) *
-                                      __half2float(v_channel[dim]));
-        }
-    }
-};
 
 struct KvarnPrefillInput {
     const std::uint8_t* records;
@@ -204,23 +141,19 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
                     Tensor& output, cudaStream_t stream) {
     constexpr int kWarps = 2;
     const dim3 grid(Geometry::KVHeads, splits, query.ne[3] * width);
-    const KvarnCachedInput input{
-        static_cast<const std::uint8_t*>(cache.records.data),
-        static_cast<const __nv_bfloat16*>(cache.tail_k.data),
-        static_cast<const __nv_bfloat16*>(cache.tail_v.data),
-        static_cast<const std::int32_t*>(cache.tail_logical_pages.data),
-        cache.num_kv_heads,
-    };
-    gqa_attention_small_t_tc_partial_bf16_kernel<Geometry, 1, kWarps, MultiBatch, Masked, true,
-                                                  KvarnCachedInput>
+    detail::attention_decode_kernel<Geometry, MultiBatch, Masked>
         <<<grid, kWarps * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(query.data), input,
-            static_cast<const std::int32_t*>(positions.data), nullptr, nullptr,
+            static_cast<const __nv_bfloat16*>(query.data),
+            static_cast<const std::uint8_t*>(cache.records.data),
+            static_cast<const __nv_bfloat16*>(cache.tail_k.data),
+            static_cast<const __nv_bfloat16*>(cache.tail_v.data),
+            static_cast<const std::int32_t*>(cache.tail_logical_pages.data),
+            static_cast<const std::int32_t*>(positions.data),
             static_cast<const std::int32_t*>(cache.block_tables.data),
             Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr,
             static_cast<const std::int32_t*>(table_rows.data), cache.block_tables.ne[0], width,
             query.ne[2], column_begin,
-            static_cast<std::int32_t>(envelope.max_visible_keys), scale,
+            static_cast<std::int32_t>(envelope.max_visible_keys), cache.num_kv_heads, scale,
             static_cast<__nv_bfloat16*>(partial_acc.data), static_cast<float*>(partial_m.data),
             static_cast<float*>(partial_l.data));
     CUDA_CHECK(cudaGetLastError());
@@ -266,8 +199,8 @@ void decode_attention(const Tensor& query, const Tensor& positions,
     for (int begin = 0; begin < query.ne[2]; begin += kChunk) {
         const int width = std::min(kChunk, query.ne[2] - begin);
         auto scope = workspace.scope();
-        const int splits = detail::gqa_attention_split_capacity(query.ne[1], width, DType::BF16,
-                                                                 envelope);
+        const int splits = ops::detail::gqa_attention_split_capacity(
+            query.ne[1], width, DType::BF16, envelope);
         Tensor acc = workspace.alloc(DType::BF16,
                                      {D, query.ne[1], width, splits * query.ne[3]});
         Tensor m = workspace.alloc(DType::FP32,
