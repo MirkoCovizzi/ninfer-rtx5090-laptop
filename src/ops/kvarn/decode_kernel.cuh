@@ -85,26 +85,20 @@ __device__ __forceinline__ void stage_decode_record(
     __syncthreads();
 }
 
-__device__ __forceinline__ void stage_decode_tile(
-    __nv_bfloat16* key_destination, __nv_bfloat16* value_destination,
-    const unsigned* packed_k, const std::uint8_t* packed_v, const __half* metadata,
-    const __nv_bfloat16* tail_k, const __nv_bfloat16* tail_v, int table_row, int tail_slot,
-    int heads, int head, int logical_begin, int valid_begin, int valid_end, int tid,
-    int threads) {
+__device__ __forceinline__ void stage_decode_key(
+    __nv_bfloat16* destination, const unsigned* packed_k, const __half* metadata,
+    const __nv_bfloat16* tail_k, int table_row, int tail_slot, int heads, int head,
+    int logical_begin, int valid_begin, int valid_end, int tid, int threads) {
     constexpr int Bc = kDecodeBc;
     const int token_base = logical_begin & (Group - 1);
     if (tail_slot >= 0) {
         for (int chunk = tid; chunk < Bc * (D / 8); chunk += threads) {
             const int token = chunk / (D / 8);
             const int d = (chunk % (D / 8)) * 8;
-            __nv_bfloat16* key_output =
-                key_destination + token * D + gqa_small_t_tc_swz(token, d);
-            __nv_bfloat16* value_output =
-                value_destination + token * D + gqa_small_t_tc_swz(token, d);
+            __nv_bfloat16* output = destination + token * D + gqa_small_t_tc_swz(token, d);
             const int position = logical_begin + token;
             if (position < valid_begin || position >= valid_end) {
-                store_vec(key_output, make_int4(0, 0, 0, 0));
-                store_vec(value_output, make_int4(0, 0, 0, 0));
+                store_vec(output, make_int4(0, 0, 0, 0));
                 continue;
             }
             const std::int64_t source =
@@ -112,12 +106,10 @@ __device__ __forceinline__ void stage_decode_tile(
                                                    (token_base + token + Group *
                                                                              (head + heads *
                                                                                          (tail_slot +
-                                                                                          kKvarnTailSlots *
-                                                                                              table_row)));
-            store_vec(key_output, load_vec<int4>(tail_k + source));
-            store_vec(value_output, load_vec<int4>(tail_v + source));
+                                                                                           kKvarnTailSlots *
+                                                                                               table_row)));
+            store_vec(output, load_vec<int4>(tail_k + source));
         }
-        __syncthreads();
         return;
     }
 
@@ -151,14 +143,44 @@ __device__ __forceinline__ void stage_decode_tile(
                                    token_scales.y;
             const int position0 = logical_begin + token;
             const int position1 = position0 + 1;
-            key_destination[token * D + gqa_small_t_tc_swz(token, dim)] =
+            destination[token * D + gqa_small_t_tc_swz(token, dim)] =
                 position0 >= valid_begin && position0 < valid_end ? __float2bfloat16_rn(decoded0)
-                                                                  : __float2bfloat16_rn(0.0F);
-            key_destination[(token + 1) * D + gqa_small_t_tc_swz(token + 1, dim)] =
+                                                                   : __float2bfloat16_rn(0.0F);
+            destination[(token + 1) * D + gqa_small_t_tc_swz(token + 1, dim)] =
                 position1 >= valid_begin && position1 < valid_end ? __float2bfloat16_rn(decoded1)
-                                                                  : __float2bfloat16_rn(0.0F);
+                                                                   : __float2bfloat16_rn(0.0F);
         }
     }
+}
+
+__device__ __forceinline__ void stage_decode_value(
+    __nv_bfloat16* destination, const std::uint8_t* packed_v, const __half* metadata,
+    const __nv_bfloat16* tail_v, int table_row, int tail_slot, int heads, int head,
+    int logical_begin, int valid_begin, int valid_end, int tid, int threads) {
+    constexpr int Bc = kDecodeBc;
+    const int token_base = logical_begin & (Group - 1);
+    if (tail_slot >= 0) {
+        for (int chunk = tid; chunk < Bc * (D / 8); chunk += threads) {
+            const int token = chunk / (D / 8);
+            const int d = (chunk % (D / 8)) * 8;
+            __nv_bfloat16* output = destination + token * D + gqa_small_t_tc_swz(token, d);
+            const int position = logical_begin + token;
+            if (position < valid_begin || position >= valid_end) {
+                store_vec(output, make_int4(0, 0, 0, 0));
+                continue;
+            }
+            const std::int64_t source =
+                static_cast<std::int64_t>(d) + static_cast<std::int64_t>(D) *
+                                                   (token_base + token + Group *
+                                                                             (head + heads *
+                                                                                         (tail_slot +
+                                                                                          kKvarnTailSlots *
+                                                                                              table_row)));
+            store_vec(output, load_vec<int4>(tail_v + source));
+        }
+        return;
+    }
+
     for (int item = tid; item < Bc * (D / 4); item += threads) {
         const int token = item / (D / 4);
         const int packed_dim = item - token * (D / 4);
@@ -181,11 +203,10 @@ __device__ __forceinline__ void stage_decode_tile(
         }
         const uint2 packed_values =
             make_uint2(values[0] | (values[1] << 16), values[2] | (values[3] << 16));
-        auto* destination = reinterpret_cast<uint2*>(
-            value_destination + token * D + gqa_small_t_tc_swz(token, 4 * packed_dim));
-        *destination = packed_values;
+        auto* output = reinterpret_cast<uint2*>(
+            destination + token * D + gqa_small_t_tc_swz(token, 4 * packed_dim));
+        *output = packed_values;
     }
-    __syncthreads();
 }
 
 template <typename Geometry, bool MultiBatch, bool Masked>
@@ -355,9 +376,9 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
         if (tail_slot < 0 && (block == 0 || (k0 & (Group - 1)) == 0)) {
             stage_decode_record(packed_k_s, packed_v_s, metadata_s, record, tid, Threads);
         }
-        stage_decode_tile(k_s, v_s, packed_k_s, packed_v_s, metadata_s, tail_k, tail_v, table_row,
-                          tail_slot, heads, kv_head, k0, max(k0, split_start),
-                          min(k0 + Bc, split_end), tid, Threads);
+        stage_decode_key(k_s, packed_k_s, metadata_s, tail_k, table_row, tail_slot, heads, kv_head,
+                         k0, max(k0, split_start), min(k0 + Bc, split_end), tid, Threads);
+        __syncthreads();
 
         if (warp < ProducerWarps) {
             __nv_bfloat16* p_sw = &p_s[producer_row_base * Bc];
@@ -450,6 +471,11 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
                 alpha_s[row0] = alpha0;
                 alpha_s[row1] = alpha1;
             }
+        } else {
+            const int worker_tid = tid - ProducerWarps * 32;
+            stage_decode_value(v_s, packed_v_s, metadata_s, tail_v, table_row, tail_slot, heads,
+                               kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end),
+                               worker_tid, ConsumerWarps * 32);
         }
         __syncthreads();
 
