@@ -16,6 +16,8 @@
 namespace ninfer::ops::kvarn {
 namespace {
 
+constexpr int kDecodeSplitsPerScale = 82;
+
 template <typename Geometry, bool Masked>
 void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& valid_columns,
                     const Tensor& table_rows, float scale, KvarnPagedBatchLayerView cache,
@@ -117,8 +119,12 @@ void decode_attention(const Tensor& query, const Tensor& positions,
     for (int begin = 0; begin < query.ne[2]; begin += kChunk) {
         const int width = std::min(kChunk, query.ne[2] - begin);
         auto scope = workspace.scope();
-        const int splits = ops::detail::gqa_attention_split_capacity(
+        const int split_capacity = ops::detail::gqa_attention_split_capacity(
             query.ne[1], width, DType::BF16, envelope);
+        const int split_scale = query.ne[1] == Gqa27Geometry::QHeads
+                                    ? Gqa27Geometry::DecodeSplitScale
+                                    : Gqa35Geometry::DecodeSplitScale;
+        const int splits = std::min(split_capacity, kDecodeSplitsPerScale * split_scale);
         Tensor acc = workspace.alloc(DType::BF16,
                                      {D, query.ne[1], width, splits * query.ne[3]});
         Tensor m = workspace.alloc(DType::FP32,
