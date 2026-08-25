@@ -139,10 +139,9 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
                     GqaExecutionEnvelope envelope, int column_begin, int width, int splits,
                     Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
                     Tensor& output, cudaStream_t stream) {
-    constexpr int kWarps = 2;
     const dim3 grid(Geometry::KVHeads, splits, query.ne[3] * width);
     detail::attention_decode_kernel<Geometry, MultiBatch, Masked>
-        <<<grid, kWarps * 32, 0, stream>>>(
+        <<<grid, detail::kDecodeWarps * 32, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(query.data),
             static_cast<const std::uint8_t*>(cache.records.data),
             static_cast<const __nv_bfloat16*>(cache.tail_k.data),
