@@ -16,6 +16,9 @@ namespace detail {
 
 inline constexpr int kDecodeBc = 32;
 inline constexpr int kDecodeWarps = 8;
+inline constexpr int kPackedKWordsPerHalf = 4;
+inline constexpr int kPackedKWords = 2 * kPackedKWordsPerHalf * D;
+inline constexpr int kPackedVBytes = Group * (D / 4);
 inline constexpr int kMetadataHalfValues = 2 * D + Group + D + 2 * Group;
 inline constexpr int kMetadataKScale = 0;
 inline constexpr int kMetadataKZero = kMetadataKScale + D;
@@ -35,9 +38,29 @@ __device__ __forceinline__ int decode_tail_slot(const std::int32_t* markers, int
     return tail_slot;
 }
 
-__device__ __forceinline__ void stage_decode_metadata(__half* metadata,
-                                                      const std::uint8_t* record, int tid,
-                                                      int threads) {
+__device__ __forceinline__ void stage_decode_record(
+    unsigned* packed_k, std::uint8_t* packed_v, __half* metadata,
+    const std::uint8_t* record, int tid, int threads) {
+    constexpr int KChunks = kKvarnKScaleOffset / 16;
+    for (int chunk = tid; chunk < KChunks; chunk += threads) {
+        const int4 packed = load_vec<int4>(record + kKvarnKPackedOffset + chunk * 16);
+        const int dim = chunk >> 1;
+        const int half = chunk & 1;
+        packed_k[(half * kPackedKWordsPerHalf + 0) * D + dim] =
+            static_cast<unsigned>(packed.x);
+        packed_k[(half * kPackedKWordsPerHalf + 1) * D + dim] =
+            static_cast<unsigned>(packed.y);
+        packed_k[(half * kPackedKWordsPerHalf + 2) * D + dim] =
+            static_cast<unsigned>(packed.z);
+        packed_k[(half * kPackedKWordsPerHalf + 3) * D + dim] =
+            static_cast<unsigned>(packed.w);
+    }
+    constexpr int VChunks = kPackedVBytes / 16;
+    for (int chunk = tid; chunk < VChunks; chunk += threads) {
+        store_vec(packed_v + chunk * 16,
+                  load_vec<int4>(record + kKvarnVPackedOffset + chunk * 16));
+    }
+
     const auto* k_scale = reinterpret_cast<const __half*>(record + kKvarnKScaleOffset);
     const auto* k_zero = reinterpret_cast<const __half*>(record + kKvarnKZeroOffset);
     const auto* k_token = reinterpret_cast<const __half*>(record + kKvarnKTokenScaleOffset);
@@ -64,9 +87,10 @@ __device__ __forceinline__ void stage_decode_metadata(__half* metadata,
 
 __device__ __forceinline__ void stage_decode_tile(
     __nv_bfloat16* key_destination, __nv_bfloat16* value_destination,
-    const __half* metadata, const std::uint8_t* record, const __nv_bfloat16* tail_k,
-    const __nv_bfloat16* tail_v, int table_row, int tail_slot, int heads, int head,
-    int logical_begin, int valid_begin, int valid_end, int tid, int threads) {
+    const unsigned* packed_k, const std::uint8_t* packed_v, const __half* metadata,
+    const __nv_bfloat16* tail_k, const __nv_bfloat16* tail_v, int table_row, int tail_slot,
+    int heads, int head, int logical_begin, int valid_begin, int valid_end, int tid,
+    int threads) {
     constexpr int Bc = kDecodeBc;
     const int token_base = logical_begin & (Group - 1);
     if (tail_slot >= 0) {
@@ -99,9 +123,14 @@ __device__ __forceinline__ void stage_decode_tile(
 
     const int warp = tid >> 5;
     const int lane = tid & 31;
+    const int record_half = token_base / Bc;
     for (int dim = warp * 32 + lane; dim < D; dim += (threads / 32) * 32) {
-        const int4 packed = load_vec<int4>(record + kKvarnKPackedOffset +
-                                           dim * (Group / 2) + token_base / 2);
+        const int word_base = record_half * kPackedKWordsPerHalf;
+        const int4 packed = make_int4(
+            static_cast<int>(packed_k[(word_base + 0) * D + dim]),
+            static_cast<int>(packed_k[(word_base + 1) * D + dim]),
+            static_cast<int>(packed_k[(word_base + 2) * D + dim]),
+            static_cast<int>(packed_k[(word_base + 3) * D + dim]));
         const float scale = __half2float(metadata[kMetadataKScale + dim]);
         const float zero = __half2float(metadata[kMetadataKZero + dim]);
 #pragma unroll
@@ -135,8 +164,7 @@ __device__ __forceinline__ void stage_decode_tile(
         const int packed_dim = item - token * (D / 4);
         const int record_token = token_base + token;
         const int position = logical_begin + token;
-        const std::uint8_t packed =
-            record[kKvarnVPackedOffset + record_token * (D / 4) + packed_dim];
+        const std::uint8_t packed = packed_v[record_token * (D / 4) + packed_dim];
         const float scale = __half2float(metadata[kMetadataVScale + record_token]);
         const float zero = __half2float(metadata[kMetadataVZero + record_token]);
         unsigned values[4];
@@ -192,6 +220,8 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
     __shared__ __align__(16) __nv_bfloat16 qkv_s[2 * Bc * D];
     __shared__ __align__(16) __nv_bfloat16 p_s[Br * Bc];
     __shared__ float alpha_s[Br];
+    __shared__ __align__(16) unsigned packed_k_s[kPackedKWords];
+    __shared__ __align__(16) std::uint8_t packed_v_s[kPackedVBytes];
     __shared__ __align__(16) __half metadata_s[kMetadataHalfValues];
     __shared__ std::int32_t physical_pages_s[PageIds];
     __nv_bfloat16* k_s = qkv_s;
@@ -323,11 +353,11 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
             records + (static_cast<std::int64_t>(physical_page) * heads + kv_head) *
                           kKvarnRecordBytes;
         if (tail_slot < 0 && (block == 0 || (k0 & (Group - 1)) == 0)) {
-            stage_decode_metadata(metadata_s, record, tid, Threads);
+            stage_decode_record(packed_k_s, packed_v_s, metadata_s, record, tid, Threads);
         }
-        stage_decode_tile(k_s, v_s, metadata_s, record, tail_k, tail_v, table_row, tail_slot,
-                          heads, kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end), tid,
-                          Threads);
+        stage_decode_tile(k_s, v_s, packed_k_s, packed_v_s, metadata_s, tail_k, tail_v, table_row,
+                          tail_slot, heads, kv_head, k0, max(k0, split_start),
+                          min(k0 + Bc, split_end), tid, Threads);
 
         if (warp < ProducerWarps) {
             __nv_bfloat16* p_sw = &p_s[producer_row_base * Bc];
