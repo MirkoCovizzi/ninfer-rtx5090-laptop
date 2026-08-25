@@ -15,22 +15,58 @@ namespace detail {
 
 inline constexpr int kDecodeBc = 32;
 inline constexpr int kMetadataHalfValues = 2 * D + Group + D + 2 * Group;
+inline constexpr int kMetadataKScale = 0;
+inline constexpr int kMetadataKZero = kMetadataKScale + D;
+inline constexpr int kMetadataKToken = kMetadataKZero + D;
+inline constexpr int kMetadataVChannel = kMetadataKToken + Group;
+inline constexpr int kMetadataVScale = kMetadataVChannel + D;
+inline constexpr int kMetadataVZero = kMetadataVScale + Group;
+static_assert(kMetadataVZero + Group == kMetadataHalfValues);
 
-__device__ __forceinline__ void stage_decode_tile(
-    __nv_bfloat16* key_destination, __nv_bfloat16* value_destination,
-    __nv_bfloat16* metadata_storage, const std::uint8_t* records,
-    const __nv_bfloat16* tail_k, const __nv_bfloat16* tail_v,
-    const std::int32_t* markers, int table_row, int physical_page, int heads, int head,
-    int logical_begin, int valid_begin, int valid_end, int tid, int threads) {
-    constexpr int Bc = kDecodeBc;
-    const int token_base = logical_begin & (Group - 1);
+__device__ __forceinline__ int decode_tail_slot(const std::int32_t* markers, int table_row,
+                                                int logical_page) {
     int tail_slot = -1;
 #pragma unroll
     for (int slot = 0; slot < kKvarnTailSlots; ++slot) {
-        if (markers[slot + kKvarnTailSlots * table_row] == logical_begin / Group) {
-            tail_slot = slot;
+        if (markers[slot + kKvarnTailSlots * table_row] == logical_page) { tail_slot = slot; }
+    }
+    return tail_slot;
+}
+
+__device__ __forceinline__ void stage_decode_metadata(__half* metadata,
+                                                      const std::uint8_t* record, int tid,
+                                                      int threads) {
+    const auto* k_scale = reinterpret_cast<const __half*>(record + kKvarnKScaleOffset);
+    const auto* k_zero = reinterpret_cast<const __half*>(record + kKvarnKZeroOffset);
+    const auto* k_token = reinterpret_cast<const __half*>(record + kKvarnKTokenScaleOffset);
+    const auto* v_channel = reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
+    const auto* v_scale = reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
+    const auto* v_zero = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
+    for (int index = tid; index < kMetadataHalfValues; index += threads) {
+        if (index < kMetadataKZero) {
+            metadata[index] = k_scale[index - kMetadataKScale];
+        } else if (index < kMetadataKToken) {
+            metadata[index] = k_zero[index - kMetadataKZero];
+        } else if (index < kMetadataVChannel) {
+            metadata[index] = k_token[index - kMetadataKToken];
+        } else if (index < kMetadataVScale) {
+            metadata[index] = v_channel[index - kMetadataVChannel];
+        } else if (index < kMetadataVZero) {
+            metadata[index] = v_scale[index - kMetadataVScale];
+        } else {
+            metadata[index] = v_zero[index - kMetadataVZero];
         }
     }
+    __syncthreads();
+}
+
+__device__ __forceinline__ void stage_decode_tile(
+    __nv_bfloat16* key_destination, __nv_bfloat16* value_destination,
+    const __half* metadata, const std::uint8_t* record, const __nv_bfloat16* tail_k,
+    const __nv_bfloat16* tail_v, int table_row, int tail_slot, int heads, int head,
+    int logical_begin, int valid_begin, int valid_end, int tid, int threads) {
+    constexpr int Bc = kDecodeBc;
+    const int token_base = logical_begin & (Group - 1);
     if (tail_slot >= 0) {
         for (int chunk = tid; chunk < Bc * (D / 8); chunk += threads) {
             const int token = chunk / (D / 8);
@@ -59,46 +95,13 @@ __device__ __forceinline__ void stage_decode_tile(
         return;
     }
 
-    const std::uint8_t* record =
-        records + (static_cast<std::int64_t>(physical_page) * heads + head) * kKvarnRecordBytes;
-    const auto* k_scale = reinterpret_cast<const __half*>(record + kKvarnKScaleOffset);
-    const auto* k_zero = reinterpret_cast<const __half*>(record + kKvarnKZeroOffset);
-    const auto* k_token = reinterpret_cast<const __half*>(record + kKvarnKTokenScaleOffset);
-    const auto* v_channel = reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
-    const auto* v_scale = reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
-    const auto* v_zero = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
-    auto* metadata = reinterpret_cast<__half*>(metadata_storage);
-    constexpr int KScale = 0;
-    constexpr int KZero = KScale + D;
-    constexpr int KToken = KZero + D;
-    constexpr int VChannel = KToken + Group;
-    constexpr int VScale = VChannel + D;
-    constexpr int VZero = VScale + Group;
-    static_assert(VZero + Group == kMetadataHalfValues);
-    for (int index = tid; index < kMetadataHalfValues; index += threads) {
-        if (index < KZero) {
-            metadata[index] = k_scale[index - KScale];
-        } else if (index < KToken) {
-            metadata[index] = k_zero[index - KZero];
-        } else if (index < VChannel) {
-            metadata[index] = k_token[index - KToken];
-        } else if (index < VScale) {
-            metadata[index] = v_channel[index - VChannel];
-        } else if (index < VZero) {
-            metadata[index] = v_scale[index - VScale];
-        } else {
-            metadata[index] = v_zero[index - VZero];
-        }
-    }
-    __syncthreads();
-
     const int warp = tid >> 5;
     const int lane = tid & 31;
     for (int dim = warp * 32 + lane; dim < D; dim += (threads / 32) * 32) {
         const int4 packed = load_vec<int4>(record + kKvarnKPackedOffset +
                                            dim * (Group / 2) + token_base / 2);
-        const float scale = __half2float(metadata[KScale + dim]);
-        const float zero = __half2float(metadata[KZero + dim]);
+        const float scale = __half2float(metadata[kMetadataKScale + dim]);
+        const float zero = __half2float(metadata[kMetadataKZero + dim]);
 #pragma unroll
         for (int token = 0; token < Bc; ++token) {
             const int position = logical_begin + token;
@@ -110,7 +113,7 @@ __device__ __forceinline__ void stage_decode_tile(
                                   : static_cast<unsigned>(packed.w);
             const int code = (word >> (4 * (token & 7))) & 15;
             const float decoded = fmaf(static_cast<float>(code), scale, zero) *
-                                  __half2float(metadata[KToken + token_base + token]);
+                                  __half2float(metadata[kMetadataKToken + token_base + token]);
             const __nv_bfloat16 value =
                 position >= valid_begin && position < valid_end ? __float2bfloat16_rn(decoded)
                                                                 : __float2bfloat16_rn(0.0F);
@@ -123,15 +126,15 @@ __device__ __forceinline__ void stage_decode_tile(
         const int position = logical_begin + token;
         const std::uint8_t packed =
             record[kKvarnVPackedOffset + record_token * (D / 4) + packed_dim];
-        const float scale = __half2float(metadata[VScale + record_token]);
-        const float zero = __half2float(metadata[VZero + record_token]);
+        const float scale = __half2float(metadata[kMetadataVScale + record_token]);
+        const float zero = __half2float(metadata[kMetadataVZero + record_token]);
         unsigned values[4];
 #pragma unroll
         for (int item = 0; item < 4; ++item) {
             const int dim = 4 * packed_dim + item;
             const int code = (packed >> (2 * item)) & 3;
             const float decoded = fmaf(static_cast<float>(code), scale, zero) *
-                                  __half2float(metadata[VChannel + dim]);
+                                  __half2float(metadata[kMetadataVChannel + dim]);
             const __nv_bfloat16 value =
                 position >= valid_begin && position < valid_end ? __float2bfloat16_rn(decoded)
                                                                 : __float2bfloat16_rn(0.0F);
@@ -166,10 +169,11 @@ __launch_bounds__(64, 2) __global__ void attention_decode_kernel(
     constexpr int PageIds = 64;
     constexpr float Log2E = 1.4426950408889634074f;
     constexpr unsigned FullMask = 0xffffffffu;
-    static_assert(kMetadataHalfValues <= Wc * 16 * Bc);
+    static_assert(Group == 2 * Bc);
 
     __shared__ __align__(16) __nv_bfloat16 qkv_s[2 * Bc * D];
     __shared__ __align__(16) __nv_bfloat16 p_s[Wc * 16 * Bc];
+    __shared__ __align__(16) __half metadata_s[kMetadataHalfValues];
     __shared__ std::int32_t physical_pages_s[PageIds];
     __nv_bfloat16* k_s = qkv_s;
     __nv_bfloat16* v_s = qkv_s + Bc * D;
@@ -288,9 +292,16 @@ __launch_bounds__(64, 2) __global__ void attention_decode_kernel(
         if (block != 0 && (k0 & kPagedKVPageMask) == 0) {
             physical_page = physical_pages_s[(k0 >> kPagedKVPageShift) - first_page];
         }
-        stage_decode_tile(k_s, v_s, p_s, records, tail_k, tail_v, markers, table_row,
-                          physical_page, heads, kv_head, k0, max(k0, split_start),
-                          min(k0 + Bc, split_end), tid, Threads);
+        const int tail_slot = decode_tail_slot(markers, table_row, k0 / Group);
+        const std::uint8_t* record =
+            records + (static_cast<std::int64_t>(physical_page) * heads + kv_head) *
+                          kKvarnRecordBytes;
+        if (tail_slot < 0 && (block == 0 || (k0 & (Group - 1)) == 0)) {
+            stage_decode_metadata(metadata_s, record, tid, Threads);
+        }
+        stage_decode_tile(k_s, v_s, metadata_s, record, tail_k, tail_v, table_row, tail_slot,
+                          heads, kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end), tid,
+                          Threads);
 
         float score[QKNt][4];
 #pragma unroll
