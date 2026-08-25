@@ -74,11 +74,11 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
             static_cast<float*>(partial_l.data));
     CUDA_CHECK(cudaGetLastError());
 
-    constexpr int kDChunk = 64;
-    const dim3 reduce_grid(Geometry::QHeads, D / kDChunk, width * query.ne[3]);
-    gqa_attention_small_t_reduce_output_kernel<Geometry, kDChunk, false, MultiBatch, Masked, true>
-        <<<reduce_grid, 256, 0, stream>>>(
-            partial_acc.data, static_cast<const float*>(partial_m.data),
+    const dim3 reduce_grid(Geometry::QHeads, 1, width * query.ne[3]);
+    detail::reduce_output_hadamard_kernel<Geometry, MultiBatch, Masked>
+        <<<reduce_grid, D, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(partial_acc.data),
+            static_cast<const float*>(partial_m.data),
             static_cast<const float*>(partial_l.data),
             static_cast<const std::int32_t*>(positions.data),
             Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr, width,
@@ -111,6 +111,8 @@ void decode_attention(const Tensor& query, const Tensor& positions,
         }
         return;
     }
+    Tensor rotated_query = query;
+    kvarn_hadamard(query, rotated_query, stream);
     constexpr int kChunk = 6;
     for (int begin = 0; begin < query.ne[2]; begin += kChunk) {
         const int width = std::min(kChunk, query.ne[2] - begin);

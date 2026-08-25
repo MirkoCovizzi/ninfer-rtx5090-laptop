@@ -298,8 +298,7 @@ __global__ void finalize_restore_kernel(std::int32_t* markers, int page) {
     if (threadIdx.x == 0 && blockIdx.x == 0 && markers[2] == -(page + 2)) markers[2] = page;
 }
 
-void rotate_qkv(Tensor query, Tensor key, Tensor value, cudaStream_t stream) {
-    kvarn_hadamard(query, query, stream);
+void rotate_kv(Tensor key, Tensor value, cudaStream_t stream) {
     kvarn_hadamard(key, key, stream);
     kvarn_hadamard(value, value, stream);
 }
@@ -383,7 +382,7 @@ void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& posit
     if (envelope.max_visible_keys == 0) {
         throw std::invalid_argument("KVarN attention: empty execution envelope");
     }
-    rotate_qkv(query, key, value, stream);
+    rotate_kv(key, value, stream);
     stage_and_encode(key, value, positions, valid_columns, kv_table_rows, cache, provisional,
                      stream);
     const int width = query.ne[2];
@@ -392,7 +391,6 @@ void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& posit
     (void)batch;
     kvarn::decode_attention(query, positions, valid_columns, kv_table_rows, scale, cache, envelope,
                             workspace, output, stream);
-    kvarn_hadamard(output, output, stream);
 }
 
 void kvarn_attention_cached(Tensor query, const Tensor& positions, const Tensor& kv_table_rows,
@@ -404,10 +402,8 @@ void kvarn_attention_cached(Tensor query, const Tensor& positions, const Tensor&
     if (envelope.max_visible_keys == 0) {
         throw std::invalid_argument("KVarN attention: empty execution envelope");
     }
-    kvarn_hadamard(query, query, stream);
     kvarn::decode_attention(query, positions, Tensor{}, kv_table_rows, scale, cache, envelope,
                             workspace, output, stream);
-    kvarn_hadamard(output, output, stream);
 }
 
 void kvarn_kv_append(Tensor key, Tensor value, const Tensor& positions,

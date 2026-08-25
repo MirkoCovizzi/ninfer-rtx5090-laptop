@@ -3,6 +3,7 @@
 #include "ninfer/ops/kvarn.h"
 #include "ops/kernel/gqa_attention_prefill_common.cuh"
 #include "ops/kvarn/config.cuh"
+#include "ops/kvarn/hadamard.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -188,9 +189,10 @@ __launch_bounds__(kPrefillThreads, 1) __global__ void attention_prefill_kernel(
     static_assert(PVNtPerWarp == 11);
 
     extern __shared__ __align__(16) __nv_bfloat16 shared[];
-    __nv_bfloat16* q_s = shared;
-    __nv_bfloat16* k_s = q_s + kPrefillBr * D;
-    __nv_bfloat16* v_s = k_s + kPrefillBc * D;
+    __nv_bfloat16* unrotated_q_s = shared;
+    __nv_bfloat16* q_s = unrotated_q_s + kPrefillBr * D;
+    __nv_bfloat16* k_s = unrotated_q_s;
+    __nv_bfloat16* v_s = q_s + kPrefillBc * D;
     __nv_bfloat16* p_s = k_s;
     float* alpha_s = reinterpret_cast<float*>(p_s + kPrefillBr * kPrefillBc);
     float* final_l_s = alpha_s + kPrefillBr;
@@ -222,7 +224,7 @@ __launch_bounds__(kPrefillThreads, 1) __global__ void attention_prefill_kernel(
     for (int chunk = tid; chunk < kPrefillBr * VecPerRow; chunk += kPrefillThreads) {
         const int row = chunk / VecPerRow;
         const int d = (chunk % VecPerRow) * 8;
-        __nv_bfloat16* destination = q_s + row * D + gqa_prefill_swz(row, d);
+        __nv_bfloat16* destination = unrotated_q_s + row * D + d;
         if (row < tile_rows) {
             cp_async<16, Cache::cg>(destination, q_block_ptr + row * QRowStride + d);
         } else {
@@ -230,6 +232,24 @@ __launch_bounds__(kPrefillThreads, 1) __global__ void attention_prefill_kernel(
         }
     }
     ninfer::ops::cp_commit();
+    ninfer::ops::cp_wait<0>();
+    __syncthreads();
+
+    for (int row = warp; row < kPrefillBr; row += kPrefillWarps) {
+        float values[D / 32];
+#pragma unroll
+        for (int segment = 0; segment < D / 32; ++segment) {
+            values[segment] =
+                __bfloat162float(unrotated_q_s[row * D + lane + segment * 32]);
+        }
+        hadamard_warp(values, lane);
+#pragma unroll
+        for (int segment = 0; segment < D / 32; ++segment) {
+            const int d = lane + segment * 32;
+            q_s[row * D + gqa_prefill_swz(row, d)] = __float2bfloat16_rn(values[segment]);
+        }
+    }
+    __syncthreads();
 
     const int gid = lane >> 2;
     const int lid = lane & 3;
@@ -264,7 +284,6 @@ __launch_bounds__(kPrefillThreads, 1) __global__ void attention_prefill_kernel(
         const int k0 = block * kPrefillBc;
         const int physical_page = block_table[block];
         stage_prefill_key(k_s, cache, kv_head, k0, max_query_abs, physical_page, tid);
-        if (block == 0) { ninfer::ops::cp_wait<0>(); }
         __syncthreads();
 
         float alpha0 = 0.0F;
@@ -464,17 +483,31 @@ __launch_bounds__(kPrefillThreads, 1) __global__ void attention_prefill_kernel(
             if (global_n >= PVNt) { continue; }
             const int d0 = global_n * 8 + 2 * lid;
             if (row0 < tile_rows) {
-                *reinterpret_cast<unsigned*>(
-                    out + gqa_prefill_q_index<Geometry>(q_head, d0, q0 + row0)) =
+                *reinterpret_cast<unsigned*>(k_s + row0 * D + d0) =
                     pack_bf16x2(warp_state.accumulator[n][0] * inv_l0,
                                 warp_state.accumulator[n][1] * inv_l0);
             }
             if (row1 < tile_rows) {
-                *reinterpret_cast<unsigned*>(
-                    out + gqa_prefill_q_index<Geometry>(q_head, d0, q0 + row1)) =
+                *reinterpret_cast<unsigned*>(k_s + row1 * D + d0) =
                     pack_bf16x2(warp_state.accumulator[n][2] * inv_l1,
                                 warp_state.accumulator[n][3] * inv_l1);
             }
+        }
+    }
+    __syncthreads();
+
+    for (int row = warp; row < tile_rows; row += kPrefillWarps) {
+        float values[D / 32];
+#pragma unroll
+        for (int segment = 0; segment < D / 32; ++segment) {
+            values[segment] = __bfloat162float(k_s[row * D + lane + segment * 32]);
+        }
+        hadamard_warp(values, lane);
+#pragma unroll
+        for (int segment = 0; segment < D / 32; ++segment) {
+            const int d = lane + segment * 32;
+            out[gqa_prefill_q_index<Geometry>(q_head, d, q0 + row)] =
+                __float2bfloat16_rn(values[segment]);
         }
     }
     gqa_prefill_zero_output_rows<Geometry>(out, q_head, tokens, min(q0 + kPrefillBr, width), tid,

@@ -3,6 +3,7 @@
 #include "ninfer/ops/kvarn.h"
 #include "ops/kernel/gqa_attention_decode.cuh"
 #include "ops/kvarn/config.cuh"
+#include "ops/kvarn/hadamard.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -513,6 +514,123 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
             gqa_partial_acc_index<Geometry>(q_head, d, column, split, tokens);
         store_vec(partial_acc + destination, load_vec<int4>(qkv_s + row * D + d));
     }
+}
+
+template <typename Geometry, bool MultiBatch, bool Masked>
+__launch_bounds__(D) __global__ void reduce_output_hadamard_kernel(
+    const __nv_bfloat16* partial_acc, const float* partial_m, const float* partial_l,
+    const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
+    std::int32_t full_width, std::int32_t column_begin, std::int32_t batch_size,
+    std::int32_t split_count, __nv_bfloat16* output) {
+    const int q_head = static_cast<int>(blockIdx.x);
+    const int flat_column = static_cast<int>(blockIdx.z);
+    int batch = 0;
+    int token = flat_column;
+    if constexpr (MultiBatch) {
+        batch = flat_column / tokens;
+        token = flat_column - batch * tokens;
+    }
+    const int tid = static_cast<int>(threadIdx.x);
+    if (q_head >= Geometry::QHeads || token >= tokens) { return; }
+    if constexpr (MultiBatch) {
+        if (batch >= batch_size) { return; }
+    }
+
+    positions += column_begin;
+    if constexpr (MultiBatch) { positions += batch * full_width; }
+    const int last_position = positions[tokens - 1];
+    int output_column = column_begin + token;
+    if constexpr (MultiBatch) { output_column += batch * full_width; }
+
+    std::int64_t partial_acc_offset = 0;
+    if constexpr (MultiBatch) {
+        partial_acc_offset = static_cast<std::int64_t>(batch) * D * Geometry::QHeads * tokens *
+                             split_count;
+        const std::int64_t stat_offset =
+            static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
+        partial_m += stat_offset;
+        partial_l += stat_offset;
+    }
+    const int active_splits =
+        gqa_small_t_active_splits<Geometry, false>(last_position + 1, split_count, tokens);
+
+    __shared__ float stage[2][D];
+    float local_m = -CUDART_INF_F;
+    for (int split = tid; split < active_splits; split += D) {
+        local_m = fmaxf(
+            local_m, partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)]);
+    }
+    stage[0][tid] = local_m;
+    __syncthreads();
+    for (int stride = D / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) { stage[0][tid] = fmaxf(stage[0][tid], stage[0][tid + stride]); }
+        __syncthreads();
+    }
+    const float head_m = stage[0][0];
+
+    float local_l = 0.0F;
+    if (head_m > -CUDART_INF_F) {
+        for (int split = tid; split < active_splits; split += D) {
+            const float tile_l =
+                partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)];
+            if (tile_l > 0.0F) {
+                local_l += tile_l *
+                           expf(partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split,
+                                                                          tokens)] -
+                                head_m);
+            }
+        }
+    }
+    stage[0][tid] = local_l;
+    __syncthreads();
+    for (int stride = D / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) { stage[0][tid] += stage[0][tid + stride]; }
+        __syncthreads();
+    }
+    const float head_l = stage[0][0];
+
+    float numerator = 0.0F;
+    if (head_l > 0.0F) {
+        for (int split = 0; split < active_splits; ++split) {
+            const float tile_l =
+                partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)];
+            if (tile_l <= 0.0F) { continue; }
+            const float weight = expf(
+                partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] - head_m);
+            const std::int64_t index =
+                partial_acc_offset +
+                gqa_partial_acc_index<Geometry>(q_head, tid, token, split, tokens);
+            numerator += __bfloat162float(partial_acc[index]) * weight;
+        }
+    }
+    bool valid = true;
+    if constexpr (Masked) { valid = column_begin + token < valid_columns[batch]; }
+    const float combined = valid && head_l > 0.0F ? numerator / head_l : 0.0F;
+    float value = __bfloat162float(__float2bfloat16_rn(combined));
+
+#pragma unroll
+    for (int span = 1; span < 32; span <<= 1) {
+        const float other = __shfl_xor_sync(0xffffffffU, value, span);
+        value = (tid & span) == 0 ? value + other : other - value;
+    }
+    stage[0][tid] = value;
+    __syncthreads();
+    int current = 0;
+#pragma unroll
+    for (int span = 32; span < D; span <<= 1) {
+        const int group = tid / (2 * span);
+        const int lane = tid & (span - 1);
+        const int left = group * 2 * span + lane;
+        const int right = left + span;
+        const float left_value = stage[current][left];
+        const float right_value = stage[current][right];
+        value = (tid & span) == 0 ? left_value + right_value : left_value - right_value;
+        stage[current ^ 1][tid] = value;
+        current ^= 1;
+        __syncthreads();
+    }
+    output[gqa_q_index<Geometry>(q_head, tid, output_column)] =
+        __float2bfloat16_rn(value * 0.0625F);
 }
 
 } // namespace detail
