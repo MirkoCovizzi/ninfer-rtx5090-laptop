@@ -104,21 +104,29 @@ __device__ __forceinline__ void stage_decode_tile(
         const float scale = __half2float(metadata[kMetadataKScale + dim]);
         const float zero = __half2float(metadata[kMetadataKZero + dim]);
 #pragma unroll
-        for (int token = 0; token < Bc; ++token) {
-            const int position = logical_begin + token;
-            const int word_index = token >> 3;
+        for (int pair = 0; pair < Bc / 2; ++pair) {
+            const int token = 2 * pair;
+            const int word_index = pair >> 2;
             const unsigned word =
                 word_index == 0   ? static_cast<unsigned>(packed.x)
                 : word_index == 1 ? static_cast<unsigned>(packed.y)
                 : word_index == 2 ? static_cast<unsigned>(packed.z)
                                   : static_cast<unsigned>(packed.w);
-            const int code = (word >> (4 * (token & 7))) & 15;
-            const float decoded = fmaf(static_cast<float>(code), scale, zero) *
-                                  __half2float(metadata[kMetadataKToken + token_base + token]);
-            const __nv_bfloat16 value =
-                position >= valid_begin && position < valid_end ? __float2bfloat16_rn(decoded)
-                                                                : __float2bfloat16_rn(0.0F);
-            key_destination[token * D + gqa_small_t_tc_swz(token, dim)] = value;
+            const unsigned codes = (word >> (8 * (pair & 3))) & 0xffU;
+            const auto token_scales = __half22float2(*reinterpret_cast<const __half2*>(
+                metadata + kMetadataKToken + token_base + token));
+            const float decoded0 = fmaf(static_cast<float>(codes & 15U), scale, zero) *
+                                   token_scales.x;
+            const float decoded1 = fmaf(static_cast<float>(codes >> 4), scale, zero) *
+                                   token_scales.y;
+            const int position0 = logical_begin + token;
+            const int position1 = position0 + 1;
+            key_destination[token * D + gqa_small_t_tc_swz(token, dim)] =
+                position0 >= valid_begin && position0 < valid_end ? __float2bfloat16_rn(decoded0)
+                                                                  : __float2bfloat16_rn(0.0F);
+            key_destination[(token + 1) * D + gqa_small_t_tc_swz(token + 1, dim)] =
+                position1 >= valid_begin && position1 < valid_end ? __float2bfloat16_rn(decoded1)
+                                                                  : __float2bfloat16_rn(0.0F);
         }
     }
     for (int item = tid; item < Bc * (D / 4); item += threads) {
