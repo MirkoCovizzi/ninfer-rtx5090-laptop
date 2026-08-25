@@ -520,7 +520,26 @@ int run_cached_attention_case(CacheFixture<Heads>& cache, int query_heads, int f
                                 output_tensor, nullptr);
     cuda_synchronize();
 
-    const auto rotated_query = from_device<std::uint16_t>(device_query, query.size());
+    std::vector<std::uint16_t> rotated_query(query.size());
+    for (int column = 0; column < width; ++column) {
+        for (int head = 0; head < query_heads; ++head) {
+            for (int row = 0; row < kD; ++row) {
+                double sum = 0.0;
+                for (int col = 0; col < kD; ++col) {
+                    const bool negative =
+                        (__builtin_popcount(static_cast<unsigned>(row & col)) & 1) != 0;
+                    const std::size_t input_index =
+                        static_cast<std::size_t>(col) + static_cast<std::size_t>(kD) *
+                                                            (head + query_heads * column);
+                    sum += (negative ? -1.0 : 1.0) * query[input_index];
+                }
+                const std::size_t output_index =
+                    static_cast<std::size_t>(row) + static_cast<std::size_t>(kD) *
+                                                        (head + query_heads * column);
+                rotated_query[output_index] = f32_to_bf16(static_cast<float>(sum / 16.0));
+            }
+        }
+    }
     const auto record_values = from_device<std::uint8_t>(cache.records, cache.records.bytes);
     const auto tail_key = from_device<std::uint16_t>(cache.tail_k, cache.tail_k.bytes / 2);
     const auto tail_value = from_device<std::uint16_t>(cache.tail_v, cache.tail_v.bytes / 2);
