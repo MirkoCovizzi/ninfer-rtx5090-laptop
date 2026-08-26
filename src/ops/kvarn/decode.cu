@@ -2,10 +2,9 @@
 
 #include "core/device.h"
 #include "ops/kernel/gqa_attention_decode.cuh"
-#include "ops/kernel/gqa_attention_prefill_bf16.cuh"
 #include "ops/kvarn/config.cuh"
 #include "ops/kvarn/decode_kernel.cuh"
-#include "ops/kvarn/materialized_prefill.cuh"
+#include "ops/kvarn/streaming_prefill.cuh"
 #include "ops/launcher/gqa_attention.h"
 
 #include <cuda_bf16.h>
@@ -42,34 +41,49 @@ void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& 
         cache.block_tables.ne[0],
         cache.num_kv_heads,
     };
-    using Input = detail::MaterializedPrefillInput;
     static const cudaError_t attribute = cudaFuncSetAttribute(
-        gqa_attention_prefill_bf16_kernel<Geometry, Metadata, Input>,
+        detail::attention_prefill_slab_kernel<Geometry, Metadata>,
         cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillSmemBytes);
     CUDA_CHECK(attribute);
     const int width = query.ne[2];
     const int capacity = static_cast<int>(envelope.max_visible_keys);
+    const int slab_capacity = std::min(capacity, PrefillSlabTokens);
     auto scope = workspace.scope();
-    Tensor materialized_k = workspace.alloc(DType::BF16, {D, capacity, Geometry::KVHeads});
-    Tensor materialized_v = workspace.alloc(DType::BF16, {D, capacity, Geometry::KVHeads});
+    Tensor materialized_k =
+        workspace.alloc(DType::BF16, {D, slab_capacity, Geometry::KVHeads});
+    Tensor materialized_v =
+        workspace.alloc(DType::BF16, {D, slab_capacity, Geometry::KVHeads});
+    Tensor running_acc = workspace.alloc(DType::FP32, {D, Geometry::QHeads, width});
+    Tensor running_m = workspace.alloc(DType::FP32, {Geometry::QHeads, width});
+    Tensor running_l = workspace.alloc(DType::FP32, {Geometry::QHeads, width});
+    CUDA_CHECK(cudaMemsetAsync(running_l.data, 0, running_l.bytes(), stream));
     Tensor rotated_query = query;
     kvarn_hadamard(query, rotated_query, stream);
-    const dim3 materialize_grid(div_up(capacity, Group), Geometry::KVHeads, 1);
-    detail::materialize_prefill_head_kernel<Metadata><<<materialize_grid, D, 0, stream>>>(
-        input, metadata, static_cast<const std::int32_t*>(positions.data), width, capacity,
-        static_cast<__nv_bfloat16*>(materialized_k.data),
-        static_cast<__nv_bfloat16*>(materialized_v.data));
-    const Input materialized{
-        static_cast<const __nv_bfloat16*>(materialized_k.data),
-        static_cast<const __nv_bfloat16*>(materialized_v.data),
-        capacity,
-    };
     const dim3 attention_grid(div_up(width, kGqaPrefillBr), Geometry::QHeads, 1);
-    gqa_attention_prefill_bf16_kernel<Geometry, Metadata, Input>
-        <<<attention_grid, kGqaPrefillThreads, kGqaPrefillSmemBytes, stream>>>(
-            static_cast<const __nv_bfloat16*>(rotated_query.data), materialized, metadata,
-            static_cast<const std::int32_t*>(positions.data), scale,
-            static_cast<__nv_bfloat16*>(output.data), width);
+    for (int slab_begin = 0; slab_begin < capacity; slab_begin += slab_capacity) {
+        const int slab_tokens = std::min(slab_capacity, capacity - slab_begin);
+        const dim3 materialize_grid(div_up(slab_tokens, Group), Geometry::KVHeads, 1);
+        detail::materialize_prefill_slab_kernel<Metadata><<<materialize_grid, D, 0, stream>>>(
+            input, metadata, static_cast<const std::int32_t*>(positions.data), width, slab_begin,
+            slab_capacity, static_cast<__nv_bfloat16*>(materialized_k.data),
+            static_cast<__nv_bfloat16*>(materialized_v.data));
+        const detail::MaterializedPrefillInput materialized{
+            static_cast<const __nv_bfloat16*>(materialized_k.data),
+            static_cast<const __nv_bfloat16*>(materialized_v.data),
+            slab_begin,
+            slab_capacity,
+        };
+        detail::attention_prefill_slab_kernel<Geometry, Metadata>
+            <<<attention_grid, kGqaPrefillThreads, kGqaPrefillSmemBytes, stream>>>(
+                static_cast<const __nv_bfloat16*>(rotated_query.data), materialized, metadata,
+                static_cast<const std::int32_t*>(positions.data), scale,
+                static_cast<float*>(running_acc.data), static_cast<float*>(running_m.data),
+                static_cast<float*>(running_l.data), width, slab_begin, slab_begin + slab_tokens);
+    }
+    const dim3 finalize_grid(Geometry::QHeads, width, 1);
+    detail::finalize_prefill_slab_kernel<Geometry, Metadata><<<finalize_grid, D, 0, stream>>>(
+        static_cast<const float*>(running_acc.data), static_cast<const float*>(running_l.data),
+        metadata, width, static_cast<__nv_bfloat16*>(output.data));
     kvarn_hadamard(output, output, stream);
     CUDA_CHECK(cudaGetLastError());
 }

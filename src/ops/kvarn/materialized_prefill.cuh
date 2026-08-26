@@ -23,10 +23,11 @@ struct PrefillCache {
 };
 
 template <typename Metadata>
-__launch_bounds__(D) __global__ void materialize_prefill_head_kernel(
-    PrefillCache cache, Metadata metadata, const std::int32_t* positions, int width, int capacity,
-    __nv_bfloat16* materialized_k, __nv_bfloat16* materialized_v) {
-    const int logical_page = static_cast<int>(blockIdx.x);
+__launch_bounds__(D) __global__ void materialize_prefill_slab_kernel(
+    PrefillCache cache, Metadata metadata, const std::int32_t* positions, int width, int slab_begin,
+    int slab_tokens, __nv_bfloat16* materialized_k,
+    __nv_bfloat16* materialized_v) {
+    const int logical_page = slab_begin / Group + static_cast<int>(blockIdx.x);
     const int head = static_cast<int>(blockIdx.y);
     const int d = static_cast<int>(threadIdx.x);
     const int tokens = metadata.valid_tokens(width);
@@ -56,7 +57,8 @@ __launch_bounds__(D) __global__ void materialize_prefill_head_kernel(
             const std::int64_t destination =
                 static_cast<std::int64_t>(d) +
                 static_cast<std::int64_t>(D) *
-                    (page_begin + token + static_cast<std::int64_t>(capacity) * head);
+                    (page_begin + token - slab_begin +
+                     static_cast<std::int64_t>(slab_tokens) * head);
             materialized_k[destination] = cache.tail_k[source];
             materialized_v[destination] = cache.tail_v[source];
         }
@@ -93,7 +95,8 @@ __launch_bounds__(D) __global__ void materialize_prefill_head_kernel(
         const std::int64_t destination =
             static_cast<std::int64_t>(d) +
             static_cast<std::int64_t>(D) *
-                (page_begin + token + static_cast<std::int64_t>(capacity) * head);
+                (page_begin + token - slab_begin +
+                 static_cast<std::int64_t>(slab_tokens) * head);
         materialized_k[destination] = __float2bfloat16_rn(key);
         materialized_v[destination] = __float2bfloat16_rn(value);
     }
@@ -102,7 +105,8 @@ __launch_bounds__(D) __global__ void materialize_prefill_head_kernel(
 struct MaterializedPrefillInput {
     const __nv_bfloat16* key;
     const __nv_bfloat16* value;
-    int capacity;
+    int slab_begin;
+    int slab_tokens;
 
     template <bool Key>
     __device__ __forceinline__ void stage(__nv_bfloat16* destination, int kv_head, int k0,
@@ -112,7 +116,8 @@ struct MaterializedPrefillInput {
         constexpr int VecPerRow = D / 8;
         const auto* source_block = (Key ? key : value) +
                                    static_cast<std::int64_t>(D) *
-                                       (static_cast<std::int64_t>(capacity) * kv_head + k0);
+                                       (static_cast<std::int64_t>(slab_tokens) * kv_head + k0 -
+                                        slab_begin);
         if (k0 + Bc - 1 <= max_query_abs) {
 #pragma unroll
             for (int chunk = tid; chunk < Bc * VecPerRow; chunk += Threads) {
