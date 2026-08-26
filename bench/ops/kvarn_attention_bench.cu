@@ -39,7 +39,7 @@ int parse_context(int argc, char** argv) {
 int main(int argc, char** argv) {
     try {
         const int context = parse_context(argc, argv);
-        const int pages = (context + kGroup - 1) / kGroup;
+        const int pages = (context + kGroup - 1) / kGroup + 1;
         DeviceBuffer records(static_cast<std::size_t>(pages) * kKvHeads *
                              ops::kKvarnRecordBytes);
         DeviceBuffer tail_k(static_cast<std::size_t>(kD) * kGroup * kKvHeads *
@@ -89,6 +89,31 @@ int main(int argc, char** argv) {
                                  cache, false, nullptr);
         }
         CUDA_CHECK(cudaDeviceSynchronize());
+
+        const auto measure_append = [&](int width) {
+            DeviceBuffer key = bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
+            DeviceBuffer value =
+                bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
+            std::vector<std::int32_t> host_positions(width);
+            for (int column = 0; column < width; ++column) {
+                host_positions[column] = context + column;
+            }
+            DeviceBuffer positions(host_positions.size() * sizeof(std::int32_t));
+            positions.copy_from_host(host_positions.data(), positions.bytes);
+            Tensor key_tensor(key.p, DType::BF16, {kD, kKvHeads, width, 1});
+            Tensor value_tensor(value.p, DType::BF16, {kD, kKvHeads, width, 1});
+            Tensor position_tensor(positions.p, DType::I32, {width, 1});
+            const auto timing = bench::measure_launch(
+                [&](cudaStream_t stream) {
+                    ops::kvarn_kv_append(key_tensor, value_tensor, position_tensor, Tensor{},
+                                         row_tensor, cache, false, stream);
+                },
+                nullptr, 5, 100);
+            std::printf("append=%d median_us=%.3f min_us=%.3f p95_us=%.3f\n", width,
+                        timing.median_us, timing.min_us, timing.p95_us);
+        };
+        measure_append(1);
+        measure_append(6);
 
         DeviceBuffer query = bench::make_bf16(static_cast<std::size_t>(kD) * kQueryHeads);
         DeviceBuffer output(static_cast<std::size_t>(kD) * kQueryHeads * 2);

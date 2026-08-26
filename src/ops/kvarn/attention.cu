@@ -8,6 +8,7 @@
 #include "core/device.h"
 #include "ops/kvarn/config.cuh"
 #include "ops/kvarn/decode.cuh"
+#include "ops/kvarn/hadamard.cuh"
 #include "ops/kvarn/store.cuh"
 
 #include <cuda_bf16.h>
@@ -22,6 +23,7 @@ namespace ninfer::ops {
 namespace {
 
 constexpr int kThreads = 256;
+constexpr int kFusedStageMaxWidth = 6;
 constexpr std::size_t kStoreSharedBytes =
     ((kvarn::D + 1) * kvarn::Group + 8 * kvarn::D + 16) * sizeof(float);
 
@@ -130,6 +132,47 @@ __global__ void stage_kernel(const __nv_bfloat16* key, const __nv_bfloat16* valu
     cache.tail_k[destination] = key[source];
     cache.tail_v[destination] = value[source];
     if (head == 0 && d == 0) cache.markers[slot + kKvarnTailSlots * row] = page;
+}
+
+__global__ void rotate_stage_kernel(const __nv_bfloat16* key, const __nv_bfloat16* value,
+                                    const std::int32_t* positions,
+                                    const std::int32_t* valid_columns,
+                                    const std::int32_t* table_rows, ViewPointers cache, int width,
+                                    int batch, bool masked) {
+    __shared__ float stage[2][kvarn::D];
+    const int encoded = static_cast<int>(blockIdx.x);
+    const bool key_path = (encoded & 1) == 0;
+    const int item = encoded >> 1;
+    const int head = item % cache.heads;
+    const int column = (item / cache.heads) % width;
+    const int b = item / (cache.heads * width);
+    const int count = masked ? valid_columns[b] : width;
+    if (b >= batch || column >= count) return;
+    const int start = positions[b * width];
+    const int end = start + count;
+    const int position = positions[b * width + column];
+    const int page = position / kvarn::Group;
+    const int first_page = start / kvarn::Group;
+    const int last_page = (end - 1) / kvarn::Group;
+    const int row = table_rows[b];
+    const int slot = mapped_tail_slot(cache, row, page, first_page, last_page);
+    if (slot < 0) return;
+    const int d = static_cast<int>(threadIdx.x);
+    const std::int64_t source =
+        static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kvarn::D) *
+                                          (head + cache.heads * (column + width * b));
+    float transformed = __bfloat162float(key_path ? key[source] : value[source]);
+    transformed = kvarn::detail::hadamard_block(transformed, stage, d);
+    const int offset = position & (kvarn::Group - 1);
+    const std::int64_t destination =
+        static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kvarn::D) *
+                                          (offset + kvarn::Group *
+                                                        (head + cache.heads *
+                                                                    (slot + kKvarnTailSlots * row)));
+    (key_path ? cache.tail_k : cache.tail_v)[destination] = __float2bfloat16_rn(transformed);
+    if (key_path && head == 0 && d == 0) {
+        cache.markers[slot + kKvarnTailSlots * row] = page;
+    }
 }
 
 __device__ kvarn::StorePointers record_pointers(std::uint8_t* record) {
@@ -307,7 +350,8 @@ void rotate_kv(Tensor key, Tensor value, cudaStream_t stream) {
 
 void stage_and_encode(Tensor key, Tensor value, const Tensor& positions,
                       const Tensor& valid_columns, const Tensor& table_rows,
-                      KvarnPagedBatchLayerView cache, bool provisional, cudaStream_t stream) {
+                      KvarnPagedBatchLayerView cache, bool provisional, bool rotate_on_stage,
+                      cudaStream_t stream) {
     const int width = key.ne[2];
     const int batch = key.ne[3];
     const bool masked = valid_columns.data != nullptr;
@@ -319,13 +363,20 @@ void stage_and_encode(Tensor key, Tensor value, const Tensor& positions,
         encode_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
         static_cast<int>(kStoreSharedBytes));
     CUDA_CHECK(encode_attribute);
-    stage_kernel<<<batch * width * cache.num_kv_heads, kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(key.data),
-        static_cast<const __nv_bfloat16*>(value.data),
-        static_cast<const std::int32_t*>(positions.data),
-        masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr,
-        static_cast<const std::int32_t*>(table_rows.data), view, width, batch, masked,
-        provisional);
+    const auto* key_data = static_cast<const __nv_bfloat16*>(key.data);
+    const auto* value_data = static_cast<const __nv_bfloat16*>(value.data);
+    const auto* position_data = static_cast<const std::int32_t*>(positions.data);
+    const auto* valid_data =
+        masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr;
+    const auto* row_data = static_cast<const std::int32_t*>(table_rows.data);
+    if (rotate_on_stage) {
+        rotate_stage_kernel<<<2 * batch * width * cache.num_kv_heads, kThreads, 0, stream>>>(
+            key_data, value_data, position_data, valid_data, row_data, view, width, batch, masked);
+    } else {
+        stage_kernel<<<batch * width * cache.num_kv_heads, kThreads, 0, stream>>>(
+            key_data, value_data, position_data, valid_data, row_data, view, width, batch, masked,
+            provisional);
+    }
     CUDA_CHECK(cudaGetLastError());
     if (!provisional) {
         const int pages = max_touched_pages(width);
@@ -409,9 +460,10 @@ void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& posit
     if (envelope.max_visible_keys == 0) {
         throw std::invalid_argument("KVarN attention: empty execution envelope");
     }
-    rotate_kv(key, value, stream);
+    const bool rotate_on_stage = key.ne[2] <= kFusedStageMaxWidth;
+    if (!rotate_on_stage) { rotate_kv(key, value, stream); }
     stage_and_encode(key, value, positions, valid_columns, kv_table_rows, cache, provisional,
-                     stream);
+                     rotate_on_stage, stream);
     const int width = query.ne[2];
     const int batch = query.ne[3];
     (void)width;
@@ -437,10 +489,10 @@ void kvarn_kv_append(Tensor key, Tensor value, const Tensor& positions,
                      const Tensor& valid_columns, const Tensor& kv_table_rows,
                      KvarnPagedBatchLayerView cache, bool provisional, cudaStream_t stream) {
     require_view(cache);
-    kvarn_hadamard(key, key, stream);
-    kvarn_hadamard(value, value, stream);
+    const bool rotate_on_stage = key.ne[2] <= kFusedStageMaxWidth;
+    if (!rotate_on_stage) { rotate_kv(key, value, stream); }
     stage_and_encode(key, value, positions, valid_columns, kv_table_rows, cache, provisional,
-                     stream);
+                     rotate_on_stage, stream);
 }
 
 void kvarn_commit_pages(const Tensor& positions, const Tensor& accepted_columns,
