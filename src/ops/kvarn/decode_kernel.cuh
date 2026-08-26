@@ -19,14 +19,17 @@ inline constexpr int kDecodeWarps = 8;
 inline constexpr int kPackedKWordsPerHalf = 4;
 inline constexpr int kPackedKWords = 2 * kPackedKWordsPerHalf * D;
 inline constexpr int kPackedVBytes = Group * (D / 4);
-inline constexpr int kMetadataHalfValues = 2 * D + Group + D + 2 * Group;
-inline constexpr int kMetadataKScale = 0;
-inline constexpr int kMetadataKZero = kMetadataKScale + D;
-inline constexpr int kMetadataKToken = kMetadataKZero + D;
-inline constexpr int kMetadataVChannel = kMetadataKToken + Group;
-inline constexpr int kMetadataVScale = kMetadataVChannel + D;
-inline constexpr int kMetadataVZero = kMetadataVScale + Group;
-static_assert(kMetadataVZero + Group == kMetadataHalfValues);
+inline constexpr int kVCodeValues = 4;
+static_assert(VBits == 2);
+
+struct alignas(16) DecodeRecordMetadata {
+    __half k_scale[D];
+    __half k_zero[D];
+    float k_token_scale[Group];
+    // Plane by position in the packed V byte so consumer warps read consecutive banks.
+    float v_channel_scale[kVCodeValues][D / kVCodeValues];
+    float v_base[Group][kVCodeValues];
+};
 
 template <typename Geometry>
 __device__ __forceinline__ int kvarn_decode_active_splits(int window, int launch_capacity,
@@ -53,7 +56,7 @@ __device__ __forceinline__ int decode_tail_slot(const std::int32_t* markers, int
 }
 
 __device__ __forceinline__ void stage_decode_record(
-    unsigned* packed_k, std::uint8_t* packed_v, __half* metadata,
+    unsigned* packed_k, std::uint8_t* packed_v, DecodeRecordMetadata* metadata,
     const std::uint8_t* record, int tid, int threads) {
     constexpr int KChunks = kKvarnKScaleOffset / 16;
     for (int chunk = tid; chunk < KChunks; chunk += threads) {
@@ -81,26 +84,25 @@ __device__ __forceinline__ void stage_decode_record(
     const auto* v_channel = reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
     const auto* v_scale = reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
     const auto* v_zero = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
-    for (int index = tid; index < kMetadataHalfValues; index += threads) {
-        if (index < kMetadataKZero) {
-            metadata[index] = k_scale[index - kMetadataKScale];
-        } else if (index < kMetadataKToken) {
-            metadata[index] = k_zero[index - kMetadataKZero];
-        } else if (index < kMetadataVChannel) {
-            metadata[index] = k_token[index - kMetadataKToken];
-        } else if (index < kMetadataVScale) {
-            metadata[index] = v_channel[index - kMetadataVChannel];
-        } else if (index < kMetadataVZero) {
-            metadata[index] = v_scale[index - kMetadataVScale];
-        } else {
-            metadata[index] = v_zero[index - kMetadataVZero];
+    for (int dim = tid; dim < D; dim += threads) {
+        metadata->k_scale[dim] = k_scale[dim];
+        metadata->k_zero[dim] = k_zero[dim];
+        metadata->v_channel_scale[dim & 3][dim >> 2] = __half2float(v_channel[dim]);
+    }
+    for (int token = tid; token < Group; token += threads) {
+        metadata->k_token_scale[token] = __half2float(k_token[token]);
+        const float scale = __half2float(v_scale[token]);
+        const float zero = __half2float(v_zero[token]);
+#pragma unroll
+        for (int code = 0; code < kVCodeValues; ++code) {
+            metadata->v_base[token][code] = fmaf(static_cast<float>(code), scale, zero);
         }
     }
     __syncthreads();
 }
 
 __device__ __forceinline__ void stage_decode_key(
-    __nv_bfloat16* destination, const unsigned* packed_k, const __half* metadata,
+    __nv_bfloat16* destination, const unsigned* packed_k, const DecodeRecordMetadata* metadata,
     const __nv_bfloat16* tail_k, int table_row, int tail_slot, int heads, int head,
     int logical_begin, int valid_begin, int valid_end, int tid, int threads) {
     constexpr int Bc = kDecodeBc;
@@ -137,8 +139,8 @@ __device__ __forceinline__ void stage_decode_key(
             static_cast<int>(packed_k[(word_base + 1) * D + dim]),
             static_cast<int>(packed_k[(word_base + 2) * D + dim]),
             static_cast<int>(packed_k[(word_base + 3) * D + dim]));
-        const float scale = __half2float(metadata[kMetadataKScale + dim]);
-        const float zero = __half2float(metadata[kMetadataKZero + dim]);
+        const float scale = __half2float(metadata->k_scale[dim]);
+        const float zero = __half2float(metadata->k_zero[dim]);
 #pragma unroll
         for (int pair = 0; pair < Bc / 2; ++pair) {
             const int token = 2 * pair;
@@ -149,8 +151,8 @@ __device__ __forceinline__ void stage_decode_key(
                 : word_index == 2 ? static_cast<unsigned>(packed.z)
                                   : static_cast<unsigned>(packed.w);
             const unsigned codes = (word >> (8 * (pair & 3))) & 0xffU;
-            const auto token_scales = __half22float2(*reinterpret_cast<const __half2*>(
-                metadata + kMetadataKToken + token_base + token));
+            const auto token_scales = *reinterpret_cast<const float2*>(
+                metadata->k_token_scale + token_base + token);
             const float decoded0 = fmaf(static_cast<float>(codes & 15U), scale, zero) *
                                    token_scales.x;
             const float decoded1 = fmaf(static_cast<float>(codes >> 4), scale, zero) *
@@ -168,7 +170,8 @@ __device__ __forceinline__ void stage_decode_key(
 }
 
 __device__ __forceinline__ void stage_decode_value(
-    __nv_bfloat16* destination, const std::uint8_t* packed_v, const __half* metadata,
+    __nv_bfloat16* destination, const std::uint8_t* packed_v,
+    const DecodeRecordMetadata* metadata,
     const __nv_bfloat16* tail_v, int table_row, int tail_slot, int heads, int head,
     int logical_begin, int valid_begin, int valid_end, int tid, int threads) {
     constexpr int Bc = kDecodeBc;
@@ -201,15 +204,12 @@ __device__ __forceinline__ void stage_decode_value(
         const int record_token = token_base + token;
         const int position = logical_begin + token;
         const std::uint8_t packed = packed_v[record_token * (D / 4) + packed_dim];
-        const float scale = __half2float(metadata[kMetadataVScale + record_token]);
-        const float zero = __half2float(metadata[kMetadataVZero + record_token]);
         unsigned values[4];
 #pragma unroll
         for (int item = 0; item < 4; ++item) {
-            const int dim = 4 * packed_dim + item;
             const int code = (packed >> (2 * item)) & 3;
-            const float decoded = fmaf(static_cast<float>(code), scale, zero) *
-                                  __half2float(metadata[kMetadataVChannel + dim]);
+            const float decoded = metadata->v_base[record_token][code] *
+                                  metadata->v_channel_scale[item][packed_dim];
             const __nv_bfloat16 value =
                 position >= valid_begin && position < valid_end ? __float2bfloat16_rn(decoded)
                                                                 : __float2bfloat16_rn(0.0F);
@@ -254,7 +254,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
     __shared__ float alpha_s[Br];
     __shared__ __align__(16) unsigned packed_k_s[kPackedKWords];
     __shared__ __align__(16) std::uint8_t packed_v_s[kPackedVBytes];
-    __shared__ __align__(16) __half metadata_s[kMetadataHalfValues];
+    __shared__ DecodeRecordMetadata metadata_s;
     __shared__ std::int32_t physical_pages_s[PageIds];
     __nv_bfloat16* k_s = qkv_s;
     __nv_bfloat16* v_s = qkv_s + Bc * D;
@@ -384,9 +384,9 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
             records + (static_cast<std::int64_t>(physical_page) * heads + kv_head) *
                           kKvarnRecordBytes;
         if (tail_slot < 0 && (block == 0 || (k0 & (Group - 1)) == 0)) {
-            stage_decode_record(packed_k_s, packed_v_s, metadata_s, record, tid, Threads);
+            stage_decode_record(packed_k_s, packed_v_s, &metadata_s, record, tid, Threads);
         }
-        stage_decode_key(k_s, packed_k_s, metadata_s, tail_k, table_row, tail_slot, heads, kv_head,
+        stage_decode_key(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot, heads, kv_head,
                          k0, max(k0, split_start), min(k0 + Bc, split_end), tid, Threads);
         __syncthreads();
 
@@ -485,7 +485,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
             }
         } else {
             const int worker_tid = tid - ProducerWarps * 32;
-            stage_decode_value(v_s, packed_v_s, metadata_s, tail_v, table_row, tail_slot, heads,
+            stage_decode_value(v_s, packed_v_s, &metadata_s, tail_v, table_row, tail_slot, heads,
                                kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end),
                                worker_tid, ConsumerWarps * 32);
         }
