@@ -168,9 +168,9 @@ would not preserve either a steady interval or one continuous makespan.
 
 ## KV-cache needle qualification
 
-`run_kv_cache_needles.py` compares INT8-G64 and KVarN K4V2-G64 on five deterministic layouts of
+`run_kv_cache_needles.py` compares INT8-G64 and KVarN K4V2-G64 on ten deterministic layouts of
 64 stratified composite-key needles. Every needle has local near-match distractors, and scoring
-reports each seed plus mean recall across all five seeds, aggregate recall, and early/middle/late
+reports each seed plus mean recall across all ten seeds, aggregate recall, and early/middle/late
 context depth. Runs are greedy, disable prefix
 reuse and speculative decoding, and are resumable at one `(KV format, seed)` result per record.
 

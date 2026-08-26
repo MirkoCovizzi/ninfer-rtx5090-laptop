@@ -23,7 +23,7 @@ from tools.bench import run_serve_corpus as corpus
 
 
 KV_LOG_NAMES = {"int8": "int8-group64", "kvarn": "kvarn-k4v2-group64"}
-SEEDS = tuple(range(5))
+SEEDS = tuple(range(10))
 NEEDLE_COUNT = 64
 OUTPUT_TOKENS = 2048
 CONTEXT_MARGIN = 128
