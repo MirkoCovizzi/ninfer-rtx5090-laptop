@@ -583,9 +583,9 @@ int run_cached_attention_case(CacheFixture<Heads>& cache, int query_heads, int f
     Tensor position_tensor(positions.p, DType::I32, {width, 1});
     Tensor rows_tensor(rows.p, DType::I32, {1});
     WorkspaceArena workspace(std::max<std::size_t>(
-        1, ops::gqa_attention_workspace_capacity_bytes(
-               query_heads, DType::BF16,
-               {1, static_cast<std::uint32_t>(first_position + width)}, 1, width, width)));
+        1, ops::kvarn_attention_workspace_capacity_bytes(
+               query_heads, {1, static_cast<std::uint32_t>(first_position + width)}, 1, width,
+               width)));
     ops::kvarn_attention_cached(query_tensor, position_tensor, rows_tensor, 0.0625F, cache.view(),
                                 {1, static_cast<std::uint32_t>(first_position + width)}, workspace,
                                 output_tensor, nullptr);
@@ -666,7 +666,7 @@ int run_cached_attention_case(CacheFixture<Heads>& cache, int query_heads, int f
     }
     int failures =
         compare_profile(label, from_device_bf16(output, query.size()), expected, 8.0e-3);
-    if (width == 6 && Heads == 2) {
+    if ((width == 6 && Heads == 2) || width == 64) {
         DeviceBuffer original_query = to_device_bf16(query);
         cudaStream_t stream = nullptr;
         cudaGraph_t graph = nullptr;
@@ -734,8 +734,8 @@ int run_batched_attention_case(int query_heads, const char* label) {
     Tensor positions_tensor(positions.p, DType::I32, {Width, Batch});
     Tensor rows_tensor(rows.p, DType::I32, {Batch});
     const ops::GqaExecutionEnvelope envelope{1, 512};
-    const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
-        query_heads, DType::BF16, envelope, Batch, Width, Width);
+    const std::size_t workspace_bytes = ops::kvarn_attention_workspace_capacity_bytes(
+        query_heads, envelope, Batch, Width, Width);
     DeviceBuffer workspace_storage(workspace_bytes + 2 * GuardBytes);
     workspace_storage.fill(0xa5);
     auto* workspace_base = static_cast<std::uint8_t*>(workspace_storage.p) + GuardBytes;
@@ -949,6 +949,13 @@ int run_27b_attention_case() {
     return run_cached_attention_case(cache, 24, 136, 64, "KVarN H24/KV4 tiled attention");
 }
 
+int run_35b_attention_case() {
+    CacheFixture<2> cache;
+    append_cache(cache, make_cache_values(200, 0x6001U, 2),
+                 make_cache_values(200, 0x6002U, 2), 0, false);
+    return run_cached_attention_case(cache, 16, 136, 64, "KVarN H16/KV2 tiled attention");
+}
+
 } // namespace
 
 int main() {
@@ -960,6 +967,7 @@ int main() {
     failures += run_hadamard_case();
     failures += run_cache_lifecycle_case();
     failures += run_27b_attention_case();
+    failures += run_35b_attention_case();
     failures += run_batched_attention_case<4>(24, "KVarN H24/KV4 B=2 attention");
     failures += run_batched_attention_case<2>(16, "KVarN H16/KV2 B=2 attention");
     std::cout << (failures == 0 ? "OK" : "FAIL") << " kvarn correctness\n";

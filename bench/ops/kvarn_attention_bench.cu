@@ -98,9 +98,9 @@ int main(int argc, char** argv) {
         Tensor query_tensor(query.p, DType::BF16, {kD, kQueryHeads, 1, 1});
         Tensor output_tensor(output.p, DType::BF16, {kD, kQueryHeads, 1, 1});
         Tensor position_tensor(position.p, DType::I32, {1, 1});
-        WorkspaceArena workspace(ops::gqa_attention_workspace_capacity_bytes(
-            kQueryHeads, DType::BF16, {static_cast<std::uint32_t>(context),
-                                       static_cast<std::uint32_t>(context)},
+        WorkspaceArena workspace(ops::kvarn_attention_workspace_capacity_bytes(
+            kQueryHeads, {static_cast<std::uint32_t>(context),
+                          static_cast<std::uint32_t>(context)},
             1, 1, 1));
         const auto timing = bench::measure_launch(
             [&](cudaStream_t stream) {
@@ -131,8 +131,8 @@ int main(int argc, char** argv) {
         Tensor pv(prefill_value.p, DType::BF16, {kD, kKvHeads, prefill, 1});
         Tensor po(prefill_output.p, DType::BF16, {kD, kQueryHeads, prefill, 1});
         Tensor pp(prefill_position.p, DType::I32, {prefill, 1});
-        WorkspaceArena prefill_workspace(ops::gqa_attention_workspace_capacity_bytes(
-            kQueryHeads, DType::BF16, {1, static_cast<std::uint32_t>(context)}, 1, 6, 6));
+        WorkspaceArena prefill_workspace(ops::kvarn_attention_workspace_capacity_bytes(
+            kQueryHeads, {1, static_cast<std::uint32_t>(context)}, 1, prefill, prefill));
         const auto prefill_timing = bench::measure_launch(
             [&](cudaStream_t stream) {
                 ops::kvarn_attention(pq, pk, pv, pp, Tensor{}, row_tensor, 0.0625F, cache, false,
