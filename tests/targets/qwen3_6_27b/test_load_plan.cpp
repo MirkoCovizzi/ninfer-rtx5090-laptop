@@ -185,6 +185,55 @@ int verify_qwen38_modern(const std::filesystem::path& path) {
     return 0;
 }
 
+int verify_qwen38_quasar(const std::filesystem::path& path) {
+    ninfer::artifact::Reader reader(path);
+    if (Package::resolve_weights(reader) != WeightsProfile::Qwen38Nvfp4Quasar) {
+        std::cerr << "QUASAR Qwen3.8 NVFP4 resolved to the wrong profile\n";
+        return 1;
+    }
+    ninfer::artifact::Binder binder(reader);
+    const ArtifactLoadPlan plan =
+        bind_artifact(binder, WeightsProfile::Qwen38Nvfp4Quasar, all_features());
+    if (plan.materialization.object_count != 1268 ||
+        plan.materialization.device_objects.size() != 1006 ||
+        plan.materialization.host_objects.size() != 6) {
+        std::cerr << "QUASAR materialization plan is incomplete\n";
+        return 1;
+    }
+    std::size_t nvfp4_weights = 0;
+    const auto check_weight   = [&](const WeightPlan& weight) {
+        if (!valid_divisors(weight)) { return false; }
+        ++nvfp4_weights;
+        return true;
+    };
+    for (const TextLayerPlan& layer : plan.bindings.text_layers) {
+        if (!check_weight(layer.mlp.gate_up) || !check_weight(layer.mlp.down)) { return 1; }
+        if (layer.is_full_attention) {
+            const auto* fused =
+                std::get_if<FusedAttentionProjectionPlan>(&layer.attention.projection);
+            if (fused == nullptr || !check_weight(fused->query_key_gate_value) ||
+                !check_weight(layer.attention.output)) {
+                return 1;
+            }
+        } else {
+            const auto* input =
+                std::get_if<FusedGdnInputProjectionPlan>(&layer.gdn.input_projection);
+            const auto* control =
+                std::get_if<FusedGdnControlProjectionPlan>(&layer.gdn.control_projection);
+            if (input == nullptr || control == nullptr ||
+                control->a_b_projection.format != NumericFormat::BF16 ||
+                !check_weight(input->query_key_value_z) || !check_weight(layer.gdn.output)) {
+                return 1;
+            }
+        }
+    }
+    if (nvfp4_weights != 256) {
+        std::cerr << "QUASAR Text inventory has " << nvfp4_weights << " NVFP4 parents\n";
+        return 1;
+    }
+    return 0;
+}
+
 int verify_profile_mismatch_rejection() {
     ninfer::DeviceContext device(0);
     ninfer::EngineOptions options;
@@ -254,6 +303,8 @@ int main() {
         "NINFER_QWEN3_8_27B_LEGACY_NVFP4_WEIGHTS", "qwen3_8_27b_nvfp4_ostfralla.ninfer");
     const std::filesystem::path qwen38_modern =
         artifact_path("NINFER_QWEN3_8_27B_NVFP4_WEIGHTS", "qwen3_8_27b_nvfp4.ninfer");
+    const std::filesystem::path qwen38_quasar =
+        artifact_path("NINFER_QWEN3_8_27B_QUASAR_NVFP4_WEIGHTS", "qwen3_8_27b_quasar_nvfp4.ninfer");
     bool ran = false;
     if (const int result = verify_profile_mismatch_rejection(); result != 0) { return result; }
     if (std::filesystem::is_regular_file(groupwise) && std::filesystem::is_regular_file(nvfp4)) {
@@ -276,6 +327,10 @@ int main() {
     if (std::filesystem::is_regular_file(qwen38_modern)) {
         ran = true;
         if (const int result = verify_qwen38_modern(qwen38_modern); result != 0) { return result; }
+    }
+    if (std::filesystem::is_regular_file(qwen38_quasar)) {
+        ran = true;
+        if (const int result = verify_qwen38_quasar(qwen38_quasar); result != 0) { return result; }
     }
     if (!ran) {
         std::cerr << "skip: no real 27B artifacts available for load-plan validation\n";

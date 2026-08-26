@@ -84,13 +84,19 @@ ModelSamplingDefaults Package::sampling_defaults(std::string_view model) {
                              std::string(target_key) + "'");
 }
 
-bool endpoint_matches(const artifact::Reader& reader, std::string_view name,
-                      artifact::NumericFormat format, artifact::StorageLayout layout) {
+bool tensor_matches(const artifact::Reader& reader, std::string_view name,
+                    artifact::NumericFormat format, artifact::StorageLayout layout,
+                    std::vector<std::uint64_t> shape) {
     const auto* object = reader.find(name);
     if (object == nullptr) { return false; }
     const auto* tensor = std::get_if<artifact::TensorDescriptor>(object);
     return tensor != nullptr && tensor->format == format && tensor->layout == layout &&
-           tensor->shape == std::vector<std::uint64_t>{248320, 5120};
+           tensor->shape == shape;
+}
+
+bool endpoint_matches(const artifact::Reader& reader, std::string_view name,
+                      artifact::NumericFormat format, artifact::StorageLayout layout) {
+    return tensor_matches(reader, name, format, layout, {248320, 5120});
 }
 
 Package::WeightsProfile Package::resolve_weights(const artifact::Reader& reader) {
@@ -116,7 +122,13 @@ Package::WeightsProfile Package::resolve_weights(const artifact::Reader& reader)
                                  endpoint_matches(reader, "text/output_head",
                                                   artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
                                                   artifact::StorageLayout::RowScaleV1);
-        if (legacy_w8) { return WeightsProfile::Qwen38Nvfp4LegacyW8; }
+        if (legacy_w8) {
+            const bool quasar =
+                tensor_matches(reader, "text/layers/3/attention/query_key_gate_value",
+                               artifact::NumericFormat::NVFP4,
+                               artifact::StorageLayout::BlockScaleK16M128x4V1, {14336, 5120});
+            return quasar ? WeightsProfile::Qwen38Nvfp4Quasar : WeightsProfile::Qwen38Nvfp4LegacyW8;
+        }
         if (current_fp8) { return WeightsProfile::Qwen38Nvfp4; }
         throw std::runtime_error("unsupported qwen3.8-27b/nvfp4 endpoint storage profile");
     }

@@ -2,8 +2,9 @@
 
 This reference defines the `qwen3.8-27b/nvfp4` `.ninfer` storage contract: identity, object
 inventory, shapes, numeric formats, storage layouts, fused row order, aliases, fixed sources, and
-source-to-object transforms. The existing registered `qwen3.8-27b/groupwise-int` contract remains
-defined in Section 13.
+source-to-object transforms. Section 13 defines the descriptor-selected QUASAR profile, Section 14
+retains the published legacy W8-endpoint artifact, and Section 15 defines the existing registered
+`qwen3.8-27b/groupwise-int` contract.
 
 The NVFP4 profile is a registered Engine identity implemented by the target converter, exact
 binder, and Qwen3.8 execution leaves. The generic artifact registry resolves its version-2
@@ -706,7 +707,66 @@ Validation must reject an incomplete or alternate mixed-precision allocation. It
 missing source matrix from the official BF16 checkpoint, silently requantize a preserved FP8 or
 NVFP4 field, or add unused source calibration fields as artifact objects.
 
-## 13. Legacy W8-endpoint NVFP4 compatibility artifact
+## 13. QUASAR all-linear NVFP4 source profile
+
+The converter also accepts
+[`QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4`](https://huggingface.co/QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4)
+revision `d8e6fbfa3e3a78899b440222b827430045a05b44`. A synchronized downstream copy is maintained at
+[`MirkoCovizzi/Qwen3.8-27B-QUASAR-NVFP4`](https://huggingface.co/MirkoCovizzi/Qwen3.8-27B-QUASAR-NVFP4).
+The standard entry point detects the source's exact single-group `nvfp4-pack-quantized`
+configuration; the fixed Unsloth mixed source remains governed by Sections 3 through 12 and follows
+its existing path unchanged.
+
+The QUASAR source stores all 496 Text `Linear` modules as NVFP4. NInfer preserves the packed codes,
+natural E4M3FN scales, weight divisors, and input divisors for the 400 execution-supported source
+matrices. Consumer-boundary fusion produces 256 NVFP4 parents: 32 full-attention parents, 96 GDN
+input/output parents, and 128 MLP parents. Every fused source group must already have bit-identical
+weight and input divisor words; the converter does not reconcile or requantize a mismatched group.
+
+The 96 GDN `in_proj_a` and `in_proj_b` matrices have output extent 48 and cannot use the registered
+NVFP4 execution route. For each source matrix, the converter evaluates the registered represented
+weight formula
+
+```text
+W[n,k] = decode_e2m1(c[n,k]) * decode_e4m3fn(s[n,floor(k/16)]) / d_w
+```
+
+in binary32, rounds each result to BF16, and concatenates A then B into the existing
+`gdn/a_b_projection [96,5120]` parent. This explicit source-to-artifact cast is the only QUASAR Text
+matrix conversion; it does not substitute the official pre-QAT A/B values.
+
+The two vocabulary endpoints use `W8G32_F16S`. The QUASAR revision contains the complete 15-tensor
+BF16 MTP source module; its twelve artifact objects use the Section 12.1 transforms and are sourced
+from QUASAR. Draft head, Vision, vocabulary endpoints, and frontend resources continue to come from
+the fixed official source in Section 10.1. The complete profile has 1,268 objects: 1,262 tensors and
+six resources. Its numeric counts are:
+
+| Format | Tensors |
+|---|---:|
+| `BF16` | 534 |
+| `FP32` | 352 |
+| `I32` | 1 |
+| `Q4G64_F16S` | 55 |
+| `Q5G64_F16S` | 54 |
+| `Q6G64_F16S` | 1 |
+| `W8G32_F16S` | 9 |
+| `NVFP4` | 256 |
+
+The runtime selects `Qwen38Nvfp4Quasar` when both vocabulary endpoints are W8 and
+`text/layers/3/attention/query_key_gate_value` is NVFP4. This descriptor separates it from the
+legacy W8 profile without changing the public `qwen3.8-27b/nvfp4` identity.
+
+The canonical conversion command is:
+
+```bash
+python3 -m tools.convert.qwen3_8_27b.convert_nvfp4 \
+  --model /path/to/Qwen3.8-27B \
+  --quantized-model /path/to/Qwen3.8-27B-QUASAR-NVFP4 \
+  --out out/qwen3_8_27b_nvfp4.ninfer \
+  --device cuda
+```
+
+## 14. Legacy W8-endpoint NVFP4 compatibility artifact
 
 NInfer also accepts the externally published Qwen3.8 NVFP4 artifact whose endpoint tensors use the
 older Qwen3.6-style storage profile. It retains the same artifact identity but is selected as the
@@ -724,7 +784,7 @@ The accepted artifact has 1307 objects, 1301 tensors, 6 frontend resources, and 
 The current Qwen3.8 NVFP4 profile remains the separate FP8-endpoint mixed allocation in Section 3.
 An artifact with mixed, missing, or unknown endpoint descriptors is rejected rather than guessed.
 
-## 14. Existing `groupwise-int` artifact
+## 15. Existing `groupwise-int` artifact
 
 The existing registered peer artifact retains this identity:
 

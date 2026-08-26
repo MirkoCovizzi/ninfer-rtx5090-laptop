@@ -38,6 +38,12 @@ python3 -m tools.convert.qwen3_8_27b.convert \
   --model /path/to/Qwen3.8-27B \
   --out out/qwen3_8_27b.ninfer
 
+python3 -m tools.convert.qwen3_8_27b.convert_nvfp4 \
+  --model /path/to/Qwen3.8-27B \
+  --quantized-model /path/to/Qwen3.8-27B-NVFP4 \
+  --out out/qwen3_8_27b_nvfp4.ninfer \
+  --device cuda
+
 python3 -m tools.convert.qwen3_6_35b_a3b.convert \
   --model /path/to/Qwen3.6-35B-A3B-base \
   --dflash-model /path/to/Qwen3.6-35B-A3B-DFlash \
