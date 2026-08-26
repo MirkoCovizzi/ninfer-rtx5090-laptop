@@ -671,7 +671,7 @@ int run_cached_attention_case(CacheFixture<Heads, Pages>& cache, int query_heads
     }
     int failures =
         compare_profile(label, from_device_bf16(output, query.size()), expected, 8.0e-3);
-    if ((width == 6 && Heads == 2) || width == 64) {
+    if (width == 1 || (width == 6 && Heads == 2) || width == 64) {
         DeviceBuffer original_query = to_device_bf16(query);
         cudaStream_t stream = nullptr;
         cudaGraph_t graph = nullptr;
@@ -1097,7 +1097,11 @@ int run_27b_attention_case() {
     CacheFixture<4> cache;
     append_cache(cache, make_cache_values(200, 0x5001U, 4),
                  make_cache_values(200, 0x5002U, 4), 0, false);
-    return run_cached_attention_case(cache, 24, 136, 64, "KVarN H24/KV4 tiled attention");
+    int failures =
+        run_cached_attention_case(cache, 24, 199, 1, "KVarN H24/KV4 width-1 attention");
+    failures += run_cached_attention_case(cache, 24, 136, 64,
+                                          "KVarN H24/KV4 tiled attention");
+    return failures;
 }
 
 int run_35b_attention_case() {

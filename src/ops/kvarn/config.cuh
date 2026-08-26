@@ -5,12 +5,15 @@
 
 namespace ninfer::ops::kvarn {
 
-inline constexpr int D          = 256;
-inline constexpr int Group      = 64;
-inline constexpr int KBits      = 4;
-inline constexpr int VBits      = 2;
-inline constexpr int Iterations = 8;
+inline constexpr int D                 = 256;
+inline constexpr int Group             = 64;
+inline constexpr int KBits             = 4;
+inline constexpr int VBits             = 2;
+inline constexpr int Iterations        = 8;
 inline constexpr int PrefillSlabTokens = 16384;
+inline constexpr int DecodeMidWindow   = 122880;
+inline constexpr int DecodeMidSplits   = 41;
+inline constexpr int DecodeLongSplits  = 82;
 
 inline constexpr float StdMin = 1.0e-3F;
 inline constexpr float StdMax = 1.0e3F;
