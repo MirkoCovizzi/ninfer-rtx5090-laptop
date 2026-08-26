@@ -61,8 +61,8 @@ description: Use for KVarN implementation, optimization, qualification, or revie
 9. Rebuild `ninfer-serve` only after operator qualification. Smoke the real artifact, CUDA Graph,
    MTP width 6, prefix restore, and concurrent rows affected by the change.
 10. Run quality qualification after performance stabilizes: matched 192K INT8/KVarN, 64 needles,
-    fixed seeds `0..4`, greedy generation, thinking/speculation/prefix reuse disabled. Report each
-    `correct/64` and the arithmetic mean across five seeds (320 retrievals per format).
+    fixed seeds `0..9`, greedy generation, thinking/speculation/prefix reuse disabled. Report each
+    `correct/64` and the arithmetic mean across ten seeds (640 retrievals per format).
 
 ## Evidence And Completion
 
