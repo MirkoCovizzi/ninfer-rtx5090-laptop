@@ -28,6 +28,20 @@ inline constexpr int kMetadataVScale = kMetadataVChannel + D;
 inline constexpr int kMetadataVZero = kMetadataVScale + Group;
 static_assert(kMetadataVZero + Group == kMetadataHalfValues);
 
+template <typename Geometry>
+__device__ __forceinline__ int kvarn_decode_active_splits(int window, int launch_capacity,
+                                                          int tokens) {
+    if constexpr (Geometry::QHeads == 24) {
+        if (tokens == 1 && window > 8198) {
+            int splits = div_up(window, 192);
+            const int cap = window <= DecodeMidWindow ? DecodeMidSplits : DecodeLongSplits;
+            splits = min(splits, cap);
+            return min(splits, launch_capacity);
+        }
+    }
+    return gqa_small_t_active_splits<Geometry, false>(window, launch_capacity, tokens);
+}
+
 __device__ __forceinline__ int decode_tail_slot(const std::int32_t* markers, int table_row,
                                                 int logical_page) {
     int tail_slot = -1;
@@ -219,24 +233,21 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
     std::int32_t heads, float scale, __nv_bfloat16* partial_acc, float* partial_m,
     float* partial_l) {
     constexpr int Wc = kDecodeWarps;
-    constexpr int ProducerWarps = 2;
-    constexpr int RowTiles = 2;
-    constexpr int Br = RowTiles * 16;
+    constexpr int ProducerWarps = 1;
+    constexpr int Br = 16;
     constexpr int Bc = kDecodeBc;
     constexpr int Threads = Wc * 32;
     constexpr int QKNt = Bc / 8;
     constexpr int QKKs = D / 16;
     constexpr int PVNt = D / 8;
     constexpr int ConsumerWarps = Wc - ProducerWarps;
-    constexpr int ConsumerWarpsPerTile = ConsumerWarps / RowTiles;
-    constexpr int PVNtPerWarp = div_up(PVNt, ConsumerWarpsPerTile);
+    constexpr int PVNtPerWarp = div_up(PVNt, ConsumerWarps);
     constexpr int PVKs = Bc / 16;
     constexpr int PageIds = 64;
     constexpr float Log2E = 1.4426950408889634074f;
     constexpr unsigned FullMask = 0xffffffffu;
     static_assert(Group == 2 * Bc);
-    static_assert(ProducerWarps == RowTiles);
-    static_assert(ConsumerWarps % RowTiles == 0);
+    static_assert(Geometry::GroupSize <= Br);
 
     __shared__ __align__(16) __nv_bfloat16 qkv_s[2 * Bc * D];
     __shared__ __align__(16) __nv_bfloat16 p_s[Br * Bc];
@@ -300,7 +311,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
         return;
     }
     const int window = query_position + 1;
-    const int active_splits = gqa_small_t_active_splits<Geometry, false>(window, split_count, 1);
+    const int active_splits = kvarn_decode_active_splits<Geometry>(window, split_count, tokens);
     if (split >= active_splits) { return; }
     const int logical_tiles = div_up(window, Bc);
     const bool tile_split = logical_tiles >= active_splits;
@@ -336,21 +347,20 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
     const int a_coloff = (a_mat >> 1) << 3;
     const int b_rin = lane & 7;
     const int b_koff = ((lane >> 3) & 1) << 3;
-    const int producer_row_base = warp * 16;
-    // Warp roles are disjoint; alias their long-lived state to keep two CTAs resident without
-    // spilling either the producer's Q fragments or the consumer's PV accumulator.
+    // Both admitted GQA groups fit one MMA row tile. The producer retains Q fragments while the
+    // other seven warps partition the valid PV tile, keeping two CTAs resident without spills.
     union {
         unsigned query_fragment[QKKs][4];
         float accumulator[PVNtPerWarp][4];
     } warp_state;
-    if (warp < ProducerWarps) {
+    if (warp == 0) {
 #pragma unroll
         for (int k = 0; k < QKKs; ++k) {
-            const int row = producer_row_base + a_rowoff;
-            const int col = k * 16 + a_coloff;
+            const int query_col = k * 16 + a_coloff;
             ldmatrix_x4(warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
                         warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
-                        smem_addr(&qkv_s[row * D + gqa_small_t_tc_swz(row, col)]));
+                        smem_addr(&qkv_s[a_rowoff * D +
+                                         gqa_small_t_tc_swz(a_rowoff, query_col)]));
         }
     }
     __syncthreads();
@@ -380,14 +390,16 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
                          k0, max(k0, split_start), min(k0 + Bc, split_end), tid, Threads);
         __syncthreads();
 
-        if (warp < ProducerWarps) {
-            __nv_bfloat16* p_sw = &p_s[producer_row_base * Bc];
+        if (warp == 0) {
             float score[QKNt][4];
 #pragma unroll
             for (int tile = 0; tile < QKNt; ++tile) {
                 score[tile][0] = score[tile][1] = score[tile][2] = score[tile][3] = 0.0f;
+            }
 #pragma unroll
-                for (int k = 0; k < QKKs; ++k) {
+            for (int k = 0; k < QKKs; ++k) {
+#pragma unroll
+                for (int tile = 0; tile < QKNt; ++tile) {
                     unsigned key_fragment[2];
                     const int row = tile * 8 + b_rin;
                     const int col = k * 16 + b_koff;
@@ -399,7 +411,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
                              key_fragment[0], key_fragment[1]);
                 }
             }
-            const int row0 = producer_row_base + gid;
+            const int row0 = gid;
             const int row1 = row0 + 8;
             float block_m0 = -CUDART_INF_F, block_m1 = -CUDART_INF_F;
 #pragma unroll
@@ -454,11 +466,11 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
                                       : 0.0f;
                 block_l0 += p00 + p01;
                 block_l1 += p10 + p11;
-                p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col0)] = __float2bfloat16(p00);
-                p_sw[gid * Bc + gqa_small_t_tc_swz32(gid, col1)] = __float2bfloat16(p01);
-                p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col0)] =
+                p_s[gid * Bc + gqa_small_t_tc_swz32(gid, col0)] = __float2bfloat16(p00);
+                p_s[gid * Bc + gqa_small_t_tc_swz32(gid, col1)] = __float2bfloat16(p01);
+                p_s[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col0)] =
                     __float2bfloat16(p10);
-                p_sw[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col1)] =
+                p_s[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col1)] =
                     __float2bfloat16(p11);
             }
             block_l0 = warp_sum<4>(block_l0, FullMask);
@@ -481,12 +493,9 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
 
         if (warp >= ProducerWarps) {
             const int consumer_warp = warp - ProducerWarps;
-            const int consumer_tile = consumer_warp % RowTiles;
-            const int consumer_slice = consumer_warp / RowTiles;
-            const int consumer_row_base = consumer_tile * 16;
-            __nv_bfloat16* p_sw = &p_s[consumer_row_base * Bc];
-            const float alpha0 = alpha_s[consumer_row_base + gid];
-            const float alpha1 = alpha_s[consumer_row_base + gid + 8];
+            const int output_tile = consumer_warp * PVNtPerWarp;
+            const float alpha0 = alpha_s[gid];
+            const float alpha1 = alpha_s[gid + 8];
 #pragma unroll
             for (int n = 0; n < PVNtPerWarp; ++n) {
                 warp_state.accumulator[n][0] *= alpha0;
@@ -496,7 +505,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
             }
 #pragma unroll
             for (int n = 0; n < PVNtPerWarp; ++n) {
-                const int global_n = consumer_slice * PVNtPerWarp + n;
+                const int global_n = output_tile + n;
                 if (global_n >= PVNt) { continue; }
 #pragma unroll
                 for (int k = 0; k < PVKs; ++k) {
@@ -505,7 +514,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
                     ldmatrix_x4(
                         probability_fragment[0], probability_fragment[1],
                         probability_fragment[2], probability_fragment[3],
-                        smem_addr(&p_sw[a_rowoff * Bc +
+                        smem_addr(&p_s[a_rowoff * Bc +
                                         gqa_small_t_tc_swz32(a_rowoff, probability_col)]));
                     unsigned value_fragment[2];
                     const int value_row = k * 16 + b_koff + b_rin;
@@ -524,8 +533,8 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
         __syncthreads();
     }
 
-    if (warp < ProducerWarps && lid == 0) {
-        const int row0 = producer_row_base + gid;
+    if (warp == 0 && lid == 0) {
+        const int row0 = gid;
         const int row1 = row0 + 8;
         if (row0 < row_count) {
             const int q_head = kv_head * Geometry::GroupSize + row0;
@@ -540,16 +549,13 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
     }
     if (warp >= ProducerWarps) {
         const int consumer_warp = warp - ProducerWarps;
-        const int consumer_tile = consumer_warp % RowTiles;
-        const int consumer_slice = consumer_warp / RowTiles;
-        const int consumer_row_base = consumer_tile * 16;
 #pragma unroll
         for (int n = 0; n < PVNtPerWarp; ++n) {
-            const int global_n = consumer_slice * PVNtPerWarp + n;
+            const int global_n = consumer_warp * PVNtPerWarp + n;
             if (global_n >= PVNt) { continue; }
             const int d0 = global_n * 8 + 2 * lid;
             const int d1 = d0 + 1;
-            const int row0 = consumer_row_base + gid;
+            const int row0 = gid;
             const int row1 = row0 + 8;
             if (row0 < row_count) {
                 qkv_s[row0 * D + d0] = __float2bfloat16(warp_state.accumulator[n][0]);
@@ -608,7 +614,7 @@ __launch_bounds__(D) __global__ void reduce_output_hadamard_kernel(
         partial_l += stat_offset;
     }
     const int active_splits =
-        gqa_small_t_active_splits<Geometry, false>(query_position + 1, split_count, tokens);
+        kvarn_decode_active_splits<Geometry>(query_position + 1, split_count, tokens);
 
     __shared__ float stage[2][D];
     float local_m = -CUDART_INF_F;
