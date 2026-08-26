@@ -572,7 +572,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
     }
 }
 
-template <typename Geometry, bool MultiBatch, bool Masked>
+template <typename Geometry, bool MultiBatch, bool Masked, bool PerTokenSplits>
 __launch_bounds__(D) __global__ void reduce_output_hadamard_kernel(
     const __nv_bfloat16* partial_acc, const float* partial_m, const float* partial_l,
     const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
@@ -594,7 +594,7 @@ __launch_bounds__(D) __global__ void reduce_output_hadamard_kernel(
 
     positions += column_begin;
     if constexpr (MultiBatch) { positions += batch * full_width; }
-    const int last_position = positions[tokens - 1];
+    const int query_position = positions[PerTokenSplits ? token : tokens - 1];
     int output_column = column_begin + token;
     if constexpr (MultiBatch) { output_column += batch * full_width; }
 
@@ -608,7 +608,7 @@ __launch_bounds__(D) __global__ void reduce_output_hadamard_kernel(
         partial_l += stat_offset;
     }
     const int active_splits =
-        gqa_small_t_active_splits<Geometry, false>(last_position + 1, split_count, tokens);
+        gqa_small_t_active_splits<Geometry, false>(query_position + 1, split_count, tokens);
 
     __shared__ float stage[2][D];
     float local_m = -CUDART_INF_F;

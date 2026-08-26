@@ -432,23 +432,75 @@ struct CacheFixture {
     }
 };
 
+template <int Heads>
+struct BatchCacheFixture {
+    static constexpr int kHeads = Heads;
+    static constexpr int kRows = 2;
+    static constexpr int kLogicalPages = 6;
+    static constexpr int kPhysicalPages = kRows * kLogicalPages;
+    DeviceBuffer records{static_cast<std::size_t>(ops::kKvarnRecordBytes) * kHeads *
+                         kPhysicalPages};
+    DeviceBuffer tail_k{static_cast<std::size_t>(kD) * kGroup * kHeads *
+                        ops::kKvarnTailSlots * kRows * sizeof(std::uint16_t)};
+    DeviceBuffer tail_v{static_cast<std::size_t>(kD) * kGroup * kHeads *
+                        ops::kKvarnTailSlots * kRows * sizeof(std::uint16_t)};
+    DeviceBuffer markers{ops::kKvarnTailSlots * kRows * sizeof(std::int32_t)};
+    DeviceBuffer block_tables{kLogicalPages * kRows * sizeof(std::int32_t)};
+    std::vector<std::int32_t> host_block_tables;
+
+    BatchCacheFixture() : host_block_tables(kPhysicalPages) {
+        records.fill();
+        tail_k.fill();
+        tail_v.fill();
+        markers.copy_from_host(
+            std::vector<std::int32_t>(ops::kKvarnTailSlots * kRows, -1).data(), markers.bytes);
+        for (int physical = 0; physical < kPhysicalPages; ++physical) {
+            host_block_tables[physical] = physical;
+        }
+        block_tables.copy_from_host(host_block_tables.data(), block_tables.bytes);
+    }
+
+    ops::KvarnPagedBatchLayerView view() {
+        return {
+            .records = Tensor(records.p, DType::U8,
+                              {ops::kKvarnRecordBytes / kGroup, kGroup, kHeads, kPhysicalPages}),
+            .tail_k = Tensor(tail_k.p, DType::BF16,
+                             {kD, kGroup, kHeads * ops::kKvarnTailSlots, kRows}),
+            .tail_v = Tensor(tail_v.p, DType::BF16,
+                             {kD, kGroup, kHeads * ops::kKvarnTailSlots, kRows}),
+            .tail_logical_pages =
+                Tensor(markers.p, DType::I32, {ops::kKvarnTailSlots, kRows}),
+            .block_tables = Tensor(block_tables.p, DType::I32, {kLogicalPages, kRows}),
+            .num_kv_heads = kHeads,
+        };
+    }
+};
+
 float decode_cache_value(const std::vector<std::uint8_t>& records,
-                          const std::vector<std::uint16_t>& tail,
-                          const std::vector<std::int32_t>& markers, bool key, int position, int head,
-                          int heads, int d) {
+                           const std::vector<std::uint16_t>& tail,
+                           const std::vector<std::int32_t>& markers, bool key, int position, int head,
+                           int heads, int d, int table_row = 0, int logical_pages = 4,
+                           const std::vector<std::int32_t>* block_tables = nullptr) {
     const int page = position / kGroup;
     const int token = position % kGroup;
     for (int slot = 0; slot < ops::kKvarnTailSlots; ++slot) {
-        if (markers[slot] == page) {
-            return bf16_to_f32(
-                tail[static_cast<std::size_t>(d) + static_cast<std::size_t>(kD) *
-                                                        (token + kGroup *
-                                                                      (head + heads * slot))]);
+        if (markers[slot + ops::kKvarnTailSlots * table_row] == page) {
+            const std::size_t tail_index =
+                static_cast<std::size_t>(d) + static_cast<std::size_t>(kD) *
+                                                  (token + kGroup *
+                                                               (head + heads *
+                                                                           (slot +
+                                                                            ops::kKvarnTailSlots *
+                                                                                table_row)));
+            return bf16_to_f32(tail[tail_index]);
         }
     }
+    const int physical = block_tables == nullptr
+                             ? page
+                             : (*block_tables)[page + logical_pages * table_row];
     const std::uint8_t* record = records.data() +
-                                  (static_cast<std::size_t>(page) * heads + head) *
-                                      ops::kKvarnRecordBytes;
+                                 (static_cast<std::size_t>(physical) * heads + head) *
+                                     ops::kKvarnRecordBytes;
     if (key) {
         const std::uint8_t packed =
             record[ops::kKvarnKPackedOffset + d * (kGroup / 2) + token / 2];
@@ -492,6 +544,25 @@ void append_cache(CacheFixture<Heads>& cache, const std::vector<float>& key,
     Tensor row_tensor(rows.p, DType::I32, {1});
     ops::kvarn_kv_append(key_tensor, value_tensor, position_tensor, Tensor{}, row_tensor,
                          cache.view(), provisional, nullptr);
+    cuda_synchronize();
+}
+
+template <int Heads>
+void append_cache_row(BatchCacheFixture<Heads>& cache, const std::vector<float>& key,
+                      const std::vector<float>& value, int first_position, int table_row) {
+    const int width = static_cast<int>(key.size() / (kD * Heads));
+    std::vector<std::int32_t> host_positions(width);
+    for (int index = 0; index < width; ++index) host_positions[index] = first_position + index;
+    DeviceBuffer device_key = to_device_bf16(key);
+    DeviceBuffer device_value = to_device_bf16(value);
+    DeviceBuffer positions = to_device(host_positions);
+    DeviceBuffer rows = to_device(std::vector<std::int32_t>{table_row});
+    Tensor key_tensor(device_key.p, DType::BF16, {kD, Heads, width, 1});
+    Tensor value_tensor(device_value.p, DType::BF16, {kD, Heads, width, 1});
+    Tensor position_tensor(positions.p, DType::I32, {width, 1});
+    Tensor rows_tensor(rows.p, DType::I32, {1});
+    ops::kvarn_kv_append(key_tensor, value_tensor, position_tensor, Tensor{}, rows_tensor,
+                         cache.view(), false, nullptr);
     cuda_synchronize();
 }
 
@@ -624,6 +695,192 @@ int run_cached_attention_case(CacheFixture<Heads>& cache, int query_heads, int f
     return failures;
 }
 
+template <int Heads>
+int run_batched_attention_case(int query_heads, const char* label) {
+    constexpr int Batch = 2;
+    constexpr int Width = 6;
+    constexpr int GuardBytes = 4096;
+    const std::int32_t row_first[Batch] = {253, 70};
+    const std::int32_t table_rows[Batch] = {1, 0};
+
+    BatchCacheFixture<Heads> cache;
+    append_cache_row(cache, make_cache_values(row_first[0] + Width, 0x8101U + Heads, Heads),
+                     make_cache_values(row_first[0] + Width, 0x8201U + Heads, Heads), 0, 0);
+    append_cache_row(cache, make_cache_values(row_first[1] + Width, 0x9101U + Heads, Heads),
+                     make_cache_values(row_first[1] + Width, 0x9201U + Heads, Heads), 0, 1);
+    BatchCacheFixture<Heads> graph_cache;
+    append_cache_row(graph_cache,
+                     make_cache_values(row_first[0] + Width, 0x8101U + Heads, Heads),
+                     make_cache_values(row_first[0] + Width, 0x8201U + Heads, Heads), 0, 0);
+    append_cache_row(graph_cache,
+                     make_cache_values(row_first[1] + Width, 0x9101U + Heads, Heads),
+                     make_cache_values(row_first[1] + Width, 0x9201U + Heads, Heads), 0, 1);
+
+    std::vector<float> query =
+        make_cache_values(query_heads * Width * Batch, 0xa001U + query_heads);
+    DeviceBuffer device_query = to_device_bf16(query);
+    DeviceBuffer original_query = to_device_bf16(query);
+    DeviceBuffer output(query.size() * sizeof(std::uint16_t));
+    std::vector<std::int32_t> host_positions(Width * Batch);
+    for (int batch = 0; batch < Batch; ++batch) {
+        for (int column = 0; column < Width; ++column) {
+            host_positions[column + Width * batch] = row_first[table_rows[batch]] + column;
+        }
+    }
+    DeviceBuffer positions = to_device(host_positions);
+    DeviceBuffer rows = to_device(std::vector<std::int32_t>{table_rows[0], table_rows[1]});
+    Tensor query_tensor(device_query.p, DType::BF16, {kD, query_heads, Width, Batch});
+    Tensor output_tensor(output.p, DType::BF16, {kD, query_heads, Width, Batch});
+    Tensor positions_tensor(positions.p, DType::I32, {Width, Batch});
+    Tensor rows_tensor(rows.p, DType::I32, {Batch});
+    const ops::GqaExecutionEnvelope envelope{1, 512};
+    const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+        query_heads, DType::BF16, envelope, Batch, Width, Width);
+    DeviceBuffer workspace_storage(workspace_bytes + 2 * GuardBytes);
+    workspace_storage.fill(0xa5);
+    auto* workspace_base = static_cast<std::uint8_t*>(workspace_storage.p) + GuardBytes;
+    cuda_check(cudaMemset(workspace_base, 0x41, workspace_bytes),
+               "poison B=2 KVarN workspace");
+    WorkspaceArena workspace(DeviceSpan{workspace_base, workspace_bytes});
+
+    ops::kvarn_attention_cached(query_tensor, positions_tensor, rows_tensor, 0.0625F, cache.view(),
+                                envelope, workspace, output_tensor, nullptr);
+    cuda_synchronize();
+
+    std::vector<std::uint16_t> rotated_query(query.size());
+    for (int batch = 0; batch < Batch; ++batch) {
+        for (int column = 0; column < Width; ++column) {
+            for (int head = 0; head < query_heads; ++head) {
+                for (int row = 0; row < kD; ++row) {
+                    double sum = 0.0;
+                    for (int col = 0; col < kD; ++col) {
+                        const bool negative =
+                            (__builtin_popcount(static_cast<unsigned>(row & col)) & 1) != 0;
+                        const std::size_t index =
+                            static_cast<std::size_t>(col) + static_cast<std::size_t>(kD) *
+                                                                 (head + query_heads *
+                                                                             (column +
+                                                                              Width * batch));
+                        sum += (negative ? -1.0 : 1.0) * query[index];
+                    }
+                    const std::size_t index =
+                        static_cast<std::size_t>(row) + static_cast<std::size_t>(kD) *
+                                                             (head + query_heads *
+                                                                         (column + Width * batch));
+                    rotated_query[index] = f32_to_bf16(static_cast<float>(sum / 16.0));
+                }
+            }
+        }
+    }
+
+    const auto record_values = from_device<std::uint8_t>(cache.records, cache.records.bytes);
+    const auto tail_key = from_device<std::uint16_t>(cache.tail_k, cache.tail_k.bytes / 2);
+    const auto tail_value = from_device<std::uint16_t>(cache.tail_v, cache.tail_v.bytes / 2);
+    const auto marker_values =
+        from_device<std::int32_t>(cache.markers, ops::kKvarnTailSlots * Batch);
+    std::vector<double> expected(query.size());
+    for (int batch = 0; batch < Batch; ++batch) {
+        for (int column = 0; column < Width; ++column) {
+            const int visible = host_positions[column + Width * batch] + 1;
+            for (int head = 0; head < query_heads; ++head) {
+                std::vector<double> scores(visible);
+                double maximum = -std::numeric_limits<double>::infinity();
+                for (int position = 0; position < visible; ++position) {
+                    double dot = 0.0;
+                    for (int d = 0; d < kD; ++d) {
+                        const std::size_t query_index =
+                            static_cast<std::size_t>(d) + static_cast<std::size_t>(kD) *
+                                                               (head + query_heads *
+                                                                           (column +
+                                                                            Width * batch));
+                        dot += bf16_to_f32(rotated_query[query_index]) *
+                               decode_cache_value(
+                                   record_values, tail_key, marker_values, true, position,
+                                   head / (query_heads / Heads), Heads, d, table_rows[batch],
+                                   BatchCacheFixture<Heads>::kLogicalPages,
+                                   &cache.host_block_tables);
+                    }
+                    scores[position] = dot * 0.0625;
+                    maximum = std::max(maximum, scores[position]);
+                }
+                double denominator = 0.0;
+                std::vector<double> rotated(kD, 0.0);
+                for (int position = 0; position < visible; ++position) {
+                    const double probability = std::exp(scores[position] - maximum);
+                    denominator += probability;
+                    for (int d = 0; d < kD; ++d) {
+                        rotated[d] += probability * decode_cache_value(
+                                                            record_values, tail_value,
+                                                            marker_values, false, position,
+                                                            head / (query_heads / Heads), Heads, d,
+                                                            table_rows[batch],
+                                                            BatchCacheFixture<Heads>::kLogicalPages,
+                                                            &cache.host_block_tables);
+                    }
+                }
+                for (double& item : rotated) {
+                    item = bf16_to_f32(f32_to_bf16(static_cast<float>(item / denominator)));
+                }
+                for (int row = 0; row < kD; ++row) {
+                    double sum = 0.0;
+                    for (int col = 0; col < kD; ++col) {
+                        const bool negative =
+                            (__builtin_popcount(static_cast<unsigned>(row & col)) & 1) != 0;
+                        sum += (negative ? -1.0 : 1.0) * rotated[col];
+                    }
+                    const std::size_t output_index =
+                        static_cast<std::size_t>(row) + static_cast<std::size_t>(kD) *
+                                                             (head + query_heads *
+                                                                         (column + Width * batch));
+                    expected[output_index] =
+                        bf16_to_f32(f32_to_bf16(static_cast<float>(sum / 16.0)));
+                }
+            }
+        }
+    }
+
+    const auto check_canaries = [&]() {
+        std::vector<std::uint8_t> guards(2 * GuardBytes);
+        workspace_storage.copy_to_host(guards.data(), GuardBytes);
+        workspace_storage.copy_to_host(guards.data() + GuardBytes, GuardBytes,
+                                       GuardBytes + workspace_bytes);
+        if (std::all_of(guards.begin(), guards.end(),
+                        [](std::uint8_t value) { return value == 0xa5; })) {
+            return 0;
+        }
+        std::cerr << label << " workspace canary overwritten\n";
+        return 1;
+    };
+
+    int failures =
+        compare_profile(label, from_device_bf16(output, query.size()), expected, 8.0e-3);
+    failures += check_canaries();
+
+    cudaStream_t stream = nullptr;
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    cuda_check(cudaStreamCreate(&stream), "create B=2 KVarN graph stream");
+    cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+               "begin B=2 KVarN capture");
+    ops::kvarn_attention_cached(query_tensor, positions_tensor, rows_tensor, 0.0625F,
+                                graph_cache.view(), envelope, workspace, output_tensor, stream);
+    cuda_check(cudaStreamEndCapture(stream, &graph), "end B=2 KVarN capture");
+    cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
+               "instantiate B=2 KVarN graph");
+    cuda_check(cudaMemcpyAsync(device_query.p, original_query.p, original_query.bytes,
+                               cudaMemcpyDeviceToDevice, stream),
+               "restore B=2 KVarN graph query");
+    cuda_check(cudaGraphLaunch(executable, stream), "launch B=2 KVarN graph");
+    cuda_synchronize(stream);
+    failures += compare_profile((std::string(label) + " CUDA Graph").c_str(),
+                                from_device_bf16(output, query.size()), expected, 8.0e-3);
+    failures += check_canaries();
+    cudaGraphExecDestroy(executable);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+    return failures;
+}
+
 int run_cache_lifecycle_case() {
     CacheFixture<2> cache;
     append_cache(cache, make_cache_values(184, 0x1001U, 2),
@@ -703,6 +960,8 @@ int main() {
     failures += run_hadamard_case();
     failures += run_cache_lifecycle_case();
     failures += run_27b_attention_case();
+    failures += run_batched_attention_case<4>(24, "KVarN H24/KV4 B=2 attention");
+    failures += run_batched_attention_case<2>(16, "KVarN H16/KV2 B=2 attention");
     std::cout << (failures == 0 ? "OK" : "FAIL") << " kvarn correctness\n";
     return failures == 0 ? 0 : 1;
 }
