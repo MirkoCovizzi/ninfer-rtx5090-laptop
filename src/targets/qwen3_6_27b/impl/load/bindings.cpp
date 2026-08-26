@@ -42,6 +42,7 @@ NumericFormat endpoint_format(WeightsProfile weights_profile) {
     case WeightsProfile::Qwen38Nvfp4:
         return NumericFormat::FP8_E4M3FN_ROW_BF16S;
     case WeightsProfile::Qwen38Nvfp4LegacyW8:
+    case WeightsProfile::Qwen38Nvfp4Quasar:
         return NumericFormat::W8G32_F16S;
     }
     throw std::invalid_argument("qwen3_6_27b: invalid weights profile");
@@ -268,7 +269,7 @@ void bind_groupwise_text_layers(artifact::Binder& binder, BindingPlan& out) {
     }
 }
 
-void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out) {
+void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out, bool full_nvfp4) {
     for (std::size_t layer = 0; layer < kTextLayers; ++layer) {
         TextLayerPlan& target    = out.text_layers[layer];
         const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
@@ -277,7 +278,7 @@ void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out) {
         target.is_full_attention = is_full_layer(layer);
         if (target.is_full_attention) {
             WeightPlan input;
-            if (is_early_attention_input(layer)) {
+            if (!full_nvfp4 && is_early_attention_input(layer)) {
                 input = bind_weight(binder, prefix + "attention/query_key_gate_value",
                                     NumericFormat::BF16, {14336, 5120});
             } else {
@@ -291,7 +292,7 @@ void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out) {
                 binder, prefix + "attention/query_norm", NumericFormat::BF16, {256});
             target.attention.key_norm = artifact::bind_device_tensor(
                 binder, prefix + "attention/key_norm", NumericFormat::BF16, {256});
-            if (is_bf16_attention_output(layer)) {
+            if (!full_nvfp4 && is_bf16_attention_output(layer)) {
                 target.attention.output = bind_weight(binder, prefix + "attention/output",
                                                       NumericFormat::BF16, {5120, 6144});
             } else {
@@ -306,12 +307,19 @@ void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out) {
                                                                   NumericFormat::FP32, {48});
             target.gdn.convolution = artifact::bind_device_tensor(
                 binder, prefix + "gdn/convolution", NumericFormat::BF16, {4, 10240});
-            target.gdn.control_projection = SplitGdnControlProjectionPlan{
-                .a_projection = bind_weight(binder, prefix + "gdn/a_projection",
-                                            NumericFormat::BF16, {48, 5120}),
-                .b_projection = bind_weight(binder, prefix + "gdn/b_projection",
-                                            NumericFormat::BF16, {48, 5120}),
-            };
+            if (full_nvfp4) {
+                target.gdn.control_projection = FusedGdnControlProjectionPlan{
+                    .a_b_projection = bind_weight(binder, prefix + "gdn/a_b_projection",
+                                                  NumericFormat::BF16, {96, 5120}),
+                };
+            } else {
+                target.gdn.control_projection = SplitGdnControlProjectionPlan{
+                    .a_projection = bind_weight(binder, prefix + "gdn/a_projection",
+                                                NumericFormat::BF16, {48, 5120}),
+                    .b_projection = bind_weight(binder, prefix + "gdn/b_projection",
+                                                NumericFormat::BF16, {48, 5120}),
+                };
+            }
             target.gdn.input_projection = FusedGdnInputProjectionPlan{
                 .query_key_value_z =
                     bind_nvfp4_weight(binder, prefix + "gdn/query_key_value_z", 16384, 5120,
@@ -319,7 +327,7 @@ void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out) {
             };
             target.gdn.norm = artifact::bind_device_tensor(binder, prefix + "gdn/norm",
                                                            NumericFormat::BF16, {128});
-            if (is_bf16_gdn_output(layer)) {
+            if (!full_nvfp4 && is_bf16_gdn_output(layer)) {
                 target.gdn.output =
                     bind_weight(binder, prefix + "gdn/output", NumericFormat::BF16, {5120, 6144});
             } else {
@@ -428,13 +436,16 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
         bind_groupwise_text_layers(binder, out);
         break;
     case WeightsProfile::Qwen36Nvfp4:
-        bind_nvfp4_text_layers(binder, out);
+        bind_nvfp4_text_layers(binder, out, false);
         break;
     case WeightsProfile::Qwen38Nvfp4:
         bind_qwen38_nvfp4_text_layers(binder, out);
         break;
     case WeightsProfile::Qwen38Nvfp4LegacyW8:
-        bind_nvfp4_text_layers(binder, out);
+        bind_nvfp4_text_layers(binder, out, false);
+        break;
+    case WeightsProfile::Qwen38Nvfp4Quasar:
+        bind_nvfp4_text_layers(binder, out, true);
         break;
     default:
         throw std::invalid_argument("qwen3_6_27b: invalid weights profile");

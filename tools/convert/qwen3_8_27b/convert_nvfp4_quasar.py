@@ -1,12 +1,4 @@
-"""Build the registered Qwen3.8-27B NVFP4 artifact from its two source roles.
-
-Canonical invocation::
-
-    python3 -m tools.convert.qwen3_8_27b.convert_nvfp4 \
-      --model /path/to/Qwen3.8-27B/base-hf-bf16 \
-      --quantized-model /path/to/Qwen3.8-27B/vllm-nvfp4-fp8 \
-      --out out/qwen3_8_27b_nvfp4.ninfer
-"""
+"""Build the registered Qwen3.8-27B NVFP4 artifact from a QUASAR source."""
 
 from __future__ import annotations
 
@@ -24,11 +16,7 @@ from tools.artifact.container import (
     ArtifactObject,
     ArtifactWriter,
 )
-from tools.artifact.layouts import (
-    encode_direct,
-    encode_fp8_row_scaled,
-    encode_nvfp4,
-)
+from tools.artifact.layouts import encode_direct, encode_nvfp4
 from tools.convert.common.quantize import pick_device
 from tools.convert.common.safetensors import ShardReader
 from tools.convert.qwen3_6.common import conversion as family_conversion
@@ -37,21 +25,22 @@ from tools.convert.qwen3_6_27b import convert as family_config
 from tools.convert.qwen3_6_27b import draft_head
 
 from . import convert as base_convert
-from . import fp8_embedding
-from . import inventory_nvfp4 as inventory
-from . import recipe_nvfp4 as recipe
+from . import convert_nvfp4 as mixed_converter
+from . import inventory_nvfp4_quasar as inventory
+from . import recipe_nvfp4_quasar as recipe
 
 
-RECIPE_ID = "qwen3_8_27b_nvfp4-v1"
+RECIPE_ID = "qwen3_8_27b_quasar_nvfp4-v2"
 OUTPUT_BASENAME = "qwen3_8_27b_nvfp4.ninfer"
 
-_FP8_TARGETS = [
-    r"re:.*self_attn\.(q|k|v|o)_proj$",
-    r"re:.*linear_attn\.(in_proj_qkv|in_proj_z|out_proj)$",
-    r"re:.*lm_head",
-    r"re:.*layers\.(56|57|58|59|60|61|62|63)\.mlp\.(gate|up|down)_proj$",
+_IGNORED_TARGETS = [
+    "lm_head",
+    "re:.*visual.*",
+    "re:.*mtp.*",
+    "re:.*embed_vision.*",
+    "re:.*embed_audio.*",
+    "re:.*vision_embedder.*",
 ]
-_NVFP4_TARGETS = [r"re:.*mlp\.(gate|up|down)_proj$"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,88 +59,19 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _validate_index(model_dir: Path) -> None:
-    index_path = model_dir / "model.safetensors.index.json"
-    value = family_conversion.load_json(index_path)
-    weight_map = value.get("weight_map")
-    if not isinstance(weight_map, dict) or not weight_map:
-        raise ValueError(f"{index_path}: weight_map must be a nonempty object")
-    if any(
-        not isinstance(name, str)
-        or not name
-        or not isinstance(shard, str)
-        or not shard
-        for name, shard in weight_map.items()
-    ):
-        raise ValueError(f"{index_path}: invalid weight_map entry")
-    referenced = set(weight_map.values())
-    actual = {path.name for path in model_dir.glob("*.safetensors")}
-    if actual != referenced:
-        raise ValueError(
-            f"{model_dir}: safetensors shard set does not match the index"
-        )
-    for shard in sorted(referenced):
-        path = model_dir / shard
-        if not path.is_file() or path.stat().st_size == 0:
-            raise ValueError(f"{path}: indexed shard is missing or empty")
-
-
-def _validate_float_group(group: Mapping[str, object]) -> None:
-    family_conversion.check_members(
-        "quantization_config.config_groups.group_0",
-        group,
-        {"format": "float-quantized", "targets": _FP8_TARGETS},
-    )
-    weights = group.get("weights")
-    activations = group.get("input_activations")
-    if not isinstance(weights, Mapping) or not isinstance(activations, Mapping):
-        raise ValueError("FP8 config is missing weight or activation settings")
-    common = {
-        "num_bits": 8,
-        "type": "float",
-        "group_size": None,
-        "symmetric": True,
-        "scale_dtype": None,
-    }
-    family_conversion.check_members(
-        "quantization_config.config_groups.group_0.weights",
-        weights,
-        {**common, "strategy": "channel", "dynamic": False},
-    )
-    family_conversion.check_members(
-        "quantization_config.config_groups.group_0.input_activations",
-        activations,
-        {**common, "strategy": "token", "dynamic": True},
-    )
-
-
-def _validate_nvfp4_group(group: Mapping[str, object]) -> None:
-    family_conversion.check_members(
-        "quantization_config.config_groups.group_1",
-        group,
-        {"format": "nvfp4-pack-quantized", "targets": _NVFP4_TARGETS},
-    )
-    weights = group.get("weights")
-    activations = group.get("input_activations")
-    if not isinstance(weights, Mapping) or not isinstance(activations, Mapping):
-        raise ValueError("NVFP4 config is missing weight or activation settings")
-    common = {
-        "num_bits": 4,
-        "type": "float",
-        "strategy": "tensor_group",
-        "group_size": 16,
-        "symmetric": True,
-        "scale_dtype": "torch.float8_e4m3fn",
-    }
-    family_conversion.check_members(
-        "quantization_config.config_groups.group_1.weights",
-        weights,
-        {**common, "dynamic": False},
-    )
-    family_conversion.check_members(
-        "quantization_config.config_groups.group_1.input_activations",
-        activations,
-        {**common, "dynamic": "local"},
+def matches_config(config: Mapping[str, object]) -> bool:
+    quantization = config.get("quantization_config")
+    if not isinstance(quantization, Mapping):
+        return False
+    groups = quantization.get("config_groups")
+    if not isinstance(groups, Mapping) or tuple(groups) != ("group_0",):
+        return False
+    group = groups["group_0"]
+    return (
+        quantization.get("format") == "nvfp4-pack-quantized"
+        and isinstance(group, Mapping)
+        and group.get("format") == "nvfp4-pack-quantized"
+        and group.get("targets") == ["Linear"]
     )
 
 
@@ -161,32 +81,50 @@ def _validate_quantized_config(
     summary = family_config.validate_config(config)
     quantization = config.get("quantization_config")
     if not isinstance(quantization, Mapping):
-        raise ValueError("quantized config is missing quantization_config")
+        raise ValueError("QUASAR config is missing quantization_config")
     family_conversion.check_members(
         "quantization_config",
         quantization,
         {
             "quant_method": "compressed-tensors",
             "quantization_status": "compressed",
-            "format": "mixed-precision",
+            "format": "nvfp4-pack-quantized",
+            "ignore": _IGNORED_TARGETS,
         },
     )
     groups = quantization.get("config_groups")
-    if not isinstance(groups, Mapping) or tuple(groups) != (
-        "group_0",
-        "group_1",
-    ):
-        raise ValueError(
-            "quantized config must contain exactly group_0 then group_1"
-        )
-    float_group = groups["group_0"]
-    nvfp4_group = groups["group_1"]
-    if not isinstance(float_group, Mapping) or not isinstance(
-        nvfp4_group, Mapping
-    ):
-        raise ValueError("quantized config groups must be objects")
-    _validate_float_group(float_group)
-    _validate_nvfp4_group(nvfp4_group)
+    if not isinstance(groups, Mapping) or tuple(groups) != ("group_0",):
+        raise ValueError("QUASAR config must contain exactly config_groups.group_0")
+    group = groups["group_0"]
+    if not isinstance(group, Mapping):
+        raise ValueError("QUASAR config group_0 must be an object")
+    family_conversion.check_members(
+        "quantization_config.config_groups.group_0",
+        group,
+        {"format": "nvfp4-pack-quantized", "targets": ["Linear"]},
+    )
+    weights = group.get("weights")
+    activations = group.get("input_activations")
+    if not isinstance(weights, Mapping) or not isinstance(activations, Mapping):
+        raise ValueError("QUASAR config is missing weight or activation settings")
+    common = {
+        "num_bits": 4,
+        "type": "float",
+        "strategy": "tensor_group",
+        "group_size": 16,
+        "symmetric": True,
+        "scale_dtype": "torch.float8_e4m3fn",
+    }
+    family_conversion.check_members(
+        "quantization_config.config_groups.group_0.weights",
+        weights,
+        {**common, "dynamic": False},
+    )
+    family_conversion.check_members(
+        "quantization_config.config_groups.group_0.input_activations",
+        activations,
+        {**common, "dynamic": "local"},
+    )
     return summary
 
 
@@ -208,8 +146,8 @@ def preflight_conversion(
 ) -> ConversionPreflight:
     official = Path(official_dir)
     quantized = Path(quantized_dir)
-    _validate_index(official)
-    _validate_index(quantized)
+    mixed_converter._validate_index(official)
+    mixed_converter._validate_index(quantized)
 
     official_config = family_conversion.load_json(official / "config.json")
     if official_config.get("quantization_config") is not None:
@@ -219,13 +157,14 @@ def preflight_conversion(
         family_conversion.load_json(quantized / "config.json")
     )
     if official_summary != quantized_summary:
-        raise ValueError("official and quantized source model configs do not match")
+        raise ValueError("official and QUASAR source model configs do not match")
     preflight_inventory()
 
     with ShardReader(official) as official_reader:
         official_source = recipe.preflight_official_sources(official_reader)
     with ShardReader(quantized) as quantized_reader:
         quantized_source = recipe.preflight_quantized_metadata(quantized_reader)
+        recipe.validate_nvfp4_words(quantized_reader)
 
     resources = base_convert.load_resources(official)
     resource_map = {resource.name: resource.data for resource in resources}
@@ -244,15 +183,6 @@ def preflight_conversion(
     )
 
 
-def _encode_fp8_weight(
-    spec: inventory.TensorSpec,
-    reader: ShardReader,
-) -> bytes:
-    selected = recipe.FP8_WEIGHTS_BY_NAME[spec.name]
-    codes, scales = recipe.materialize_fp8_weight(selected, reader)
-    return encode_fp8_row_scaled(codes, scales, spec.shape)
-
-
 def _encode_nvfp4_weight(
     spec: inventory.TensorSpec,
     reader: ShardReader,
@@ -262,24 +192,10 @@ def _encode_nvfp4_weight(
     return encode_nvfp4(packed, scales, divisor, spec.shape)
 
 
-def _materialize_direct(
+def _checked_shape(
     spec: inventory.TensorSpec,
-    reader: ShardReader,
+    tensor: torch.Tensor,
 ) -> torch.Tensor:
-    tensor = recipe.materialize_quantized_direct(spec.name, reader)
-    if tuple(tensor.shape) != spec.shape:
-        raise ValueError(
-            f"{spec.name}: materialized shape {tuple(tensor.shape)} != {spec.shape}"
-        )
-    return tensor
-
-
-def _materialize_official(
-    spec: inventory.TensorSpec,
-    reader: ShardReader,
-    derived: Mapping[str, torch.Tensor],
-) -> torch.Tensor:
-    tensor = recipe.materialize_official(spec.name, reader, dict(derived))
     if tuple(tensor.shape) != spec.shape:
         raise ValueError(
             f"{spec.name}: materialized shape {tuple(tensor.shape)} != {spec.shape}"
@@ -339,23 +255,22 @@ def _build_report(
             "tensors": preflight.quantized_source.source_tensor_count,
             "shards": preflight.quantized_source.source_shard_count,
             "dtypes": dict(preflight.quantized_source.source_dtype_counts),
-            "source_fp8_matrices": len(recipe.FP8_SOURCES),
-            "source_nvfp4_matrices": len(recipe.NVFP4_SOURCES),
+            "source_nvfp4_matrices": len(recipe.ALL_NVFP4_SOURCES),
+            "preserved_nvfp4_matrices": len(recipe.NVFP4_SOURCES),
+            "bf16_control_matrices": len(recipe.CONTROL_SOURCES),
         },
     }
-    report["embedding_encoder"] = fp8_embedding.ENCODER_PROFILE
+    report["source_profile"] = "quasar-all-linear-nvfp4"
     return report
 
 
-def _convert_mixed(
+def convert(
     official_dir: str | Path,
     quantized_dir: str | Path,
     out_path: str | Path,
     *,
     device: str | torch.device = "cuda",
 ) -> Path:
-    """Run the closed dual-source conversion and return its report path."""
-
     started = time.perf_counter()
     output = Path(out_path)
     if output.name != OUTPUT_BASENAME:
@@ -368,8 +283,8 @@ def _convert_mixed(
 
     print(
         f"preflight complete: {len(preflight.object_plan.objects)} objects, "
-        f"{len(recipe.FP8_SOURCES)} FP8 and "
-        f"{len(recipe.NVFP4_SOURCES)} NVFP4 source matrices, "
+        f"{len(recipe.NVFP4_SOURCES)} preserved NVFP4 and "
+        f"{len(recipe.CONTROL_SOURCES)} BF16 control source matrices, "
         f"device={resolved_device}",
         flush=True,
     )
@@ -386,36 +301,53 @@ def _convert_mixed(
             preflight.object_plan.specs,
         ) as writer:
             if writer.objects != preflight.object_plan.objects:
-                raise RuntimeError(
-                    "writer object plan differs from completed preflight"
-                )
+                raise RuntimeError("writer object plan differs from completed preflight")
             for index, spec in enumerate(inventory.OBJECT_SPECS, start=1):
                 payload: bytes | Iterable[bytes]
                 if isinstance(spec, inventory.ResourceSpec):
                     payload = resources[spec.name]
-                elif spec.name == "text/token_embedding":
-                    payload = fp8_embedding.iter_reader_payload(
-                        official_reader,
-                        recipe.OFFICIAL_EMBEDDING_SOURCE.name,
-                        spec.shape,
-                    )
-                elif spec.name in recipe.FP8_WEIGHTS_BY_NAME:
-                    payload = _encode_fp8_weight(spec, quantized_reader)
                 elif spec.name in recipe.NVFP4_WEIGHTS_BY_NAME:
                     payload = _encode_nvfp4_weight(spec, quantized_reader)
                 elif spec.name in recipe.INPUT_DIVISORS_BY_NAME:
                     scalar = recipe.materialize_input_divisor(
-                        recipe.INPUT_DIVISORS_BY_NAME[spec.name],
-                        quantized_reader,
+                        recipe.INPUT_DIVISORS_BY_NAME[spec.name], quantized_reader
                     )
                     payload = encode_direct(scalar, inventory.FP32)
+                elif spec.name in recipe.CONTROLS_BY_NAME:
+                    tensor = _checked_shape(
+                        spec,
+                        recipe.materialize_control(
+                            recipe.CONTROLS_BY_NAME[spec.name], quantized_reader
+                        ),
+                    )
+                    payload = encode_direct(tensor, inventory.BF16)
+                    del tensor
                 elif spec.name in recipe.QUANTIZED_DIRECT_BY_NAME:
-                    tensor = _materialize_direct(spec, quantized_reader)
+                    tensor = _checked_shape(
+                        spec,
+                        recipe.materialize_quantized_direct(
+                            spec.name, quantized_reader
+                        ),
+                    )
                     payload = encode_direct(tensor, spec.format)
                     del tensor
+                elif spec.name in recipe.QUANTIZED_MTP_BY_NAME:
+                    tensor = _checked_shape(
+                        spec,
+                        recipe.materialize_quantized_mtp(
+                            spec.name, quantized_reader
+                        ),
+                    )
+                    payload = family_conversion.encode_tensor_payload(
+                        tensor, spec, resolved_device
+                    )
+                    del tensor
                 else:
-                    tensor = _materialize_official(
-                        spec, official_reader, derived
+                    tensor = _checked_shape(
+                        spec,
+                        recipe.materialize_official(
+                            spec.name, official_reader, derived
+                        ),
                     )
                     payload = family_conversion.encode_tensor_payload(
                         tensor, spec, resolved_device
@@ -454,30 +386,6 @@ def _convert_mixed(
         flush=True,
     )
     return report_path
-
-
-def convert(
-    official_dir: str | Path,
-    quantized_dir: str | Path,
-    out_path: str | Path,
-    *,
-    device: str | torch.device = "cuda",
-) -> Path:
-    """Detect the registered quantized source profile and convert it."""
-
-    output = Path(out_path)
-    if output.name != OUTPUT_BASENAME:
-        raise ValueError(
-            f"NVFP4 converter output basename must be {OUTPUT_BASENAME!r}"
-        )
-    config = family_conversion.load_json(Path(quantized_dir) / "config.json")
-    from . import convert_nvfp4_quasar
-
-    if convert_nvfp4_quasar.matches_config(config):
-        return convert_nvfp4_quasar.convert(
-            official_dir, quantized_dir, out_path, device=device
-        )
-    return _convert_mixed(official_dir, quantized_dir, out_path, device=device)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
