@@ -1,6 +1,7 @@
 #include "ninfer/ops/kvarn.h"
 #include "ninfer/ops/kvarn_attention.h"
 #include "ops/op_tester.h"
+#include "ops/kvarn/config.cuh"
 
 #include <algorithm>
 #include <cmath>
@@ -8,7 +9,9 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <iterator>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <string>
 #include <vector>
@@ -380,10 +383,10 @@ std::vector<float> make_cache_values(int tokens, std::uint32_t seed, int heads =
     return values;
 }
 
-template <int Heads>
+template <int Heads, int Pages = 4>
 struct CacheFixture {
     static constexpr int kHeads = Heads;
-    static constexpr int kPages = 4;
+    static constexpr int kPages = Pages;
     DeviceBuffer records{static_cast<std::size_t>(ops::kKvarnRecordBytes) * kHeads * kPages};
     DeviceBuffer tail_k{static_cast<std::size_t>(kD) * kGroup * kHeads *
                         ops::kKvarnTailSlots * sizeof(std::uint16_t)};
@@ -398,7 +401,8 @@ struct CacheFixture {
         tail_v.fill();
         markers.copy_from_host(std::vector<std::int32_t>(ops::kKvarnTailSlots, -1).data(),
                                markers.bytes);
-        const std::vector<std::int32_t> table{0, 1, 2, 3};
+        std::vector<std::int32_t> table(kPages);
+        std::iota(table.begin(), table.end(), 0);
         block_tables.copy_from_host(table.data(), block_tables.bytes);
     }
 
@@ -528,8 +532,8 @@ float decode_cache_value(const std::vector<std::uint8_t>& records,
            f16_to_f32(channel_bits);
 }
 
-template <int Heads>
-void append_cache(CacheFixture<Heads>& cache, const std::vector<float>& key,
+template <int Heads, int Pages>
+void append_cache(CacheFixture<Heads, Pages>& cache, const std::vector<float>& key,
                    const std::vector<float>& value, int first_position, bool provisional) {
     const int width = static_cast<int>(key.size() / (kD * Heads));
     std::vector<std::int32_t> positions(width);
@@ -566,8 +570,9 @@ void append_cache_row(BatchCacheFixture<Heads>& cache, const std::vector<float>&
     cuda_synchronize();
 }
 
-template <int Heads>
-int run_cached_attention_case(CacheFixture<Heads>& cache, int query_heads, int first_position,
+template <int Heads, int Pages>
+int run_cached_attention_case(CacheFixture<Heads, Pages>& cache, int query_heads,
+                              int first_position,
                               int width, const char* label) {
     std::vector<float> query = make_cache_values(query_heads * width, 0x4001U + query_heads);
     DeviceBuffer device_query = to_device_bf16(query);
@@ -692,6 +697,152 @@ int run_cached_attention_case(CacheFixture<Heads>& cache, int query_heads, int f
         cudaGraphDestroy(graph);
         cudaStreamDestroy(stream);
     }
+    return failures;
+}
+
+int run_prefill_slab_boundary_case() {
+    constexpr int Heads = 4;
+    constexpr int QueryHeads = 24;
+    constexpr int Width = 64;
+    constexpr int FirstPosition = ops::kvarn::PrefillSlabTokens;
+    constexpr int Context = FirstPosition + Width;
+    constexpr int Pages = (Context + kGroup - 1) / kGroup;
+    constexpr int SampleHeads[] = {0, QueryHeads - 1};
+
+    CacheFixture<Heads, Pages> cache;
+    append_cache(cache, make_cache_values(Context, 0x7101U, Heads),
+                 make_cache_values(Context, 0x7102U, Heads), 0, false);
+
+    const std::vector<float> query_vectors = make_cache_values(QueryHeads, 0x7201U);
+    std::vector<float> query(static_cast<std::size_t>(kD) * QueryHeads * Width);
+    for (int column = 0; column < Width; ++column) {
+        std::copy(query_vectors.begin(), query_vectors.end(),
+                  query.begin() + static_cast<std::size_t>(column) * kD * QueryHeads);
+    }
+    std::vector<std::int32_t> host_positions(Width);
+    std::iota(host_positions.begin(), host_positions.end(), FirstPosition);
+    DeviceBuffer device_query = to_device_bf16(query);
+    DeviceBuffer original_query = to_device_bf16(query);
+    DeviceBuffer output(query.size() * sizeof(std::uint16_t));
+    DeviceBuffer positions = to_device(host_positions);
+    DeviceBuffer rows = to_device(std::vector<std::int32_t>{0});
+    Tensor query_tensor(device_query.p, DType::BF16, {kD, QueryHeads, Width, 1});
+    Tensor output_tensor(output.p, DType::BF16, {kD, QueryHeads, Width, 1});
+    Tensor positions_tensor(positions.p, DType::I32, {Width, 1});
+    Tensor rows_tensor(rows.p, DType::I32, {1});
+    const ops::GqaExecutionEnvelope envelope{1, Context};
+    WorkspaceArena workspace(ops::kvarn_attention_workspace_capacity_bytes(
+        QueryHeads, envelope, 1, Width, Width));
+    ops::kvarn_attention_cached(query_tensor, positions_tensor, rows_tensor, 0.0625F, cache.view(),
+                                 envelope, workspace, output_tensor, nullptr);
+    cuda_synchronize();
+
+    const auto record_values = from_device<std::uint8_t>(cache.records, cache.records.bytes);
+    const auto tail_key = from_device<std::uint16_t>(cache.tail_k, cache.tail_k.bytes / 2);
+    const auto tail_value = from_device<std::uint16_t>(cache.tail_v, cache.tail_v.bytes / 2);
+    const auto marker_values = from_device<std::int32_t>(cache.markers, ops::kKvarnTailSlots);
+    std::vector<double> expected(static_cast<std::size_t>(std::size(SampleHeads)) * Width * kD);
+    for (int sample = 0; sample < static_cast<int>(std::size(SampleHeads)); ++sample) {
+        const int head = SampleHeads[sample];
+        const int kv_head = head / (QueryHeads / Heads);
+        std::vector<std::uint16_t> rotated_query(kD);
+        for (int row = 0; row < kD; ++row) {
+            double sum = 0.0;
+            for (int col = 0; col < kD; ++col) {
+                const bool negative =
+                    (__builtin_popcount(static_cast<unsigned>(row & col)) & 1) != 0;
+                sum += (negative ? -1.0 : 1.0) *
+                       query_vectors[static_cast<std::size_t>(col) +
+                                     static_cast<std::size_t>(kD) * head];
+            }
+            rotated_query[row] = f32_to_bf16(static_cast<float>(sum / 16.0));
+        }
+
+        double maximum = -std::numeric_limits<double>::infinity();
+        double denominator = 0.0;
+        std::vector<double> numerator(kD, 0.0);
+        for (int position = 0; position < Context; ++position) {
+            double dot = 0.0;
+            for (int d = 0; d < kD; ++d) {
+                dot += bf16_to_f32(rotated_query[d]) *
+                       decode_cache_value(record_values, tail_key, marker_values, true, position,
+                                          kv_head, Heads, d, 0, Pages);
+            }
+            const double score = dot * 0.0625;
+            const double previous_weight = score > maximum ? std::exp(maximum - score) : 1.0;
+            const double value_weight = score > maximum ? 1.0 : std::exp(score - maximum);
+            maximum = std::max(maximum, score);
+            denominator = denominator * previous_weight + value_weight;
+            for (int d = 0; d < kD; ++d) {
+                numerator[d] = numerator[d] * previous_weight +
+                               value_weight * decode_cache_value(
+                                                  record_values, tail_value, marker_values, false,
+                                                  position, kv_head, Heads, d, 0, Pages);
+            }
+            if (position < FirstPosition) { continue; }
+            std::vector<float> normalized(kD);
+            for (int d = 0; d < kD; ++d) {
+                normalized[d] = bf16_to_f32(
+                    f32_to_bf16(static_cast<float>(numerator[d] / denominator)));
+            }
+            const int column = position - FirstPosition;
+            for (int row = 0; row < kD; ++row) {
+                double sum = 0.0;
+                for (int col = 0; col < kD; ++col) {
+                    const bool negative =
+                        (__builtin_popcount(static_cast<unsigned>(row & col)) & 1) != 0;
+                    sum += (negative ? -1.0 : 1.0) * normalized[col];
+                }
+                const std::size_t index =
+                    static_cast<std::size_t>(row) +
+                    static_cast<std::size_t>(kD) * (sample + std::size(SampleHeads) * column);
+                expected[index] =
+                    bf16_to_f32(f32_to_bf16(static_cast<float>(sum / 16.0)));
+            }
+        }
+    }
+
+    const auto compare = [&](const char* label) {
+        const auto actual_full = from_device_bf16(output, query.size());
+        std::vector<double> actual(expected.size());
+        for (int column = 0; column < Width; ++column) {
+            for (int sample = 0; sample < static_cast<int>(std::size(SampleHeads)); ++sample) {
+                const int head = SampleHeads[sample];
+                for (int d = 0; d < kD; ++d) {
+                    const std::size_t selected =
+                        static_cast<std::size_t>(d) +
+                        static_cast<std::size_t>(kD) * (sample + std::size(SampleHeads) * column);
+                    const std::size_t full = static_cast<std::size_t>(d) +
+                                             static_cast<std::size_t>(kD) *
+                                                 (head + QueryHeads * column);
+                    actual[selected] = actual_full[full];
+                }
+            }
+        }
+        return compare_profile(label, actual, expected, 8.0e-3);
+    };
+    int failures = compare("KVarN slab-boundary attention");
+
+    cudaStream_t stream = nullptr;
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    cuda_check(cudaStreamCreate(&stream), "create slab-boundary graph stream");
+    cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+               "begin slab-boundary graph capture");
+    ops::kvarn_attention_cached(query_tensor, positions_tensor, rows_tensor, 0.0625F, cache.view(),
+                                 envelope, workspace, output_tensor, stream);
+    cuda_check(cudaStreamEndCapture(stream, &graph), "end slab-boundary graph capture");
+    cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
+               "instantiate slab-boundary graph");
+    cuda_check(cudaMemcpyAsync(device_query.p, original_query.p, original_query.bytes,
+                               cudaMemcpyDeviceToDevice, stream),
+               "restore slab-boundary graph query");
+    cuda_check(cudaGraphLaunch(executable, stream), "launch slab-boundary graph");
+    cuda_synchronize(stream);
+    failures += compare("KVarN slab-boundary CUDA Graph attention");
+    cudaGraphExecDestroy(executable);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
     return failures;
 }
 
@@ -968,6 +1119,7 @@ int main() {
     failures += run_cache_lifecycle_case();
     failures += run_27b_attention_case();
     failures += run_35b_attention_case();
+    failures += run_prefill_slab_boundary_case();
     failures += run_batched_attention_case<4>(24, "KVarN H24/KV4 B=2 attention");
     failures += run_batched_attention_case<2>(16, "KVarN H16/KV2 B=2 attention");
     std::cout << (failures == 0 ? "OK" : "FAIL") << " kvarn correctness\n";

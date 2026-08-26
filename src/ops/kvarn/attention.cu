@@ -6,6 +6,7 @@
 // and bounded lane/table-row ownership.
 
 #include "core/device.h"
+#include "ops/kvarn/config.cuh"
 #include "ops/kvarn/decode.cuh"
 #include "ops/kvarn/store.cuh"
 
@@ -387,11 +388,15 @@ std::size_t kvarn_attention_workspace_capacity_bytes(std::int32_t query_heads,
         throw std::invalid_argument("KVarN workspace: unsupported query-head geometry");
     }
     const std::int32_t kv_heads = query_heads == 24 ? 4 : 2;
+    const std::size_t slab_tokens =
+        std::min<std::size_t>(envelope.max_visible_keys, kvarn::PrefillSlabTokens);
     const std::size_t materialized = 2 * static_cast<std::size_t>(kKvarnHeadDim) *
-                                         envelope.max_visible_keys * kv_heads *
-                                         dtype_size(DType::BF16) +
-                                     2 * 256;
-    return std::max(decode, materialized);
+                                     slab_tokens * kv_heads * dtype_size(DType::BF16);
+    const std::size_t rows = static_cast<std::size_t>(query_heads) * max_width;
+    const std::size_t running = static_cast<std::size_t>(kKvarnHeadDim) * rows *
+                                    dtype_size(DType::FP32) +
+                                2 * rows * dtype_size(DType::FP32);
+    return std::max(decode, materialized + running + 5 * 256);
 }
 
 void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& positions,

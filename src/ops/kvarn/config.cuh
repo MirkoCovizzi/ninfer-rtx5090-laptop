@@ -10,6 +10,7 @@ inline constexpr int Group      = 64;
 inline constexpr int KBits      = 4;
 inline constexpr int VBits      = 2;
 inline constexpr int Iterations = 8;
+inline constexpr int PrefillSlabTokens = 16384;
 
 inline constexpr float StdMin = 1.0e-3F;
 inline constexpr float StdMax = 1.0e3F;
