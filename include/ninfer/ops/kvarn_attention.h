@@ -7,7 +7,14 @@
 
 #include <cuda_runtime_api.h>
 
+#include <cstddef>
+#include <cstdint>
+
 namespace ninfer::ops {
+
+[[nodiscard]] std::size_t kvarn_attention_workspace_capacity_bytes(
+    std::int32_t query_heads, GqaExecutionEnvelope envelope, std::int32_t batch_size,
+    std::int32_t min_width, std::int32_t max_width);
 
 // Appends and attends in the orthonormal KVarN frame. Committed calls encode every newly complete
 // non-sink page; provisional calls retain all touched pages in BF16 until kvarn_commit_pages.

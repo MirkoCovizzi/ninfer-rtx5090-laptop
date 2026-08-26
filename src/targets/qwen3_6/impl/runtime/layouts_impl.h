@@ -8,6 +8,7 @@
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/kvarn_attention.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/sampling.h"
@@ -254,10 +255,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                        std::int32_t batch_size, std::int32_t min_width,
                                        std::int32_t max_width) {
         if (plan.kv_storage == KvCacheStorage::KvarnK4V2Group64) {
-            const std::int32_t chunk_width = std::min(max_width, 6);
-            return ops::gqa_attention_workspace_capacity_bytes(
-                TextConfig::query_heads, DType::BF16, envelope, batch_size, chunk_width,
-                chunk_width);
+            return ops::kvarn_attention_workspace_capacity_bytes(
+                TextConfig::query_heads, envelope, batch_size, min_width, max_width);
         }
         return ops::gqa_attention_workspace_capacity_bytes(
             TextConfig::query_heads, plan.kv_dtype, envelope, batch_size, min_width, max_width);

@@ -12,6 +12,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -371,6 +372,27 @@ void validate_inputs(const Tensor& query, const Tensor* key, const Tensor* value
 }
 
 } // namespace
+
+std::size_t kvarn_attention_workspace_capacity_bytes(std::int32_t query_heads,
+                                                     GqaExecutionEnvelope envelope,
+                                                     std::int32_t batch_size,
+                                                     std::int32_t min_width,
+                                                     std::int32_t max_width) {
+    const std::int32_t decode_width = std::min(max_width, 6);
+    const std::size_t decode = gqa_attention_workspace_capacity_bytes(
+        query_heads, DType::BF16, envelope, batch_size, std::min(min_width, decode_width),
+        decode_width);
+    if (batch_size != 1 || max_width < kKvarnGroup) { return decode; }
+    if (query_heads != 24 && query_heads != 16) {
+        throw std::invalid_argument("KVarN workspace: unsupported query-head geometry");
+    }
+    const std::int32_t kv_heads = query_heads == 24 ? 4 : 2;
+    const std::size_t materialized = 2 * static_cast<std::size_t>(kKvarnHeadDim) *
+                                         envelope.max_visible_keys * kv_heads *
+                                         dtype_size(DType::BF16) +
+                                     2 * 256;
+    return std::max(decode, materialized);
+}
 
 void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& positions,
                      const Tensor& valid_columns, const Tensor& kv_table_rows, float scale,

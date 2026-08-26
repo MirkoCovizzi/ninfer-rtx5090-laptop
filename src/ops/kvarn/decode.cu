@@ -2,9 +2,10 @@
 
 #include "core/device.h"
 #include "ops/kernel/gqa_attention_decode.cuh"
+#include "ops/kernel/gqa_attention_prefill_bf16.cuh"
 #include "ops/kvarn/config.cuh"
 #include "ops/kvarn/decode_kernel.cuh"
-#include "ops/kvarn/prefill_kernel.cuh"
+#include "ops/kvarn/materialized_prefill.cuh"
 #include "ops/launcher/gqa_attention.h"
 
 #include <cuda_bf16.h>
@@ -21,7 +22,8 @@ constexpr int kDecodeSplitsPerScale = 82;
 template <typename Geometry, bool Masked>
 void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& valid_columns,
                     const Tensor& table_rows, float scale, KvarnPagedBatchLayerView cache,
-                    Tensor& output, cudaStream_t stream) {
+                    GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& output,
+                    cudaStream_t stream) {
     using Metadata = GqaPrefillBatchMetadata<Masked>;
     const Metadata metadata{
         .tables = static_cast<const std::int32_t*>(cache.block_tables.data),
@@ -35,20 +37,40 @@ void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& 
         static_cast<const __nv_bfloat16*>(cache.tail_k.data),
         static_cast<const __nv_bfloat16*>(cache.tail_v.data),
         static_cast<const std::int32_t*>(cache.tail_logical_pages.data),
+        static_cast<const std::int32_t*>(cache.block_tables.data),
         static_cast<const std::int32_t*>(table_rows.data),
+        cache.block_tables.ne[0],
         cache.num_kv_heads,
     };
+    using Input = detail::MaterializedPrefillInput;
     static const cudaError_t attribute = cudaFuncSetAttribute(
-        detail::attention_prefill_kernel<Geometry, Metadata>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, detail::kPrefillSmemBytes);
+        gqa_attention_prefill_bf16_kernel<Geometry, Metadata, Input>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillSmemBytes);
     CUDA_CHECK(attribute);
     const int width = query.ne[2];
-    const dim3 grid(div_up(width, detail::kPrefillBr), Geometry::QHeads, 1);
-    detail::attention_prefill_kernel<Geometry, Metadata>
-        <<<grid, detail::kPrefillThreads, detail::kPrefillSmemBytes, stream>>>(
-            static_cast<const __nv_bfloat16*>(query.data), input, metadata,
+    const int capacity = static_cast<int>(envelope.max_visible_keys);
+    auto scope = workspace.scope();
+    Tensor materialized_k = workspace.alloc(DType::BF16, {D, capacity, Geometry::KVHeads});
+    Tensor materialized_v = workspace.alloc(DType::BF16, {D, capacity, Geometry::KVHeads});
+    Tensor rotated_query = query;
+    kvarn_hadamard(query, rotated_query, stream);
+    const dim3 materialize_grid(div_up(capacity, Group), Geometry::KVHeads, 1);
+    detail::materialize_prefill_head_kernel<Metadata><<<materialize_grid, D, 0, stream>>>(
+        input, metadata, static_cast<const std::int32_t*>(positions.data), width, capacity,
+        static_cast<__nv_bfloat16*>(materialized_k.data),
+        static_cast<__nv_bfloat16*>(materialized_v.data));
+    const Input materialized{
+        static_cast<const __nv_bfloat16*>(materialized_k.data),
+        static_cast<const __nv_bfloat16*>(materialized_v.data),
+        capacity,
+    };
+    const dim3 attention_grid(div_up(width, kGqaPrefillBr), Geometry::QHeads, 1);
+    gqa_attention_prefill_bf16_kernel<Geometry, Metadata, Input>
+        <<<attention_grid, kGqaPrefillThreads, kGqaPrefillSmemBytes, stream>>>(
+            static_cast<const __nv_bfloat16*>(rotated_query.data), materialized, metadata,
             static_cast<const std::int32_t*>(positions.data), scale,
             static_cast<__nv_bfloat16*>(output.data), width);
+    kvarn_hadamard(output, output, stream);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -107,17 +129,19 @@ void decode_attention(const Tensor& query, const Tensor& positions,
         if (query.ne[1] == Gqa27Geometry::QHeads) {
             if (masked) {
                 launch_prefill<Gqa27Geometry, true>(query, positions, valid_columns, table_rows,
-                                                     scale, cache, output, stream);
+                                                     scale, cache, envelope, workspace, output,
+                                                     stream);
             } else {
                 launch_prefill<Gqa27Geometry, false>(query, positions, valid_columns, table_rows,
-                                                      scale, cache, output, stream);
+                                                      scale, cache, envelope, workspace, output,
+                                                      stream);
             }
         } else if (masked) {
             launch_prefill<Gqa35Geometry, true>(query, positions, valid_columns, table_rows, scale,
-                                                 cache, output, stream);
+                                                 cache, envelope, workspace, output, stream);
         } else {
             launch_prefill<Gqa35Geometry, false>(query, positions, valid_columns, table_rows, scale,
-                                                  cache, output, stream);
+                                                  cache, envelope, workspace, output, stream);
         }
         return;
     }
