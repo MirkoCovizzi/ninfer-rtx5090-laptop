@@ -1,6 +1,7 @@
 #include "ninfer/ops/kvarn.h"
 
 #include "core/device.h"
+#include "ops/kvarn/hadamard.cuh"
 #include "ops/kvarn/store.cuh"
 
 #include <cuda_bf16.h>
@@ -107,28 +108,9 @@ __global__ void hadamard_kernel(const __nv_bfloat16* source, __nv_bfloat16* dest
     if (vector >= vectors) { return; }
 
     float value = __bfloat162float(source[static_cast<std::int64_t>(vector) * kvarn::D + d]);
-#pragma unroll
-    for (int span = 1; span < 32; span <<= 1) {
-        const float other = __shfl_xor_sync(0xffffffffU, value, span);
-        value             = (d & span) == 0 ? value + other : other - value;
-    }
-    stage[0][d] = value;
-    __syncthreads();
-    int current = 0;
-    for (int span = 32; span < kvarn::D; span <<= 1) {
-        const int group = d / (2 * span);
-        const int lane  = d & (span - 1);
-        const int left  = group * 2 * span + lane;
-        const int right = left + span;
-        const float a   = stage[current][left];
-        const float b   = stage[current][right];
-        value = (d & span) == 0 ? a + b : a - b;
-        stage[current ^ 1][d] = value;
-        current ^= 1;
-        __syncthreads();
-    }
+    value = kvarn::detail::hadamard_block(value, stage, d);
     destination[static_cast<std::int64_t>(vector) * kvarn::D + d] =
-        __float2bfloat16_rn(value * 0.0625F);
+        __float2bfloat16_rn(value);
 }
 
 } // namespace
