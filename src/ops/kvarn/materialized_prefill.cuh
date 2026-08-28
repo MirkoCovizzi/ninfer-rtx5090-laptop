@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ninfer/ops/kvarn.h"
-#include "ops/kernel/gqa_attention_prefill_common.cuh"
+#include "ops/softmax_attention/dense/causal_cache/prompt_common.cuh"
 #include "ops/kvarn/config.cuh"
 
 #include <cuda_bf16.h>
@@ -111,8 +111,8 @@ struct MaterializedPrefillInput {
     template <bool Key>
     __device__ __forceinline__ void stage(__nv_bfloat16* destination, int kv_head, int k0,
                                            int max_query_abs, int, int tid) const {
-        constexpr int Bc = kGqaPrefillBc;
-        constexpr int Threads = kGqaPrefillThreads;
+        constexpr int Bc = kCausalPromptBc;
+        constexpr int Threads = kCausalPromptThreads;
         constexpr int VecPerRow = D / 8;
         const auto* source_block = (Key ? key : value) +
                                    static_cast<std::int64_t>(D) *
@@ -123,7 +123,7 @@ struct MaterializedPrefillInput {
             for (int chunk = tid; chunk < Bc * VecPerRow; chunk += Threads) {
                 const int token = chunk >> 5;
                 const int d = (chunk & 31) << 3;
-                auto* output = destination + token * D + gqa_prefill_swz(token, d);
+                auto* output = destination + token * D + causal_prompt_swz(token, d);
                 cp_async<16, Cache::cg>(output, source_block + token * D + d);
             }
         } else {
@@ -131,7 +131,7 @@ struct MaterializedPrefillInput {
             for (int chunk = tid; chunk < Bc * VecPerRow; chunk += Threads) {
                 const int token = chunk >> 5;
                 const int d = (chunk & 31) << 3;
-                auto* output = destination + token * D + gqa_prefill_swz(token, d);
+                auto* output = destination + token * D + causal_prompt_swz(token, d);
                 if (k0 + token <= max_query_abs) {
                     cp_async<16, Cache::cg>(output, source_block + token * D + d);
                 } else {

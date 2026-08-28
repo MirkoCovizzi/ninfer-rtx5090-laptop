@@ -14,14 +14,14 @@ __device__ __forceinline__ std::int64_t prefill_stat_index(int q_head, int token
 // Computes one materialized context slab and merges its unnormalized online-softmax state into
 // the FP32 state shared by successive slab launches.
 template <typename Geometry, typename Metadata>
-__launch_bounds__(kGqaPrefillThreads, 1) __global__ void attention_prefill_slab_kernel(
+__launch_bounds__(kCausalPromptThreads, 1) __global__ void attention_prefill_slab_kernel(
     const __nv_bfloat16* __restrict__ q, MaterializedPrefillInput cache, Metadata metadata,
     const std::int32_t* __restrict__ positions, float scale, float* __restrict__ running_acc,
     float* __restrict__ running_m, float* __restrict__ running_l, std::int32_t width,
     std::int32_t key_begin, std::int32_t key_end) {
-    constexpr int Br = kGqaPrefillBr;
-    constexpr int Bc = kGqaPrefillBc;
-    constexpr int Threads = kGqaPrefillThreads;
+    constexpr int Br = kCausalPromptBr;
+    constexpr int Bc = kCausalPromptBc;
+    constexpr int Threads = kCausalPromptThreads;
     constexpr int QKNt = Bc / 8;
     constexpr int QKKs = D / 16;
     constexpr int PVNt = D / 8;
@@ -79,13 +79,13 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__ void attention_prefill_slab_
     {
         constexpr int VecPerRow = D / 8;
         constexpr int QRowStride = D * Geometry::QHeads;
-        const __nv_bfloat16* q_block_ptr = q + gqa_prefill_q_index<Geometry>(q_head, 0, q0);
+        const __nv_bfloat16* q_block_ptr = q + causal_prompt_q_index<Geometry>(q_head, 0, q0);
         if (q0 + Br <= tokens) {
 #pragma unroll
             for (int chunk = tid; chunk < Br * VecPerRow; chunk += Threads) {
                 const int row = chunk >> 5;
                 const int d = (chunk & 31) << 3;
-                cp_async<16, Cache::cg>(q_s + row * D + gqa_prefill_swz(row, d),
+                cp_async<16, Cache::cg>(q_s + row * D + causal_prompt_swz(row, d),
                                         q_block_ptr + row * QRowStride + d);
             }
         } else {
@@ -93,7 +93,7 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__ void attention_prefill_slab_
             for (int chunk = tid; chunk < Br * VecPerRow; chunk += Threads) {
                 const int row = chunk >> 5;
                 const int d = (chunk & 31) << 3;
-                __nv_bfloat16* destination = q_s + row * D + gqa_prefill_swz(row, d);
+                __nv_bfloat16* destination = q_s + row * D + causal_prompt_swz(row, d);
                 if (q0 + row < tokens) {
                     cp_async<16, Cache::cg>(destination, q_block_ptr + row * QRowStride + d);
                 } else {
@@ -137,13 +137,13 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__ void attention_prefill_slab_
         unsigned af[2][4];
         unsigned bf[2][QKNt][2];
         ldmatrix_x4(af[0][0], af[0][1], af[0][2], af[0][3],
-                    gqa_prefill_swz_addr(q_lane_base, 0U, q_as, q_r));
+                    causal_prompt_swz_addr(q_lane_base, 0U, q_as, q_r));
 #pragma unroll
         for (int nt2 = 0; nt2 < QKNt; nt2 += 2) {
             ldmatrix_x4(bf[0][nt2][0], bf[0][nt2][1], bf[0][nt2 + 1][0],
                         bf[0][nt2 + 1][1],
-                        gqa_prefill_swz_addr(k_lane_base + static_cast<unsigned>(nt2 * 4096), 0U,
-                                             k_as, k_r));
+                        causal_prompt_swz_addr(k_lane_base + static_cast<unsigned>(nt2 * 4096),
+                                               0U, k_as, k_r));
         }
 #pragma unroll
         for (int k = 0; k < QKKs; ++k) {
@@ -152,14 +152,14 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__ void attention_prefill_slab_
             if (k + 1 < QKKs) {
                 const unsigned ck = static_cast<unsigned>((k + 1) << 5);
                 ldmatrix_x4(af[next][0], af[next][1], af[next][2], af[next][3],
-                            gqa_prefill_swz_addr(q_lane_base, ck, q_as, q_r));
+                             causal_prompt_swz_addr(q_lane_base, ck, q_as, q_r));
 #pragma unroll
                 for (int nt2 = 0; nt2 < QKNt; nt2 += 2) {
                     ldmatrix_x4(
                         bf[next][nt2][0], bf[next][nt2][1], bf[next][nt2 + 1][0],
                         bf[next][nt2 + 1][1],
-                        gqa_prefill_swz_addr(k_lane_base + static_cast<unsigned>(nt2 * 4096), ck,
-                                             k_as, k_r));
+                        causal_prompt_swz_addr(k_lane_base + static_cast<unsigned>(nt2 * 4096), ck,
+                                               k_as, k_r));
                 }
             }
 #pragma unroll
@@ -257,7 +257,7 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__ void attention_prefill_slab_
         constexpr int PVLoads = PVKs * PVHalf;
         unsigned vf[2][4];
         ldmatrix_x4_t(vf[0][0], vf[0][1], vf[0][2], vf[0][3],
-                      gqa_prefill_swz_addr(v_lane_base, 0U, v_as, v_r));
+                       causal_prompt_swz_addr(v_lane_base, 0U, v_as, v_r));
 #pragma unroll
         for (int item = 0; item < PVLoads; ++item) {
             const int k = item / PVHalf;
@@ -269,8 +269,8 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__ void attention_prefill_slab_
                 const int next_n2 = ((item + 1) % PVHalf) * 2;
                 ldmatrix_x4_t(
                     vf[next][0], vf[next][1], vf[next][2], vf[next][3],
-                    gqa_prefill_swz_addr(v_lane_base + static_cast<unsigned>(next_k * 8192),
-                                         static_cast<unsigned>(next_n2 << 4), v_as, v_r));
+                    causal_prompt_swz_addr(v_lane_base + static_cast<unsigned>(next_k * 8192),
+                                           static_cast<unsigned>(next_n2 << 4), v_as, v_r));
             }
             mma_bf16(acc[n2][0], acc[n2][1], acc[n2][2], acc[n2][3], probability[k][0],
                      probability[k][1], probability[k][2], probability[k][3], vf[current][0],
@@ -307,7 +307,7 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__ void attention_prefill_slab_
     for (int n = 0; n < PVNt; ++n) {
         const int d0 = n * 8 + 2 * lid;
         if (row0 < tokens) {
-            const std::int64_t index = gqa_prefill_q_index<Geometry>(q_head, d0, row0);
+            const std::int64_t index = causal_prompt_q_index<Geometry>(q_head, d0, row0);
             const float2 previous = previous_l0 > 0.0F
                                         ? *reinterpret_cast<const float2*>(running_acc + index)
                                         : make_float2(0.0F, 0.0F);
@@ -318,7 +318,7 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__ void attention_prefill_slab_
                                       acc[n][1] * local_weight0));
         }
         if (row1 < tokens) {
-            const std::int64_t index = gqa_prefill_q_index<Geometry>(q_head, d0, row1);
+            const std::int64_t index = causal_prompt_q_index<Geometry>(q_head, d0, row1);
             const float2 previous = previous_l1 > 0.0F
                                         ? *reinterpret_cast<const float2*>(running_acc + index)
                                         : make_float2(0.0F, 0.0F);
@@ -354,11 +354,11 @@ __launch_bounds__(D) __global__ void finalize_prefill_slab_kernel(
     if (token < tokens) {
         const float denominator = running_l[prefill_stat_index<Geometry>(q_head, token)];
         if (denominator > 0.0F) {
-            value = running_acc[gqa_prefill_q_index<Geometry>(q_head, d, token)] /
+            value = running_acc[causal_prompt_q_index<Geometry>(q_head, d, token)] /
                     denominator;
         }
     }
-    output[gqa_prefill_q_index<Geometry>(q_head, d, token)] = __float2bfloat16_rn(value);
+    output[causal_prompt_q_index<Geometry>(q_head, d, token)] = __float2bfloat16_rn(value);
 }
 
 } // namespace ninfer::ops::kvarn::detail

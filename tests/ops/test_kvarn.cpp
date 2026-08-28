@@ -730,7 +730,7 @@ int run_prefill_slab_boundary_case() {
     Tensor output_tensor(output.p, DType::BF16, {kD, QueryHeads, Width, 1});
     Tensor positions_tensor(positions.p, DType::I32, {Width, 1});
     Tensor rows_tensor(rows.p, DType::I32, {1});
-    const ops::GqaExecutionEnvelope envelope{1, Context};
+    const ops::CausalAttentionExecutionEnvelope envelope{1, Context};
     WorkspaceArena workspace(ops::kvarn_attention_workspace_capacity_bytes(
         QueryHeads, envelope, 1, Width, Width));
     ops::kvarn_attention_cached(query_tensor, positions_tensor, rows_tensor, 0.0625F, cache.view(),
@@ -884,7 +884,7 @@ int run_batched_attention_case(int query_heads, const char* label) {
     Tensor output_tensor(output.p, DType::BF16, {kD, query_heads, Width, Batch});
     Tensor positions_tensor(positions.p, DType::I32, {Width, Batch});
     Tensor rows_tensor(rows.p, DType::I32, {Batch});
-    const ops::GqaExecutionEnvelope envelope{1, 512};
+    const ops::CausalAttentionExecutionEnvelope envelope{1, 512};
     const std::size_t workspace_bytes = ops::kvarn_attention_workspace_capacity_bytes(
         query_heads, envelope, Batch, Width, Width);
     DeviceBuffer workspace_storage(workspace_bytes + 2 * GuardBytes);

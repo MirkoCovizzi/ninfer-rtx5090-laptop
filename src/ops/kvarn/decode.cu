@@ -1,11 +1,10 @@
 #include "ops/kvarn/decode.cuh"
 
 #include "core/device.h"
-#include "ops/kernel/gqa_attention_decode.cuh"
 #include "ops/kvarn/config.cuh"
 #include "ops/kvarn/decode_kernel.cuh"
 #include "ops/kvarn/streaming_prefill.cuh"
-#include "ops/launcher/gqa_attention.h"
+#include "ops/softmax_attention/dense/causal_cache/launch.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -19,9 +18,10 @@ namespace {
 template <typename Geometry, bool Masked>
 void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& valid_columns,
                     const Tensor& table_rows, float scale, KvarnPagedBatchLayerView cache,
-                    GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& output,
+                    CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
+                    Tensor& output,
                     cudaStream_t stream) {
-    using Metadata = GqaPrefillBatchMetadata<Masked>;
+    using Metadata = CausalPromptBatchMetadata<Masked>;
     const Metadata metadata{
         .tables = static_cast<const std::int32_t*>(cache.block_tables.data),
         .valid_columns =
@@ -41,7 +41,7 @@ void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& 
     };
     static const cudaError_t attribute = cudaFuncSetAttribute(
         detail::attention_prefill_slab_kernel<Geometry, Metadata>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, kGqaPrefillSmemBytes);
+        cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptSmemBytes);
     CUDA_CHECK(attribute);
     const int width = query.ne[2];
     const int capacity = static_cast<int>(envelope.max_visible_keys);
@@ -57,7 +57,7 @@ void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& 
     CUDA_CHECK(cudaMemsetAsync(running_l.data, 0, running_l.bytes(), stream));
     Tensor rotated_query = query;
     kvarn_hadamard(query, rotated_query, stream);
-    const dim3 attention_grid(div_up(width, kGqaPrefillBr), Geometry::QHeads, 1);
+    const dim3 attention_grid(div_up(width, kCausalPromptBr), Geometry::QHeads, 1);
     for (int slab_begin = 0; slab_begin < capacity; slab_begin += slab_capacity) {
         const int slab_tokens = std::min(slab_capacity, capacity - slab_begin);
         const dim3 materialize_grid(div_up(slab_tokens, Group), Geometry::KVHeads, 1);
@@ -72,7 +72,7 @@ void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& 
             slab_capacity,
         };
         detail::attention_prefill_slab_kernel<Geometry, Metadata>
-            <<<attention_grid, kGqaPrefillThreads, kGqaPrefillSmemBytes, stream>>>(
+            <<<attention_grid, kCausalPromptThreads, kCausalPromptSmemBytes, stream>>>(
                 static_cast<const __nv_bfloat16*>(rotated_query.data), materialized, metadata,
                 static_cast<const std::int32_t*>(positions.data), scale,
                 static_cast<float*>(running_acc.data), static_cast<float*>(running_m.data),
@@ -89,7 +89,8 @@ void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& 
 template <typename Geometry, bool MultiBatch, bool Masked>
 void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& valid_columns,
                     const Tensor& table_rows, float scale, KvarnPagedBatchLayerView cache,
-                    GqaExecutionEnvelope envelope, int column_begin, int width, int splits,
+                    CausalAttentionExecutionEnvelope envelope, int column_begin, int width,
+                    int splits,
                     Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
                     Tensor& output, cudaStream_t stream) {
     const dim3 grid(Geometry::KVHeads, splits, query.ne[3] * width);
@@ -134,25 +135,26 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
 
 void decode_attention(const Tensor& query, const Tensor& positions,
                       const Tensor& valid_columns, const Tensor& table_rows, float scale,
-                      KvarnPagedBatchLayerView cache, GqaExecutionEnvelope envelope,
+                      KvarnPagedBatchLayerView cache, CausalAttentionExecutionEnvelope envelope,
                        WorkspaceArena& workspace, Tensor& output, cudaStream_t stream) {
-    if (query.ne[3] == 1 && query.ne[2] >= kGqaPrefillBr) {
+    if (query.ne[3] == 1 && query.ne[2] >= kCausalPromptBr) {
         const bool masked = valid_columns.data != nullptr;
-        if (query.ne[1] == Gqa27Geometry::QHeads) {
+        if (query.ne[1] == CausalD256H24Kv4::QHeads) {
             if (masked) {
-                launch_prefill<Gqa27Geometry, true>(query, positions, valid_columns, table_rows,
+                launch_prefill<CausalD256H24Kv4, true>(query, positions, valid_columns, table_rows,
                                                      scale, cache, envelope, workspace, output,
                                                      stream);
             } else {
-                launch_prefill<Gqa27Geometry, false>(query, positions, valid_columns, table_rows,
+                launch_prefill<CausalD256H24Kv4, false>(query, positions, valid_columns, table_rows,
                                                       scale, cache, envelope, workspace, output,
                                                       stream);
             }
         } else if (masked) {
-            launch_prefill<Gqa35Geometry, true>(query, positions, valid_columns, table_rows, scale,
+            launch_prefill<CausalD256H16Kv2, true>(query, positions, valid_columns, table_rows, scale,
                                                  cache, envelope, workspace, output, stream);
         } else {
-            launch_prefill<Gqa35Geometry, false>(query, positions, valid_columns, table_rows, scale,
+            launch_prefill<CausalD256H16Kv2, false>(query, positions, valid_columns, table_rows,
+                                                    scale,
                                                   cache, envelope, workspace, output, stream);
         }
         return;
@@ -163,13 +165,13 @@ void decode_attention(const Tensor& query, const Tensor& positions,
     for (int begin = 0; begin < query.ne[2]; begin += kChunk) {
         const int width = std::min(kChunk, query.ne[2] - begin);
         auto scope = workspace.scope();
-        const int split_capacity = ops::detail::gqa_attention_split_capacity(
+        const int split_capacity = ops::detail::causal_attention_split_capacity(
             query.ne[1], width, DType::BF16, envelope);
-        const int split_scale = query.ne[1] == Gqa27Geometry::QHeads
-                                    ? Gqa27Geometry::DecodeSplitScale
-                                    : Gqa35Geometry::DecodeSplitScale;
+        const int split_scale = query.ne[1] == CausalD256H24Kv4::QHeads
+                                    ? CausalD256H24Kv4::SmallTSplitScale
+                                    : CausalD256H16Kv2::SmallTSplitScale;
         int split_limit = DecodeLongSplits * split_scale;
-        if (width == 1 && query.ne[1] == Gqa27Geometry::QHeads &&
+        if (width == 1 && query.ne[1] == CausalD256H24Kv4::QHeads &&
             envelope.min_visible_keys > 8198 &&
             envelope.max_visible_keys <= DecodeMidWindow) {
             split_limit = DecodeMidSplits;
@@ -204,10 +206,10 @@ void decode_attention(const Tensor& query, const Tensor& positions,
                                                        acc, m, l, output, stream);
             }
         };
-        if (query.ne[1] == Gqa27Geometry::QHeads) {
-            dispatch.template operator()<Gqa27Geometry>();
+        if (query.ne[1] == CausalD256H24Kv4::QHeads) {
+            dispatch.template operator()<CausalD256H24Kv4>();
         } else {
-            dispatch.template operator()<Gqa35Geometry>();
+            dispatch.template operator()<CausalD256H16Kv2>();
         }
     }
 }

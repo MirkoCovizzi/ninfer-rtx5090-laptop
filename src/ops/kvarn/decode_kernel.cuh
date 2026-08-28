@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ninfer/ops/kvarn.h"
-#include "ops/kernel/gqa_attention_decode.cuh"
+#include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 #include "ops/kvarn/config.cuh"
 #include "ops/kvarn/hadamard.cuh"
 
@@ -42,7 +42,7 @@ __device__ __forceinline__ int kvarn_decode_active_splits(int window, int launch
             return min(splits, launch_capacity);
         }
     }
-    return gqa_small_t_active_splits<Geometry, false>(window, launch_capacity, tokens);
+    return causal_small_t_active_splits<Geometry, false>(window, launch_capacity, tokens);
 }
 
 __device__ __forceinline__ int decode_tail_slot(const std::int32_t* markers, int table_row,
@@ -111,7 +111,7 @@ __device__ __forceinline__ void stage_decode_key(
         for (int chunk = tid; chunk < Bc * (D / 8); chunk += threads) {
             const int token = chunk / (D / 8);
             const int d = (chunk % (D / 8)) * 8;
-            __nv_bfloat16* output = destination + token * D + gqa_small_t_tc_swz(token, d);
+            __nv_bfloat16* output = destination + token * D + causal_small_t_tc_swz(token, d);
             const int position = logical_begin + token;
             if (position < valid_begin || position >= valid_end) {
                 store_vec(output, make_int4(0, 0, 0, 0));
@@ -159,10 +159,10 @@ __device__ __forceinline__ void stage_decode_key(
                                    token_scales.y;
             const int position0 = logical_begin + token;
             const int position1 = position0 + 1;
-            destination[token * D + gqa_small_t_tc_swz(token, dim)] =
+            destination[token * D + causal_small_t_tc_swz(token, dim)] =
                 position0 >= valid_begin && position0 < valid_end ? __float2bfloat16_rn(decoded0)
                                                                    : __float2bfloat16_rn(0.0F);
-            destination[(token + 1) * D + gqa_small_t_tc_swz(token + 1, dim)] =
+            destination[(token + 1) * D + causal_small_t_tc_swz(token + 1, dim)] =
                 position1 >= valid_begin && position1 < valid_end ? __float2bfloat16_rn(decoded1)
                                                                    : __float2bfloat16_rn(0.0F);
         }
@@ -180,7 +180,7 @@ __device__ __forceinline__ void stage_decode_value(
         for (int chunk = tid; chunk < Bc * (D / 8); chunk += threads) {
             const int token = chunk / (D / 8);
             const int d = (chunk % (D / 8)) * 8;
-            __nv_bfloat16* output = destination + token * D + gqa_small_t_tc_swz(token, d);
+            __nv_bfloat16* output = destination + token * D + causal_small_t_tc_swz(token, d);
             const int position = logical_begin + token;
             if (position < valid_begin || position >= valid_end) {
                 store_vec(output, make_int4(0, 0, 0, 0));
@@ -218,7 +218,7 @@ __device__ __forceinline__ void stage_decode_value(
         const uint2 packed_values =
             make_uint2(values[0] | (values[1] << 16), values[2] | (values[3] << 16));
         auto* output = reinterpret_cast<uint2*>(
-            destination + token * D + gqa_small_t_tc_swz(token, 4 * packed_dim));
+            destination + token * D + causal_small_t_tc_swz(token, 4 * packed_dim));
         *output = packed_values;
     }
 }
@@ -287,15 +287,15 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
     auto write_neutral = [&]() {
         for (int row = tid; row < row_count; row += Threads) {
             const int q_head = kv_head * Geometry::GroupSize + row;
-            partial_m[gqa_partial_stat_index<Geometry>(q_head, column, split, tokens)] =
+            partial_m[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] =
                 -CUDART_INF_F;
-            partial_l[gqa_partial_stat_index<Geometry>(q_head, column, split, tokens)] = 0.0f;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = 0.0f;
         }
         for (int index = tid; index < row_count * D; index += Threads) {
             const int row = index / D;
             const int d = index % D;
             const int q_head = kv_head * Geometry::GroupSize + row;
-            partial_acc[gqa_partial_acc_index<Geometry>(q_head, d, column, split, tokens)] =
+            partial_acc[causal_partial_acc_index<Geometry>(q_head, d, column, split, tokens)] =
                 __float2bfloat16(0.0f);
         }
     };
@@ -334,8 +334,8 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
         const int row = index / D;
         const int d = index % D;
         const int q_head = kv_head * Geometry::GroupSize + row;
-        qkv_s[row * D + gqa_small_t_tc_swz(row, d)] =
-            row < row_count ? q[gqa_q_index<Geometry>(q_head, d)] : __float2bfloat16(0.0f);
+        qkv_s[row * D + causal_small_t_tc_swz(row, d)] =
+            row < row_count ? q[causal_q_index<Geometry>(q_head, d)] : __float2bfloat16(0.0f);
     }
     __syncthreads();
 
@@ -360,7 +360,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
             ldmatrix_x4(warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
                         warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
                         smem_addr(&qkv_s[a_rowoff * D +
-                                         gqa_small_t_tc_swz(a_rowoff, query_col)]));
+                                          causal_small_t_tc_swz(a_rowoff, query_col)]));
         }
     }
     __syncthreads();
@@ -404,7 +404,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
                     const int row = tile * 8 + b_rin;
                     const int col = k * 16 + b_koff;
                     ldmatrix_x2(key_fragment[0], key_fragment[1],
-                                smem_addr(&k_s[row * D + gqa_small_t_tc_swz(row, col)]));
+                                 smem_addr(&k_s[row * D + causal_small_t_tc_swz(row, col)]));
                     mma_bf16(score[tile][0], score[tile][1], score[tile][2], score[tile][3],
                              warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
                              warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
@@ -466,11 +466,11 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
                                       : 0.0f;
                 block_l0 += p00 + p01;
                 block_l1 += p10 + p11;
-                p_s[gid * Bc + gqa_small_t_tc_swz32(gid, col0)] = __float2bfloat16(p00);
-                p_s[gid * Bc + gqa_small_t_tc_swz32(gid, col1)] = __float2bfloat16(p01);
-                p_s[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col0)] =
+                p_s[gid * Bc + causal_small_t_tc_swz32(gid, col0)] = __float2bfloat16(p00);
+                p_s[gid * Bc + causal_small_t_tc_swz32(gid, col1)] = __float2bfloat16(p01);
+                p_s[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col0)] =
                     __float2bfloat16(p10);
-                p_s[(gid + 8) * Bc + gqa_small_t_tc_swz32(gid + 8, col1)] =
+                p_s[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col1)] =
                     __float2bfloat16(p11);
             }
             block_l0 = warp_sum<4>(block_l0, FullMask);
@@ -515,13 +515,13 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
                         probability_fragment[0], probability_fragment[1],
                         probability_fragment[2], probability_fragment[3],
                         smem_addr(&p_s[a_rowoff * Bc +
-                                        gqa_small_t_tc_swz32(a_rowoff, probability_col)]));
+                                         causal_small_t_tc_swz32(a_rowoff, probability_col)]));
                     unsigned value_fragment[2];
                     const int value_row = k * 16 + b_koff + b_rin;
                     const int value_col = global_n * 8;
                     ldmatrix_x2_t(value_fragment[0], value_fragment[1],
                                   smem_addr(&v_s[value_row * D +
-                                                  gqa_small_t_tc_swz(value_row, value_col)]));
+                                                   causal_small_t_tc_swz(value_row, value_col)]));
                     mma_bf16(warp_state.accumulator[n][0], warp_state.accumulator[n][1],
                              warp_state.accumulator[n][2], warp_state.accumulator[n][3],
                              probability_fragment[0], probability_fragment[1],
@@ -538,13 +538,13 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
         const int row1 = row0 + 8;
         if (row0 < row_count) {
             const int q_head = kv_head * Geometry::GroupSize + row0;
-            partial_m[gqa_partial_stat_index<Geometry>(q_head, column, split, tokens)] = m0;
-            partial_l[gqa_partial_stat_index<Geometry>(q_head, column, split, tokens)] = l0;
+            partial_m[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = m0;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = l0;
         }
         if (row1 < row_count) {
             const int q_head = kv_head * Geometry::GroupSize + row1;
-            partial_m[gqa_partial_stat_index<Geometry>(q_head, column, split, tokens)] = m1;
-            partial_l[gqa_partial_stat_index<Geometry>(q_head, column, split, tokens)] = l1;
+            partial_m[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = m1;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = l1;
         }
     }
     if (warp >= ProducerWarps) {
@@ -573,7 +573,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__ void attention_decode_kernel(
         const int d = (chunk % (D / 8)) * 8;
         const int q_head = kv_head * Geometry::GroupSize + row;
         const std::int64_t destination =
-            gqa_partial_acc_index<Geometry>(q_head, d, column, split, tokens);
+            causal_partial_acc_index<Geometry>(q_head, d, column, split, tokens);
         store_vec(partial_acc + destination, load_vec<int4>(qkv_s + row * D + d));
     }
 }
@@ -620,7 +620,7 @@ __launch_bounds__(D) __global__ void reduce_output_hadamard_kernel(
     float local_m = -CUDART_INF_F;
     for (int split = tid; split < active_splits; split += D) {
         local_m = fmaxf(
-            local_m, partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)]);
+            local_m, partial_m[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)]);
     }
     stage[0][tid] = local_m;
     __syncthreads();
@@ -634,11 +634,11 @@ __launch_bounds__(D) __global__ void reduce_output_hadamard_kernel(
     if (head_m > -CUDART_INF_F) {
         for (int split = tid; split < active_splits; split += D) {
             const float tile_l =
-                partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)];
+                partial_l[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)];
             if (tile_l > 0.0F) {
                 local_l += tile_l *
-                           expf(partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split,
-                                                                          tokens)] -
+                           expf(partial_m[causal_partial_stat_index<Geometry>(q_head, token, split,
+                                                                             tokens)] -
                                 head_m);
             }
         }
@@ -655,13 +655,14 @@ __launch_bounds__(D) __global__ void reduce_output_hadamard_kernel(
     if (head_l > 0.0F) {
         for (int split = 0; split < active_splits; ++split) {
             const float tile_l =
-                partial_l[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)];
+                partial_l[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)];
             if (tile_l <= 0.0F) { continue; }
             const float weight = expf(
-                partial_m[gqa_partial_stat_index<Geometry>(q_head, token, split, tokens)] - head_m);
+                partial_m[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)] -
+                head_m);
             const std::int64_t index =
                 partial_acc_offset +
-                gqa_partial_acc_index<Geometry>(q_head, tid, token, split, tokens);
+                causal_partial_acc_index<Geometry>(q_head, tid, token, split, tokens);
             numerator += __bfloat162float(partial_acc[index]) * weight;
         }
     }
@@ -691,7 +692,7 @@ __launch_bounds__(D) __global__ void reduce_output_hadamard_kernel(
         current ^= 1;
         __syncthreads();
     }
-    output[gqa_q_index<Geometry>(q_head, tid, output_column)] =
+    output[causal_q_index<Geometry>(q_head, tid, output_column)] =
         __float2bfloat16_rn(value * 0.0625F);
 }
 

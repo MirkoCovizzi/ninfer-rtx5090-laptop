@@ -2,8 +2,8 @@
 
 #include "core/arena.h"
 #include "core/tensor.h"
-#include "ninfer/ops/gqa_attention.h"
 #include "ninfer/ops/kvarn.h"
+#include "ninfer/ops/softmax_attention.h"
 
 #include <cuda_runtime_api.h>
 
@@ -13,7 +13,7 @@
 namespace ninfer::ops {
 
 [[nodiscard]] std::size_t kvarn_attention_workspace_capacity_bytes(
-    std::int32_t query_heads, GqaExecutionEnvelope envelope, std::int32_t batch_size,
+    std::int32_t query_heads, CausalAttentionExecutionEnvelope envelope, std::int32_t batch_size,
     std::int32_t min_width, std::int32_t max_width);
 
 // Appends and attends in the orthonormal KVarN frame. Committed calls encode every newly complete
@@ -21,12 +21,13 @@ namespace ninfer::ops {
 void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& positions,
                      const Tensor& valid_columns, const Tensor& kv_table_rows, float scale,
                      KvarnPagedBatchLayerView cache, bool provisional,
-                     GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& output,
+                     CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
+                     Tensor& output,
                      cudaStream_t stream);
 
 void kvarn_attention_cached(Tensor query, const Tensor& positions, const Tensor& kv_table_rows,
                             float scale, const KvarnPagedBatchLayerView& cache,
-                            GqaExecutionEnvelope envelope, WorkspaceArena& workspace,
+                            CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
                             Tensor& output, cudaStream_t stream);
 
 void kvarn_kv_append(Tensor key, Tensor value, const Tensor& positions,

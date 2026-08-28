@@ -426,19 +426,19 @@ void validate_inputs(const Tensor& query, const Tensor* key, const Tensor* value
 } // namespace
 
 std::size_t kvarn_attention_workspace_capacity_bytes(std::int32_t query_heads,
-                                                     GqaExecutionEnvelope envelope,
-                                                     std::int32_t batch_size,
-                                                     std::int32_t min_width,
-                                                     std::int32_t max_width) {
-    const std::int32_t decode_width = std::min(max_width, 6);
-    const std::size_t decode = gqa_attention_workspace_capacity_bytes(
-        query_heads, DType::BF16, envelope, batch_size, std::min(min_width, decode_width),
-        decode_width);
-    if (batch_size != 1 || max_width < kKvarnGroup) { return decode; }
+                                                      CausalAttentionExecutionEnvelope envelope,
+                                                      std::int32_t batch_size,
+                                                      std::int32_t min_width,
+                                                      std::int32_t max_width) {
     if (query_heads != 24 && query_heads != 16) {
         throw std::invalid_argument("KVarN workspace: unsupported query-head geometry");
     }
     const std::int32_t kv_heads = query_heads == 24 ? 4 : 2;
+    const std::int32_t decode_width = std::min(max_width, 6);
+    const std::size_t decode = causal_softmax_attention_workspace_capacity_bytes(
+        {kvarn::D, query_heads, kv_heads}, DType::BF16, envelope, batch_size,
+        std::min(min_width, decode_width), decode_width);
+    if (batch_size != 1 || max_width < kKvarnGroup) { return decode; }
     const std::size_t slab_tokens =
         std::min<std::size_t>(envelope.max_visible_keys, kvarn::PrefillSlabTokens);
     const std::size_t materialized = 2 * static_cast<std::size_t>(kKvarnHeadDim) *
@@ -453,8 +453,8 @@ std::size_t kvarn_attention_workspace_capacity_bytes(std::int32_t query_heads,
 void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& positions,
                      const Tensor& valid_columns, const Tensor& kv_table_rows, float scale,
                      KvarnPagedBatchLayerView cache, bool provisional,
-                     GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& output,
-                     cudaStream_t stream) {
+                     CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
+                     Tensor& output, cudaStream_t stream) {
     (void)workspace;
     validate_inputs(query, &key, &value, positions, valid_columns, kv_table_rows, cache, output);
     if (envelope.max_visible_keys == 0) {
@@ -474,7 +474,7 @@ void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& posit
 
 void kvarn_attention_cached(Tensor query, const Tensor& positions, const Tensor& kv_table_rows,
                             float scale, const KvarnPagedBatchLayerView& cache,
-                            GqaExecutionEnvelope envelope, WorkspaceArena& workspace,
+                            CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
                             Tensor& output, cudaStream_t stream) {
     validate_inputs(query, nullptr, nullptr, positions, Tensor{}, kv_table_rows, cache, output);
     (void)workspace;
