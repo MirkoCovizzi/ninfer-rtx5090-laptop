@@ -160,6 +160,14 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             },
         .hidden = TextConfig::hidden,
     };
+    if (plan.kv_storage == KvCacheStorage::KvarnK4V2Group64) {
+        state_image_spec.kvarn = qwen3_6::KvarnContinuationStateSpec{
+            .text_layers = TextConfig::full_attention_layers(),
+            .mtp_layers  = plan.features.mtp() ? TextConfig::mtp_layers : 0U,
+            .kv_heads    = TextConfig::kv_heads,
+            .head_dim    = TextConfig::head_dim,
+        };
+    }
     if constexpr (Variant::supports_dflash) {
         if (plan.features.dflash()) {
             state_image_spec.dflash_local = qwen3_6::DFlashLocalStateSpec{

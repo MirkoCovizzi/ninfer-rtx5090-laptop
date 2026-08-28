@@ -7314,6 +7314,7 @@ void ProgramImplCore::prepare_active_capture(ActiveCaptureTransaction& transacti
         }
     }
 
+    capture_sequence_kvarn_tail(sequence, transaction.source_state);
     state_store->freeze(transaction.source_state);
     if (transaction.state_placement == qwen3_6::CaptureStatePlacement::DeviceFork) {
         (void)state_store->begin_fork(transaction.source_state, transaction.destination_state);
@@ -8125,6 +8126,7 @@ FinishResult ProgramImplCore::finish(SequenceHandle sequence) noexcept {
             state.rewrite_checkpoint = {};
         }
         if (state_store->role(state.state.read) == StateImageRole::ActiveMutable) {
+            capture_sequence_kvarn_tail(state, state.state.read);
             state_store->freeze(state.state.read);
         } else if (state_store->role(state.state.read) != StateImageRole::CheckpointImmutable) {
             return out;
@@ -8796,7 +8798,7 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
         sequence.endpoint_valid = false;
         if (!preserving_source) { trim_sequence_kv(sequence, base, backend_kv_valid(sequence)); }
         bind_sequence_kv(sequence);
-        restore_sequence_kvarn_tail(sequence, base, backend_kv_valid(sequence));
+        activate_sequence_kvarn_tail(sequence);
         const std::uint32_t backend_materialized =
             speculative_backend == SpeculativeBackend::Mtp
                 ? std::min(capacity,
@@ -9473,6 +9475,88 @@ void ProgramImplCore::restore_sequence_kvarn_tail(SequenceState& sequence,
     if (sequence.kv->backend && decoder->mtp_cache() != nullptr) {
         restore(*decoder->mtp_cache(), *backend_kv_addresses, *sequence.kv->backend,
                 backend_tokens);
+    }
+}
+
+void ProgramImplCore::capture_sequence_kvarn_tail(const SequenceState& sequence,
+                                                   StateImageHandle image) {
+    if (!sequence.kv || decoder->text_kv.storage() != KvCacheStorage::KvarnK4V2Group64) { return; }
+    if (!state_images->has_kvarn()) {
+        throw std::logic_error("KVarN continuation StateImage storage is unavailable");
+    }
+    const std::int32_t slot = state_store->physical_slot(image);
+    const auto capture = [&](qwen3_6::PagedKVCache& cache, KVAddressSpaceStore& addresses,
+                             KVAddressSpaceHandle address, bool mtp) {
+        if (!addresses.active(address)) {
+            throw std::logic_error("KVarN continuation capture requires active KV storage");
+        }
+        const qwen3_6::PagedKVCacheView execution =
+            cache.execution_view(addresses.execution_row(address));
+        const std::uint32_t image_layers =
+            mtp ? state_images->kvarn_mtp_layers() : state_images->kvarn_text_layers();
+        if (image_layers != cache.layers()) {
+            throw std::logic_error("KVarN continuation StateImage layer count is invalid");
+        }
+        for (std::uint32_t layer = 0; layer < cache.layers(); ++layer) {
+            const ops::KvarnPagedLayerView source = execution.kvarn_layer_view(layer);
+            const ops::KvarnTailStateView destination =
+                mtp ? state_images->kvarn_mtp_tail(layer, slot)
+                    : state_images->kvarn_text_tail(layer, slot);
+            CUDA_CHECK(cudaMemcpyAsync(destination.k.data, source.tail_k.data,
+                                       destination.k.bytes(), cudaMemcpyDeviceToDevice,
+                                       device.stream));
+            CUDA_CHECK(cudaMemcpyAsync(destination.v.data, source.tail_v.data,
+                                       destination.v.bytes(), cudaMemcpyDeviceToDevice,
+                                       device.stream));
+            CUDA_CHECK(cudaMemcpyAsync(destination.logical_pages.data,
+                                       source.tail_logical_pages.data,
+                                       destination.logical_pages.bytes(), cudaMemcpyDeviceToDevice,
+                                       device.stream));
+        }
+    };
+    capture(decoder->text_kv, *text_kv_addresses, sequence.kv->text, false);
+    if (sequence.kv->backend && decoder->mtp_cache() != nullptr) {
+        capture(*decoder->mtp_cache(), *backend_kv_addresses, *sequence.kv->backend, true);
+    }
+}
+
+void ProgramImplCore::activate_sequence_kvarn_tail(const SequenceState& sequence) {
+    if (!sequence.kv || decoder->text_kv.storage() != KvCacheStorage::KvarnK4V2Group64) { return; }
+    if (!state_images->has_kvarn()) {
+        throw std::logic_error("KVarN continuation StateImage storage is unavailable");
+    }
+    const StateImageHandle image =
+        sequence.state.fork_pending ? sequence.state.read : sequence.state.write;
+    const std::int32_t slot = state_store->physical_slot(image);
+    const auto activate = [&](qwen3_6::PagedKVCache& cache, KVAddressSpaceStore& addresses,
+                              KVAddressSpaceHandle address, bool mtp) {
+        if (!addresses.active(address)) {
+            throw std::logic_error("KVarN continuation activation requires active KV storage");
+        }
+        const qwen3_6::PagedKVCacheView execution =
+            cache.execution_view(addresses.execution_row(address));
+        const std::uint32_t image_layers =
+            mtp ? state_images->kvarn_mtp_layers() : state_images->kvarn_text_layers();
+        if (image_layers != cache.layers()) {
+            throw std::logic_error("KVarN continuation StateImage layer count is invalid");
+        }
+        for (std::uint32_t layer = 0; layer < cache.layers(); ++layer) {
+            const ops::KvarnTailStateView source =
+                mtp ? state_images->kvarn_mtp_tail(layer, slot)
+                    : state_images->kvarn_text_tail(layer, slot);
+            const ops::KvarnPagedLayerView destination = execution.kvarn_layer_view(layer);
+            CUDA_CHECK(cudaMemcpyAsync(destination.tail_k.data, source.k.data, source.k.bytes(),
+                                       cudaMemcpyDeviceToDevice, device.stream));
+            CUDA_CHECK(cudaMemcpyAsync(destination.tail_v.data, source.v.data, source.v.bytes(),
+                                       cudaMemcpyDeviceToDevice, device.stream));
+            CUDA_CHECK(cudaMemcpyAsync(destination.tail_logical_pages.data,
+                                       source.logical_pages.data, source.logical_pages.bytes(),
+                                       cudaMemcpyDeviceToDevice, device.stream));
+        }
+    };
+    activate(decoder->text_kv, *text_kv_addresses, sequence.kv->text, false);
+    if (sequence.kv->backend && decoder->mtp_cache() != nullptr) {
+        activate(*decoder->mtp_cache(), *backend_kv_addresses, *sequence.kv->backend, true);
     }
 }
 

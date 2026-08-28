@@ -37,6 +37,13 @@ struct KvarnTileStorage {
     Tensor v_token_zeros;    // FP16 [G,N]
 };
 
+struct KvarnTailStateView {
+    Tensor k;             // BF16 [D,G,Hkv*tail_slots]
+    Tensor v;             // BF16 [D,G,Hkv*tail_slots]
+    Tensor logical_pages; // I32 [tail_slots]
+    std::int32_t num_kv_heads = 0;
+};
+
 struct KvarnPagedLayerView {
     Tensor records;           // U8 [record_bytes / P,P,Hkv,Nphysical]
     Tensor tail_k;            // BF16 [D,P,Hkv*tail_slots]

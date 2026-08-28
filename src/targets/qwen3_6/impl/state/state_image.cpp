@@ -26,6 +26,13 @@ std::size_t checked_add(std::size_t left, std::size_t right, const char* label) 
     return left + right;
 }
 
+std::int32_t checked_i32(std::size_t value, const char* label) {
+    if (value > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::overflow_error(label);
+    }
+    return static_cast<std::int32_t>(value);
+}
+
 std::uint32_t padded_dflash_capacity(std::uint32_t capacity) {
     if (capacity == 0) {
         throw std::invalid_argument("StateImage DFlash capacity must be positive");
@@ -55,6 +62,14 @@ bool same_dflash_spec(const std::optional<DFlashLocalStateSpec>& left,
            left->kv_heads == right->kv_heads && left->head_dim == right->head_dim;
 }
 
+bool same_kvarn_spec(const std::optional<KvarnContinuationStateSpec>& left,
+                     const std::optional<KvarnContinuationStateSpec>& right) noexcept {
+    if (left.has_value() != right.has_value()) { return false; }
+    if (!left) { return true; }
+    return left->text_layers == right->text_layers && left->mtp_layers == right->mtp_layers &&
+           left->kv_heads == right->kv_heads && left->head_dim == right->head_dim;
+}
+
 bool same_region(const LayoutRegion& left, const LayoutRegion& right) noexcept {
     return left.offset == right.offset && left.bytes == right.bytes &&
            left.alignment == right.alignment;
@@ -65,11 +80,30 @@ bool same_optional_region(const std::optional<LayoutRegion>& left,
     return left.has_value() == right.has_value() && (!left || same_region(*left, *right));
 }
 
+bool same_kvarn_layout(const std::optional<KvarnContinuationImageLayout>& left,
+                       const std::optional<KvarnContinuationImageLayout>& right) noexcept {
+    if (left.has_value() != right.has_value()) { return false; }
+    if (!left) { return true; }
+    return left->spec.text_layers == right->spec.text_layers &&
+           left->spec.mtp_layers == right->spec.mtp_layers &&
+           left->spec.kv_heads == right->spec.kv_heads &&
+           left->spec.head_dim == right->spec.head_dim &&
+           left->text_k_offset == right->text_k_offset &&
+           left->text_v_offset == right->text_v_offset &&
+           left->text_marker_offset == right->text_marker_offset &&
+           left->mtp_k_offset == right->mtp_k_offset && left->mtp_v_offset == right->mtp_v_offset &&
+           left->mtp_marker_offset == right->mtp_marker_offset &&
+           left->tail_layer_bytes == right->tail_layer_bytes &&
+           left->marker_layer_bytes == right->marker_layer_bytes &&
+           left->image_bytes == right->image_bytes;
+}
+
 bool same_host_layout(const StateImageHostLayout& left,
                       const StateImageHostLayout& right) noexcept {
     return same_linear_spec(left.spec.linear, right.spec.linear) &&
            left.spec.hidden == right.spec.hidden &&
            same_dflash_spec(left.spec.dflash_local, right.spec.dflash_local) &&
+           same_kvarn_spec(left.spec.kvarn, right.spec.kvarn) &&
            same_region(left.linear_conv, right.linear_conv) &&
            left.linear_conv_layer_bytes == right.linear_conv_layer_bytes &&
            same_region(left.linear_recurrent, right.linear_recurrent) &&
@@ -78,7 +112,40 @@ bool same_host_layout(const StateImageHostLayout& left,
            same_optional_region(left.dflash_local_k, right.dflash_local_k) &&
            same_optional_region(left.dflash_local_v, right.dflash_local_v) &&
            left.dflash_local_layer_bytes == right.dflash_local_layer_bytes &&
+           same_optional_region(left.kvarn, right.kvarn) &&
+           same_kvarn_layout(left.kvarn_layout, right.kvarn_layout) &&
            left.image_bytes == right.image_bytes;
+}
+
+KvarnContinuationImageLayout
+plan_kvarn_continuation_image(const KvarnContinuationStateSpec& spec) {
+    const Tensor tail(nullptr, DType::BF16,
+                      {spec.head_dim, ops::kKvarnGroup,
+                       spec.kv_heads * ops::kKvarnTailSlots});
+    const Tensor markers(nullptr, DType::I32, {ops::kKvarnTailSlots});
+    KvarnContinuationImageLayout out{
+        .spec               = spec,
+        .tail_layer_bytes   = tail.bytes(),
+        .marker_layer_bytes = markers.bytes(),
+    };
+    LayoutBuilder builder;
+    const auto add = [&](std::uint32_t layers, std::size_t& k, std::size_t& v,
+                         std::size_t& marker, const char* label) {
+        if (layers == 0) { return; }
+        const std::size_t tail_bytes =
+            checked_mul(out.tail_layer_bytes, layers, "KVarN continuation tail bytes overflow");
+        const std::size_t marker_bytes = checked_mul(
+            out.marker_layer_bytes, layers, "KVarN continuation marker bytes overflow");
+        k      = builder.add(tail_bytes, kStateImageAlignment, label).offset;
+        v      = builder.add(tail_bytes, kStateImageAlignment, label).offset;
+        marker = builder.add(marker_bytes, kStateImageAlignment, label).offset;
+    };
+    add(spec.text_layers, out.text_k_offset, out.text_v_offset, out.text_marker_offset,
+        "KVarN Text continuation");
+    add(spec.mtp_layers, out.mtp_k_offset, out.mtp_v_offset, out.mtp_marker_offset,
+        "KVarN MTP continuation");
+    out.image_bytes = builder.finish(kStateImageAlignment, "KVarN continuation image");
+    return out;
 }
 
 StateImageHostLayout plan_host_state_image(const StateImageSpec& spec) {
@@ -92,6 +159,11 @@ StateImageHostLayout plan_host_state_image(const StateImageSpec& spec) {
     if (spec.dflash_local && (spec.dflash_local->layers == 0 || spec.dflash_local->kv_heads <= 0 ||
                               spec.dflash_local->head_dim <= 0)) {
         throw std::invalid_argument("StateImage host DFlash geometry is invalid");
+    }
+    if (spec.kvarn &&
+        (spec.kvarn->text_layers == 0 || spec.kvarn->kv_heads <= 0 ||
+         spec.kvarn->head_dim != ops::kKvarnHeadDim)) {
+        throw std::invalid_argument("StateImage host KVarN geometry is invalid");
     }
 
     LayoutBuilder builder;
@@ -129,6 +201,11 @@ StateImageHostLayout plan_host_state_image(const StateImageSpec& spec) {
         host.dflash_local_v =
             builder.add(component_bytes, kStateImageAlignment, "StateImage host DFlash local V");
     }
+    if (spec.kvarn) {
+        host.kvarn_layout = plan_kvarn_continuation_image(*spec.kvarn);
+        host.kvarn = builder.add(host.kvarn_layout->image_bytes, kStateImageAlignment,
+                                 "StateImage host KVarN continuation");
+    }
     host.image_bytes = builder.finish(kStateImageAlignment, "StateImage host image");
     return host;
 }
@@ -162,6 +239,16 @@ StateImageDeviceLayout plan_state_image_device_pool(LayoutBuilder& builder,
             plan_cyclic_kv_cache(builder, dflash.layers, dflash.capacity, dflash.kv_heads,
                                  dflash.head_dim, spec.linear.slot_count);
     }
+    if (spec.kvarn) {
+        KvarnContinuationStateLayout tails;
+        tails.image = plan_kvarn_continuation_image(*spec.kvarn);
+        tails.images = builder.add_tensor(
+            DType::U8,
+            {checked_i32(tails.image.image_bytes, "KVarN continuation image exceeds int32"),
+             spec.linear.slot_count},
+            kStateImageAlignment, "StateImage KVarN continuation images");
+        out.kvarn = std::move(tails);
+    }
 
     out.host = plan_host_state_image(spec);
     return out;
@@ -183,9 +270,14 @@ TransferWork state_image_transfer_work(const StateImageHostLayout& layout) {
             payload, checked_mul(component_bytes, 2U, "StateImage transfer payload overflow"),
             "StateImage transfer payload overflow");
     }
+    if (layout.spec.kvarn) {
+        payload = checked_add(payload, layout.kvarn_layout->image_bytes,
+                              "StateImage transfer payload overflow");
+    }
     const std::uint64_t operations =
         2ULL * layout.spec.linear.layers + 1ULL +
-        (layout.spec.dflash_local ? 2ULL * layout.spec.dflash_local->layers : 0ULL);
+        (layout.spec.dflash_local ? 2ULL * layout.spec.dflash_local->layers : 0ULL) +
+        (layout.spec.kvarn ? 1ULL : 0ULL);
     if (operations > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("StateImage transfer operation count exceeds uint32");
     }
@@ -285,14 +377,34 @@ StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageD
             .head_dim = layout.dflash_local->head_dim,
         };
     }
-    if (!same_host_layout(host_layout_, plan_host_state_image(device_spec))) {
-        throw std::invalid_argument("StateImage host layout does not match its device components");
-    }
     if (layout.dflash_local) {
         if (layout.dflash_local->lane_capacity != linear_.slot_count()) {
             throw std::invalid_argument("StateImage components do not share one slot geometry");
         }
         dflash_local_.emplace(backing, *layout.dflash_local);
+    }
+    if (layout.kvarn) {
+        kvarn_images_ = layout.kvarn->images.bind(backing);
+        kvarn_layout_ = layout.kvarn->image;
+        const KvarnContinuationStateSpec& kvarn = kvarn_layout_->spec;
+        if (kvarn_images_.dtype != DType::U8 ||
+            kvarn_images_.ne[0] != checked_i32(kvarn_layout_->image_bytes,
+                                               "KVarN continuation image exceeds int32") ||
+            kvarn_images_.ne[1] != linear_.slot_count() ||
+            !same_kvarn_layout(kvarn_layout_,
+                               std::optional<KvarnContinuationImageLayout>(
+                                   plan_kvarn_continuation_image(kvarn)))) {
+            throw std::invalid_argument("StateImage KVarN layout is inconsistent");
+        }
+        kvarn_text_layers_ = kvarn.text_layers;
+        kvarn_mtp_layers_  = kvarn.mtp_layers;
+        device_spec.kvarn  = kvarn;
+    }
+    if (layout.kvarn.has_value() != host_layout_.spec.kvarn.has_value()) {
+        throw std::invalid_argument("StateImage KVarN host layout is inconsistent");
+    }
+    if (!same_host_layout(host_layout_, plan_host_state_image(device_spec))) {
+        throw std::invalid_argument("StateImage host layout does not match its device components");
     }
 }
 
@@ -318,6 +430,54 @@ const CyclicKVCache* StateImageDevicePool::dflash_local() const noexcept {
     return dflash_local_ ? &*dflash_local_ : nullptr;
 }
 
+namespace {
+
+ops::KvarnTailStateView kvarn_tail_view(const Tensor& image,
+                                        const KvarnContinuationImageLayout& layout, bool mtp,
+                                        std::uint32_t layer) {
+    const std::uint32_t layers = mtp ? layout.spec.mtp_layers : layout.spec.text_layers;
+    if (layer >= layers) {
+        throw std::out_of_range("StateImage KVarN tail slot is out of range");
+    }
+    const std::size_t k_offset = (mtp ? layout.mtp_k_offset : layout.text_k_offset) +
+                                 layer * layout.tail_layer_bytes;
+    const std::size_t v_offset = (mtp ? layout.mtp_v_offset : layout.text_v_offset) +
+                                 layer * layout.tail_layer_bytes;
+    const std::size_t marker_offset =
+        (mtp ? layout.mtp_marker_offset : layout.text_marker_offset) +
+        layer * layout.marker_layer_bytes;
+    auto* base = static_cast<std::byte*>(image.data);
+    const std::int32_t row_heads = layout.spec.kv_heads * ops::kKvarnTailSlots;
+    return {
+        .k = Tensor(base + k_offset, DType::BF16,
+                    {layout.spec.head_dim, ops::kKvarnGroup, row_heads}),
+        .v = Tensor(base + v_offset, DType::BF16,
+                    {layout.spec.head_dim, ops::kKvarnGroup, row_heads}),
+        .logical_pages = Tensor(base + marker_offset, DType::I32, {ops::kKvarnTailSlots}),
+        .num_kv_heads = layout.spec.kv_heads,
+    };
+}
+
+} // namespace
+
+ops::KvarnTailStateView StateImageDevicePool::kvarn_text_tail(std::uint32_t layer,
+                                                              std::int32_t slot) const {
+    if (!has_kvarn()) { throw std::logic_error("StateImage has no KVarN continuation state"); }
+    validate_slot(slot, slot_count(), "StateImage KVarN slot is out of range");
+    const Tensor image = kvarn_images_.slice(1, slot, 1).view({kvarn_images_.ne[0]});
+    return kvarn_tail_view(image, *kvarn_layout_, false, layer);
+}
+
+ops::KvarnTailStateView StateImageDevicePool::kvarn_mtp_tail(std::uint32_t layer,
+                                                             std::int32_t slot) const {
+    if (!has_kvarn() || kvarn_mtp_layers_ == 0) {
+        throw std::logic_error("StateImage has no KVarN MTP continuation state");
+    }
+    validate_slot(slot, slot_count(), "StateImage KVarN slot is out of range");
+    const Tensor image = kvarn_images_.slice(1, slot, 1).view({kvarn_images_.ne[0]});
+    return kvarn_tail_view(image, *kvarn_layout_, true, layer);
+}
+
 void StateImageDevicePool::zero_slot(std::int32_t slot, cudaStream_t stream) {
     validate_slot(slot, slot_count(), "StateImage zero slot is out of range");
     linear_.zero_slot(slot, stream);
@@ -332,6 +492,20 @@ void StateImageDevicePool::zero_slot(std::int32_t slot, cudaStream_t stream) {
             CUDA_CHECK(cudaMemsetAsync(v.data, 0, v.bytes(), stream));
         }
     }
+    if (has_kvarn()) {
+        const Tensor image = kvarn_images_.slice(1, slot, 1).view({kvarn_images_.ne[0]});
+        CUDA_CHECK(cudaMemsetAsync(image.data, 0, image.bytes(), stream));
+        const auto reset_markers = [&](const ops::KvarnTailStateView& tail) {
+            CUDA_CHECK(cudaMemsetAsync(tail.logical_pages.data, 0xff,
+                                       tail.logical_pages.bytes(), stream));
+        };
+        for (std::uint32_t layer = 0; layer < kvarn_text_layers_; ++layer) {
+            reset_markers(kvarn_text_tail(layer, slot));
+        }
+        for (std::uint32_t layer = 0; layer < kvarn_mtp_layers_; ++layer) {
+            reset_markers(kvarn_mtp_tail(layer, slot));
+        }
+    }
 }
 
 void StateImageDevicePool::zero_all(cudaStream_t stream) {
@@ -342,6 +516,19 @@ void StateImageDevicePool::zero_all(cudaStream_t stream) {
             const CyclicKVCacheLayerView view = dflash_local_->layer_view(layer);
             CUDA_CHECK(cudaMemsetAsync(view.k.data, 0, view.k.bytes(), stream));
             CUDA_CHECK(cudaMemsetAsync(view.v.data, 0, view.v.bytes(), stream));
+        }
+    }
+    if (has_kvarn()) {
+        CUDA_CHECK(cudaMemsetAsync(kvarn_images_.data, 0, kvarn_images_.bytes(), stream));
+        for (std::int32_t slot = 0; slot < slot_count(); ++slot) {
+            for (std::uint32_t layer = 0; layer < kvarn_text_layers_; ++layer) {
+                const Tensor markers = kvarn_text_tail(layer, slot).logical_pages;
+                CUDA_CHECK(cudaMemsetAsync(markers.data, 0xff, markers.bytes(), stream));
+            }
+            for (std::uint32_t layer = 0; layer < kvarn_mtp_layers_; ++layer) {
+                const Tensor markers = kvarn_mtp_tail(layer, slot).logical_pages;
+                CUDA_CHECK(cudaMemsetAsync(markers.data, 0xff, markers.bytes(), stream));
+            }
         }
     }
 }
@@ -358,6 +545,14 @@ void StateImageDevicePool::copy_slot(std::int32_t source, std::int32_t destinati
                                destination_hidden.bytes(), cudaMemcpyDeviceToDevice, stream));
     if (dflash_local_) {
         dflash_local_->copy_slot_from(*dflash_local_, source, destination, stream);
+    }
+    if (has_kvarn()) {
+        const Tensor source_image =
+            kvarn_images_.slice(1, source, 1).view({kvarn_images_.ne[0]});
+        const Tensor destination_image =
+            kvarn_images_.slice(1, destination, 1).view({kvarn_images_.ne[0]});
+        CUDA_CHECK(cudaMemcpyAsync(destination_image.data, source_image.data,
+                                   source_image.bytes(), cudaMemcpyDeviceToDevice, stream));
     }
 }
 
@@ -413,6 +608,11 @@ void StateImageDevicePool::copy_to_host(std::int32_t source, HostStateImageView 
                 v.data, v.bytes(), cudaMemcpyDeviceToHost, stream));
         }
     }
+    if (has_kvarn()) {
+        const Tensor image = kvarn_images_.slice(1, source, 1).view({kvarn_images_.ne[0]});
+        CUDA_CHECK(cudaMemcpyAsync(byte_offset(destination.data, host_layout_.kvarn->offset),
+                                   image.data, image.bytes(), cudaMemcpyDeviceToHost, stream));
+    }
 }
 
 void StateImageDevicePool::copy_from_host(HostStateImageConstView source, std::int32_t destination,
@@ -454,6 +654,12 @@ void StateImageDevicePool::copy_from_host(HostStateImageConstView source, std::i
                                              layer * host_layout_.dflash_local_layer_bytes),
                 v.bytes(), cudaMemcpyHostToDevice, stream));
         }
+    }
+    if (has_kvarn()) {
+        const Tensor image =
+            kvarn_images_.slice(1, destination, 1).view({kvarn_images_.ne[0]});
+        CUDA_CHECK(cudaMemcpyAsync(image.data, byte_offset(source.data, host_layout_.kvarn->offset),
+                                   image.bytes(), cudaMemcpyHostToDevice, stream));
     }
 }
 

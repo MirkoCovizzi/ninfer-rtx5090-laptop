@@ -52,6 +52,7 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
 
     Tensor ar_position = state.execution.io.mtp->position.slice(0, 0, 1);
     ops::set_i32_scalar(ar_position, position + 1, state.execution.device.stream);
+    card.set_kvarn_provisional(true);
     for (int i = 1; i < static_cast<int>(state.mtp_proposal_extent); ++i) {
         Tensor previous_token = state.execution.io.mtp->draft_tokens.slice(0, i - 1, 1);
         Tensor next_draft     = state.execution.io.mtp->draft_tokens.slice(0, i, 1);

@@ -17,7 +17,7 @@ void expect(bool condition, std::string_view message) {
     std::cerr << "FAIL: " << message << '\n';
 }
 
-q36::StateImageDeviceLayout plan(bool dflash) {
+q36::StateImageDeviceLayout plan(bool dflash, bool kvarn = false) {
     q36::StateImageSpec spec{
         .linear =
             {
@@ -35,6 +35,10 @@ q36::StateImageDeviceLayout plan(bool dflash) {
     if (dflash) {
         spec.dflash_local =
             q36::DFlashLocalStateSpec{.layers = 2, .capacity = 17, .kv_heads = 2, .head_dim = 4};
+    }
+    if (kvarn) {
+        spec.kvarn = q36::KvarnContinuationStateSpec{
+            .text_layers = 2, .mtp_layers = 1, .kv_heads = 2, .head_dim = 256};
     }
     ninfer::LayoutBuilder builder;
     return q36::plan_state_image_device_pool(builder, spec);
@@ -64,6 +68,13 @@ int main() {
                full_work.copy_operations ==
                    common_work.copy_operations + local_work.copy_operations,
            "full DFlash StateImage work is not common plus local state");
+
+    const q36::StateImageDeviceLayout kvarn = plan(false, true);
+    const auto kvarn_work                   = q36::state_image_transfer_work(kvarn.host);
+    expect(kvarn_work.payload_bytes ==
+                   common_work.payload_bytes + kvarn.host.kvarn_layout->image_bytes &&
+               kvarn_work.copy_operations == common_work.copy_operations + 1,
+           "KVarN StateImage work includes exact sink/tail state");
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

@@ -1329,6 +1329,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
 
                     Tensor ar_position = io_.mtp->position.slice(0, 0, 1);
                     ops::set_i32_scalar(ar_position, base_i + T, s);
+                    set_kvarn_provisional(true);
                     for (int i = 1; i < static_cast<int>(mtp_proposal_extent_); ++i) {
                         Tensor prev_token     = io_.mtp->draft_tokens.slice(0, i - 1, 1);
                         Tensor next_token     = io_.mtp->draft_tokens.slice(0, i, 1);

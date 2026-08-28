@@ -369,6 +369,10 @@ State 与 KV 可以独立 placement，例如 State 在 Device、Main KV 部分�
 backend KV 采用另一种 coverage。Checkpoint 只有在全部 required components 至少保留一份有效 replica
 时才继续存在。
 
+KVarN 的 BF16 sink pages 和未完成 page 不能由 packed page record 重建，因此属于 StateImage。execution-row
+tail buffer 只是 active materialization；capture、Fork、Host transfer 和 activation 必须随完整 StateImage
+保存或恢复它。
+
 ---
 
 ## 6. Active completion guarantee

@@ -1113,6 +1113,8 @@ private:
                            std::uint32_t backend_tokens = 0);
     void restore_sequence_kvarn_tail(SequenceState& sequence, std::uint32_t main_tokens,
                                      std::uint32_t backend_tokens);
+    void capture_sequence_kvarn_tail(const SequenceState& sequence, StateImageHandle image);
+    void activate_sequence_kvarn_tail(const SequenceState& sequence);
     void release_sequence_growth_entitlement(SequenceState& sequence) noexcept;
     void release_sequence_kv(SequenceState& sequence) noexcept;
     void commit_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
