@@ -92,19 +92,21 @@ whole suite; private kernel, schedule, launcher, and T selection do not change i
 files call public `linear()` and contain no private selector, launcher, schedule, or kernel
 assertions.
 
-Run the native Python suites with the project Python environment:
+Run all self-contained CPU tests with Python 3.11 and the dependencies used by CI:
 
 ```bash
-python3 -m pytest \
-  tests/artifact tests/targets/qwen3_6_27b tests/targets/qwen3_6_35b_a3b \
-  tests/test_bench_matrix.py tests/test_serve_corpus.py
+python3 -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.7.1"
+python3 -m pip install -r tests/requirements-cpu.txt
+python3 -m pytest tests
+PYTHONPATH=eval python3 -m unittest discover -s eval/tests -p 'test_*.py'
 ```
 
 The Python binding tests use `NINFER_QWEN3_6_27B_ARTIFACT` when set, otherwise they look for
 `out/qwen3_6_27b.ninfer`. They report a pytest skip when neither path provides the real
 artifact. The 35B-A3B reference binding test follows the same rule with
 `NINFER_QWEN3_6_35B_A3B_ARTIFACT` and `out/qwen3_6_35b_a3b.ninfer`. The remaining Python
-target tests still run without either artifact.
+target tests still run without either artifact. Tests against local official checkpoint resources
+are also skipped when those checkpoint directories are unavailable.
 
 The C++ prefix/MTP integration test is separately opt-in because it loads the full artifact and
 runs the real engine:

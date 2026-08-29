@@ -1,0 +1,45 @@
+name: Clang Format
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clang-format:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends clang-format-18
+
+      - name: Check formatting
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            BASE_SHA="${GITHUB_SHA}^"
+          fi
+          mapfile -d '' sources < <(
+            git diff --name-only -z --diff-filter=ACMR "$BASE_SHA" "$GITHUB_SHA" -- \
+              '*.c' '*.cc' '*.cpp' '*.cxx' \
+              '*.h' '*.hh' '*.hpp' '*.hxx' \
+              '*.cu' '*.cuh' \
+              ':(exclude)third_party/**'
+          )
+          if ((${#sources[@]})); then
+            clang-format-18 \
+              --dry-run --Werror --style=file --fallback-style=none \
+              "${sources[@]}"
+          fi

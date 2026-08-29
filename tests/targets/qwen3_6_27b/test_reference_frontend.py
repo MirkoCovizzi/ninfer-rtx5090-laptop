@@ -3,10 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tools.reference.qwen3_6.common.frontend import Frontend
 
 
 MODEL = Path("/home/neroued/models/llm/qwen/Qwen3.6-27B/base-hf-bf16")
+pytestmark = pytest.mark.skipif(
+    not MODEL.is_dir(),
+    reason="the local official Qwen3.6-27B checkpoint is unavailable",
+)
 CONFIG_ONLY_TOKENS = {
     "<|audio_start|>": 248070,
     "<|audio_end|>": 248071,
