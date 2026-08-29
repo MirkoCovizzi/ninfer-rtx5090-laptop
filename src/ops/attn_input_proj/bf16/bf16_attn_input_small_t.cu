@@ -49,22 +49,19 @@ struct Bf16AttentionInputSmallTOutput {
 template <int ActiveTokens>
 struct Bf16AttentionSmallTProductionSchedule {
     static_assert(ActiveTokens >= 1 && ActiveTokens <= 32);
-    // The Attention epilogue is measured separately from Linear, so it owns its exact-T winner
-    // mapping while sharing the Linear computation body.
+    // The projection feeds observable KV state. Keep one contraction profile across decode and
+    // compact verification while retaining each width's independent row occupancy choice.
     static constexpr int kRowsPerWarp = ActiveTokens <= 4 ? 8 : (ActiveTokens <= 8 ? 4 : 2);
     static constexpr Bf16SmallTActivationAccess kActivationAccess =
-        ActiveTokens <= 8 ? Bf16SmallTActivationAccess::WarpPacked
-                          : Bf16SmallTActivationAccess::DirectStream;
-    static constexpr bool kSequential = ActiveTokens <= 9 || ActiveTokens >= 17;
+        Bf16SmallTActivationAccess::WarpPacked;
     static constexpr bool kUnroll2 = ActiveTokens == 4 || ActiveTokens == 5 || ActiveTokens == 8 ||
                                      (ActiveTokens >= 10 && ActiveTokens <= 18) ||
                                      ActiveTokens >= 23;
     static constexpr Bf16WeightCache kWeightCache =
         ActiveTokens == 7 ? Bf16WeightCache::Streaming : Bf16WeightCache::Default;
-    static constexpr Bf16PhaseOrder kPhaseOrder =
-        kSequential ? Bf16PhaseOrder::Sequential : Bf16PhaseOrder::RowSwizzled;
-    using Type = Bf16SmallTInnerSchedule<4, 1, kRowsPerWarp, 8, 1, 4, kActivationAccess,
-                                         kWeightCache, kPhaseOrder, 1, kUnroll2 ? 2 : 1, 1, 2>;
+    using Type =
+        Bf16SmallTInnerSchedule<4, 1, kRowsPerWarp, 8, 1, 4, kActivationAccess, kWeightCache,
+                                Bf16PhaseOrder::Sequential, 1, kUnroll2 ? 2 : 1, 1, 2>;
 };
 
 template <int ActiveTokens>

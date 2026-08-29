@@ -15,6 +15,9 @@ namespace {
 
 constexpr std::uint32_t kOutputTokens = 128;
 constexpr std::array<std::uint32_t, 5> kMtpDraftCounts{1, 2, 3, 4, 5};
+constexpr std::uint32_t kMaximumConcurrency = 8;
+constexpr std::array<std::uint32_t, 8> kConcurrencyFrontiers{1, 2, 3, 4,
+                                                             5, 6, 7, kMaximumConcurrency};
 
 struct KvProfile {
     std::string_view name;
@@ -27,22 +30,33 @@ constexpr std::array kKvProfiles{
 };
 
 ninfer::EngineOptions engine_options(const char* artifact, ninfer::KvCacheStorage kv_storage,
-                                     std::uint32_t mtp_draft_tokens) {
+                                     std::uint32_t mtp_draft_tokens,
+                                     std::uint32_t max_concurrency = 1) {
     const bool mtp = mtp_draft_tokens != 0;
     ninfer::EngineOptions options;
-    options.artifact_path        = artifact;
-    options.max_context          = 512;
-    options.kv_capacity          = ninfer::KvCapacityPolicy::explicit_capacity(512);
-    options.max_concurrency      = 1;
-    options.prefill_chunk        = 128;
-    options.kv_cache             = kv_storage;
-    options.use_cuda_graph       = false;
-    options.speculative.backend  = mtp ? ninfer::SpeculativeBackend::Mtp
-                                       : ninfer::SpeculativeBackend::None;
+    options.artifact_path   = artifact;
+    options.max_context     = 512;
+    options.kv_capacity     = ninfer::KvCapacityPolicy::explicit_capacity(512 * max_concurrency);
+    options.max_concurrency = max_concurrency;
+    options.prefill_chunk   = 128;
+    options.kv_cache        = kv_storage;
+    options.use_cuda_graph  = false;
+    options.speculative.backend =
+        mtp ? ninfer::SpeculativeBackend::Mtp : ninfer::SpeculativeBackend::None;
     options.speculative.draft_tokens = mtp_draft_tokens;
     options.speculative.proposal_head =
         mtp ? ninfer::ProposalHead::Optimized : ninfer::ProposalHead::Full;
     return options;
+}
+
+ninfer::RequestOptions greedy_request() {
+    ninfer::RequestOptions request;
+    request.execution.requested_output_tokens = kOutputTokens;
+    request.execution.sampling.temperature    = 0.0F;
+    request.execution.sampling.seed           = 424242;
+    request.execution.allow_prefix_reuse      = false;
+    request.stop.include_model_defaults       = false;
+    return request;
 }
 
 ninfer::PromptInput prompt() {
@@ -60,26 +74,70 @@ ninfer::PromptInput prompt() {
 }
 
 std::vector<ninfer::TokenId> generate(const char* artifact, ninfer::KvCacheStorage kv_storage,
-                                       std::uint32_t mtp_draft_tokens) {
-    const std::string route = mtp_draft_tokens == 0
-                                  ? "ordinary"
-                                  : "MTP k=" + std::to_string(mtp_draft_tokens);
+                                      std::uint32_t mtp_draft_tokens) {
+    const std::string route =
+        mtp_draft_tokens == 0 ? "ordinary" : "MTP k=" + std::to_string(mtp_draft_tokens);
     try {
         ninfer::Engine engine(engine_options(artifact, kv_storage, mtp_draft_tokens));
-        ninfer::RequestOptions request;
-        request.execution.requested_output_tokens = kOutputTokens;
-        request.execution.sampling.temperature    = 0.0F;
-        request.execution.sampling.seed           = 424242;
-        request.execution.allow_prefix_reuse      = false;
-        request.stop.include_model_defaults       = false;
-        ninfer::GenerationResult result = engine.generate(engine.prepare(prompt()), request);
+        ninfer::GenerationResult result =
+            engine.generate(engine.prepare(prompt()), greedy_request());
         if (result.generated_token_ids.size() != kOutputTokens ||
             result.finish_reason != ninfer::FinishReason::OutputLimit) {
             throw std::runtime_error("did not reach its fixed output limit");
         }
         return result.generated_token_ids;
-    } catch (const std::exception& error) {
-        throw std::runtime_error(route + ": " + error.what());
+    } catch (const std::exception& error) { throw std::runtime_error(route + ": " + error.what()); }
+}
+
+void verify_result(std::string_view label, const ninfer::GenerationResult& result,
+                   const std::vector<ninfer::TokenId>& expected) {
+    const auto& actual = result.generated_token_ids;
+    if (actual.size() != expected.size() ||
+        result.finish_reason != ninfer::FinishReason::OutputLimit) {
+        throw std::runtime_error(std::string(label) + " did not reach its fixed output limit");
+    }
+    const auto [expected_mismatch, actual_mismatch] =
+        std::mismatch(expected.begin(), expected.end(), actual.begin());
+    if (expected_mismatch != expected.end()) {
+        const std::size_t index = static_cast<std::size_t>(expected_mismatch - expected.begin());
+        throw std::runtime_error(std::string(label) + " mismatch at token " +
+                                 std::to_string(index) +
+                                 ": expected=" + std::to_string(*expected_mismatch) +
+                                 " actual=" + std::to_string(*actual_mismatch));
+    }
+}
+
+void verify_batch(ninfer::Engine& engine, KvProfile profile, std::uint32_t draft_tokens,
+                  std::uint32_t concurrency, std::uint32_t iteration,
+                  const std::vector<ninfer::TokenId>& expected) {
+    std::vector<ninfer::PreparedPrompt> prompts;
+    prompts.reserve(concurrency);
+    for (std::uint32_t row = 0; row < concurrency; ++row) {
+        prompts.push_back(engine.prepare(prompt()));
+    }
+    std::vector<ninfer::GenerationHandle> handles;
+    handles.reserve(concurrency);
+    for (std::uint32_t row = 0; row < concurrency; ++row) {
+        handles.push_back(engine.submit(std::move(prompts[row]), greedy_request()));
+    }
+    for (std::uint32_t row = 0; row < concurrency; ++row) {
+        const std::string label =
+            std::string(profile.name) + " MTP k=" + std::to_string(draft_tokens) +
+            " C=" + std::to_string(concurrency) + " iteration=" + std::to_string(iteration) +
+            " row=" + std::to_string(row);
+        verify_result(label, handles[row].wait(), expected);
+    }
+}
+
+void verify_route(const char* artifact, KvProfile profile, std::uint32_t draft_tokens,
+                  const std::vector<ninfer::TokenId>& expected) {
+    ninfer::Engine engine(
+        engine_options(artifact, profile.storage, draft_tokens, kMaximumConcurrency));
+    for (const std::uint32_t concurrency : kConcurrencyFrontiers) {
+        verify_batch(engine, profile, draft_tokens, concurrency, 0, expected);
+        if (concurrency == kMaximumConcurrency) {
+            verify_batch(engine, profile, draft_tokens, concurrency, 1, expected);
+        }
     }
 }
 
@@ -94,22 +152,10 @@ int main() {
 
     try {
         for (const KvProfile profile : kKvProfiles) {
-            const std::vector<ninfer::TokenId> ordinary =
-                generate(artifact, profile.storage, 0);
+            const std::vector<ninfer::TokenId> ordinary = generate(artifact, profile.storage, 0);
+            verify_route(artifact, profile, 0, ordinary);
             for (const std::uint32_t draft_tokens : kMtpDraftCounts) {
-                const std::vector<ninfer::TokenId> mtp =
-                    generate(artifact, profile.storage, draft_tokens);
-                const auto [ordinary_mismatch, mtp_mismatch] =
-                    std::mismatch(ordinary.begin(), ordinary.end(), mtp.begin(), mtp.end());
-                if (ordinary_mismatch != ordinary.end()) {
-                    const std::size_t index =
-                        static_cast<std::size_t>(ordinary_mismatch - ordinary.begin());
-                    std::cerr << "greedy MTP parity mismatch for " << profile.name << " KV at k="
-                              << draft_tokens << ", generated token " << index
-                              << ": ordinary=" << *ordinary_mismatch
-                              << " mtp=" << *mtp_mismatch << '\n';
-                    return 1;
-                }
+                verify_route(artifact, profile, draft_tokens, ordinary);
             }
         }
     } catch (const std::exception& error) {

@@ -20,7 +20,7 @@ Fp8AttnInputRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (policy != LinearPolicy::AllowA8) {
         throw std::invalid_argument("fp8 attn_input_proj: unsupported policy");
     }
-    return tokens >= 11 ? Fp8AttnInputRoute::A8 : Fp8AttnInputRoute::A16;
+    return Fp8AttnInputRoute::A8;
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tensor& k,

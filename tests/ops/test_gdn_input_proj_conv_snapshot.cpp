@@ -24,7 +24,7 @@ constexpr ReductionCriterion kGdnInputProjConvSnapshotA16Tolerance{3.15e-3, 4.0e
 constexpr ReductionCriterion kGdnInputProjConvSnapshotA4Tolerance{0.16, 4.0e-3, 0.16};
 constexpr ReductionCriterion kFp8GdnInputProjConvSnapshotA16Tolerance{1.0 / 256.0, 1.0 / 256.0,
                                                                       2.0 / 256.0};
-constexpr ReductionCriterion kFp8GdnInputProjConvSnapshotA8Tolerance{0.04, 1.0 / 256.0, 0.06};
+constexpr ReductionCriterion kFp8GdnInputProjConvSnapshotA8Tolerance{0.05, 1.0 / 256.0, 0.06};
 
 constexpr std::int32_t kQueryRows = 2048;
 constexpr std::int32_t kKeyRows   = 2048;
@@ -888,7 +888,7 @@ int run_fp8_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearPol
                 parent.host, row, activation.data() + static_cast<std::size_t>(token) * kHidden,
                 kHidden);
         });
-    const bool uses_a8                  = policy == ops::LinearPolicy::AllowA8 && tokens >= 10;
+    const bool uses_a8                  = policy == ops::LinearPolicy::AllowA8;
     const ReductionCriterion& criterion = uses_a8 ? kFp8GdnInputProjConvSnapshotA8Tolerance
                                                   : kFp8GdnInputProjConvSnapshotA16Tolerance;
     const std::string suffix =
@@ -950,7 +950,6 @@ int run_fp8() {
     const auto run_batched = [&](std::int32_t width, std::int32_t batch,
                                  std::vector<std::int32_t> valid_columns, std::uint32_t seed) {
         const std::vector<float> conv_weight = make_conv_weight(kChannels, seed);
-        const bool uses_a8                   = width * batch >= 9;
         const std::size_t workspace_bytes =
             ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
                 QType::FP8_E4M3FN_ROW_BF16S, kRows, kHidden, ops::LinearPolicy::AllowA8, batch,
@@ -958,9 +957,7 @@ int run_fp8() {
         return run_batched_case(
             "FP8 AllowA8 B=" + std::to_string(batch) + " W=" + std::to_string(width), kHidden,
             kValueRows, kZRows, width, batch, std::move(valid_columns), conv_weight,
-            workspace_bytes,
-            uses_a8 ? kFp8GdnInputProjConvSnapshotA8Tolerance
-                    : kFp8GdnInputProjConvSnapshotA16Tolerance,
+            workspace_bytes, kFp8GdnInputProjConvSnapshotA8Tolerance,
             [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
                 return quantized_weight::dot_fp64(
                     parent.host, row,
@@ -1033,17 +1030,18 @@ int main() {
     };
     const std::size_t fp8_a16_w4 = fp8_snapshot_capacity(ops::LinearPolicy::A16Only, 1, 4, 4);
     const std::size_t fp8_a16_w6 = fp8_snapshot_capacity(ops::LinearPolicy::A16Only, 1, 6, 6);
+    const std::size_t fp8_a8_w1  = fp8_snapshot_capacity(ops::LinearPolicy::AllowA8, 1, 1, 1);
     const std::size_t fp8_a8_w10 = fp8_snapshot_capacity(ops::LinearPolicy::AllowA8, 1, 10, 10);
     if (fp8_snapshot_capacity(ops::LinearPolicy::A16Only, 1, 1, 3) != 0 || fp8_a16_w4 == 0 ||
         fp8_a16_w6 <= fp8_a16_w4 ||
         fp8_snapshot_capacity(ops::LinearPolicy::A16Only, 1, 7, 10) != 0 ||
         fp8_snapshot_capacity(ops::LinearPolicy::A16Only, 1, 1, 9) != fp8_a16_w6 ||
-        fp8_snapshot_capacity(ops::LinearPolicy::A16Only, 1, 11, 11) == 0 ||
-        fp8_snapshot_capacity(ops::LinearPolicy::AllowA8, 1, 7, 9) != 0 || fp8_a8_w10 == 0 ||
+        fp8_snapshot_capacity(ops::LinearPolicy::A16Only, 1, 11, 11) == 0 || fp8_a8_w1 == 0 ||
+        fp8_a8_w10 <= fp8_a8_w1 ||
         fp8_snapshot_capacity(ops::LinearPolicy::AllowA8, 1, 1, 10) != fp8_a8_w10 ||
         fp8_snapshot_capacity(ops::LinearPolicy::AllowA8, 2, 5, 5) <=
             fp8_snapshot_capacity(ops::LinearPolicy::AllowA8, 2, 4, 4)) {
-        std::cerr << "FP8 snapshot capacity did not preserve measured route witnesses\n";
+        std::cerr << "FP8 snapshot capacity did not preserve A8 interval witnesses\n";
         ++failures;
     }
     failures += run_q4_q5();

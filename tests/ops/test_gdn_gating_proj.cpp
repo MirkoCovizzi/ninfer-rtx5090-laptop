@@ -436,11 +436,11 @@ int main() {
     }
 
     int failures = 0;
-    failures += verify_workspace_capacity_contract(kQwen27, {1, 8, 1024, 2048, 4096, 4097});
+    failures += verify_workspace_capacity_contract(kQwen27, {1, 48, 1024, 2048, 4096, 4097});
     failures += verify_workspace_capacity_contract(kQwen35, {1, 127, 1024, 2048, 4096, 4097});
 
     // Every registered 27B projection route, including predicated and full token tiles.
-    for (const std::int32_t tokens : {1, 8, 9, 1024, 1025, 2049, 4097}) {
+    for (const std::int32_t tokens : {1, 48, 49, 1024, 1025, 2049, 4097}) {
         failures +=
             run_projection_case(kQwen27, tokens, 0x1000u + static_cast<std::uint32_t>(tokens));
     }

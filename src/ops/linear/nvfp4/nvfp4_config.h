@@ -211,7 +211,7 @@ struct Nvfp4LinearSmallTProductionSchedule<Nvfp4Residual6144Geometry, ActiveToke
     static_assert(ActiveTokens >= 1);
     static_assert(ActiveTokens <= kNvfp4LastSmallT);
     static constexpr int kWarpsPerCta   = ActiveTokens <= 16 ? (ActiveTokens >= 14 ? 16 : 4) : 4;
-    static constexpr int kValuesPerLane = ActiveTokens >= 17 && ActiveTokens <= 20 ? 8 : 16;
+    static constexpr int kValuesPerLane = 16;
     static constexpr auto kActivationAccess = Nvfp4SmallTActivationAccess::TokenPacked;
     using Type =
         Nvfp4SmallTSchedule<kWarpsPerCta, 1, 2, kValuesPerLane, ActiveTokens, 1, kActivationAccess,

@@ -28,13 +28,13 @@ struct RouteSpec {
 };
 
 constexpr std::array<RouteSpec, 5> k27Routes{{
-    // Decode and speculative verification share one reduction profile so observable FP32 decay
-    // and update controls do not depend on the physical verification width.
-    {{1, 8}, Bf16GdnGatingScheduleId::SmallTSplit10},
+    // Decode and compact speculative verification share one reduction profile so observable FP32
+    // decay and update controls do not depend on active request count or verification width.
+    {{1, 8 * 6}, Bf16GdnGatingScheduleId::SmallTSplit10},
     // As token tiles double, halve SplitK. This keeps the cooperative grid near 192 CTAs instead
     // of making T a launch limit. Once the unsplit grid has enough independent work, it also
     // removes the cooperative-residency constraint.
-    {{9, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
+    {{8 * 6 + 1, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
     {{1025, 2048}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
     {{2049, 4096}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
     {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
@@ -94,8 +94,8 @@ int device_multiprocessor_count() {
         int device = 0;
         CUDA_CHECK(cudaGetDevice(&device));
         int multiprocessors = 0;
-        CUDA_CHECK(cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount,
-                                          device));
+        CUDA_CHECK(
+            cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, device));
         if (multiprocessors <= 0) {
             throw std::runtime_error("BF16 GDN gating: device reports no multiprocessors");
         }
@@ -159,15 +159,14 @@ bool cooperative_35_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int3
                                         resident_per_sm * device_multiprocessor_count());
 }
 
-bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
-                        const Bf16GdnGatingProblem& problem) {
+bool candidate_is_legal(Bf16GdnGatingScheduleId schedule, const Bf16GdnGatingProblem& problem) {
     if (!bf16_gdn_gating_admits(problem)) { return false; }
     if (is_27(problem)) {
         switch (schedule) {
         case Bf16GdnGatingScheduleId::GemvPairedRows:
             return problem.cols == 1;
         case Bf16GdnGatingScheduleId::SmallTSplit10:
-            return problem.cols >= 1 && problem.cols <= 8;
+            return problem.cols >= 1 && problem.cols <= 8 * 6;
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
@@ -378,8 +377,8 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
                 }
                 if (schedule_uses_mma(route.schedule) &&
                     route.schedule != Bf16GdnGatingScheduleId::MmaUnsplit) {
-                    return bf16_gdn_gating_resolve_candidate(
-                        Bf16GdnGatingScheduleId::MmaUnsplit, problem);
+                    return bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId::MmaUnsplit,
+                                                             problem);
                 }
             }
         }
@@ -391,8 +390,8 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
                 }
                 if (schedule_uses_mma(route.schedule) &&
                     route.schedule != Bf16GdnGatingScheduleId::MmaUnsplit) {
-                    return bf16_gdn_gating_resolve_candidate(
-                        Bf16GdnGatingScheduleId::MmaUnsplit, problem);
+                    return bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId::MmaUnsplit,
+                                                             problem);
                 }
             }
         }

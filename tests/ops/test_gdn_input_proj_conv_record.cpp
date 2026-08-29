@@ -478,8 +478,7 @@ int run_fp8_oracle_case(DevicePackedWeight& parent, std::int32_t width, std::int
         }
     }
 
-    const bool uses_a8 =
-        policy == ops::LinearPolicy::AllowA8 && (batch == 1 ? width >= 10 : width * batch >= 8);
+    const bool uses_a8 = policy == ops::LinearPolicy::AllowA8;
     const ReductionCriterion& criterion =
         uses_a8 ? kFp8GdnInputProjConvRecordA8Tolerance : kFp8GdnInputProjConvRecordA16Tolerance;
     const std::string label = std::string("FP8 ") + (uses_a8 ? "A8" : "A16") +
@@ -553,14 +552,13 @@ int main() {
         return ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
             QType::FP8_E4M3FN_ROW_BF16S, 16384, 5120, policy, batch, min_width, max_width);
     };
-    const std::size_t fp8_b1_w10 = fp8_record_capacity(ops::LinearPolicy::AllowA8, 1, 10, 10);
-    const std::size_t fp8_b2_w4  = fp8_record_capacity(ops::LinearPolicy::AllowA8, 2, 4, 4);
-    if (fp8_record_capacity(ops::LinearPolicy::A16Only, 1, 2, 16) != 0 ||
-        fp8_record_capacity(ops::LinearPolicy::AllowA8, 1, 2, 9) != 0 || fp8_b1_w10 == 0 ||
-        fp8_record_capacity(ops::LinearPolicy::AllowA8, 1, 2, 10) != fp8_b1_w10 ||
-        fp8_record_capacity(ops::LinearPolicy::AllowA8, 2, 2, 3) != 0 || fp8_b2_w4 == 0 ||
-        fp8_record_capacity(ops::LinearPolicy::AllowA8, 2, 2, 4) != fp8_b2_w4) {
-        std::cerr << "FP8 record capacity did not preserve measured route witnesses\n";
+    const std::size_t fp8_b1_w2 = fp8_record_capacity(ops::LinearPolicy::AllowA8, 1, 2, 2);
+    const std::size_t fp8_b2_w2 = fp8_record_capacity(ops::LinearPolicy::AllowA8, 2, 2, 2);
+    if (fp8_record_capacity(ops::LinearPolicy::A16Only, 1, 2, 16) != 0 || fp8_b1_w2 == 0 ||
+        fp8_b2_w2 <= fp8_b1_w2 ||
+        fp8_record_capacity(ops::LinearPolicy::AllowA8, 1, 2, 10) <= fp8_b1_w2 ||
+        fp8_record_capacity(ops::LinearPolicy::AllowA8, 2, 2, 4) <= fp8_b2_w2) {
+        std::cerr << "FP8 record capacity did not preserve A8 interval witnesses\n";
         ++failures;
     }
     failures += run_q4_q5();

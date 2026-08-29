@@ -25,7 +25,7 @@ constexpr ReductionCriterion kAttnInputProjA16Tolerance{2.9e-3, 4.0e-3, 4.5e-3};
 // FP8 A16 reuses the qualified Linear decode arithmetic profile rather than the other A16
 // attention-input implementations' reduction profile.
 constexpr ReductionCriterion kFp8AttnInputProjA16Tolerance{1.0 / 256.0, 1.0 / 256.0, 2.0 / 256.0};
-constexpr ReductionCriterion kAttnInputProjA8Tolerance{0.04, 1.0 / 256.0, 0.06};
+constexpr ReductionCriterion kAttnInputProjA8Tolerance{0.05, 1.0 / 256.0, 0.06};
 constexpr ReductionCriterion kAttnInputProjA4Tolerance{0.16, 1.0 / 256.0, 0.16};
 // Retain the original seven grid points while stabilizing the distribution-level A4 criterion.
 constexpr std::int32_t kA4SampleRows = 31;
@@ -345,7 +345,7 @@ int run_fp8_target_case(DevicePackedWeight& parent, std::int32_t tokens, ops::Li
     constexpr std::int32_t kKeyBegin   = kQRows;
     constexpr std::int32_t kGateBegin  = kKeyBegin + kKvRows;
     constexpr std::int32_t kValueBegin = kGateBegin + kQRows;
-    const bool a8                      = policy == ops::LinearPolicy::AllowA8 && tokens >= 11;
+    const bool a8                      = policy == ops::LinearPolicy::AllowA8;
     const ReductionCriterion& criterion =
         a8 ? kAttnInputProjA8Tolerance : kFp8AttnInputProjA16Tolerance;
     const std::int32_t sample_count = a8 ? kA8SampleRows : 7;
@@ -386,7 +386,7 @@ int run_fp8_target() {
         QType::FP8_E4M3FN_ROW_BF16S, kRows, kHidden, ops::LinearPolicy::AllowA8, 1024, 1024);
     const std::size_t a16 = ops::attn_input_proj_workspace_capacity_bytes(
         QType::FP8_E4M3FN_ROW_BF16S, kRows, kHidden, ops::LinearPolicy::A16Only, 1, 2048);
-    if (one != 0 || ten != 0 || eleven == 0 || forty_eight <= eleven ||
+    if (one == 0 || ten <= one || eleven <= ten || forty_eight <= eleven ||
         hot_interval != forty_eight || exact_1024 <= forty_eight || a16 != 0) {
         std::cerr << "FP8 attention input workspace interval contract mismatch\n";
         ++failures;

@@ -1,5 +1,7 @@
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
@@ -40,7 +42,14 @@ void bf16_linear_add_dispatch(const Tensor& x, const Weight& weight, Tensor& res
         bf16_linear_add_decode_launch(x, weight, residual, stream);
         return;
     case Bf16LinearAddScheduleId::SmallT:
-        bf16_linear_add_small_t_launch(x, weight, residual, stream);
+        // Keep the observable residual update on its decode reduction profile throughout the
+        // compact verification frontier. The exact-T kernels cover 32 columns per launch.
+        for (std::int32_t begin = 0; begin < x.ne[1]; begin += kBf16LinearAddSmallTMaxTokens) {
+            const std::int32_t count = std::min(kBf16LinearAddSmallTMaxTokens, x.ne[1] - begin);
+            Tensor x_chunk           = x.slice(1, begin, count);
+            Tensor residual_chunk    = residual.slice(1, begin, count);
+            bf16_linear_add_small_t_launch(x_chunk, weight, residual_chunk, stream);
+        }
         return;
     case Bf16LinearAddScheduleId::AggregateMma:
         bf16_linear_add_aggregate_mma_launch(x, weight, residual, stream);

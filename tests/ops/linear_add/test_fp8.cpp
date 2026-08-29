@@ -88,16 +88,12 @@ int verify_preserved(const GuardedDeviceBuffer& device, std::span<const std::uin
     return 1;
 }
 
-int run_shape(std::int32_t n, std::int32_t k, std::int32_t first_a8, std::uint32_t seed) {
+int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
     const std::array invocations{
-        Invocation{1, ops::LinearPolicy::A16Only},
-        Invocation{2, ops::LinearPolicy::A16Only},
-        Invocation{26, ops::LinearPolicy::A16Only},
-        Invocation{first_a8 - 1, ops::LinearPolicy::AllowA8},
-        Invocation{first_a8, ops::LinearPolicy::AllowA8},
-        Invocation{48, ops::LinearPolicy::AllowA8},
-        Invocation{65, ops::LinearPolicy::AllowA8},
-        Invocation{1024, ops::LinearPolicy::AllowA8},
+        Invocation{1, ops::LinearPolicy::A16Only},  Invocation{2, ops::LinearPolicy::A16Only},
+        Invocation{26, ops::LinearPolicy::A16Only}, Invocation{1, ops::LinearPolicy::AllowA8},
+        Invocation{2, ops::LinearPolicy::AllowA8},  Invocation{48, ops::LinearPolicy::AllowA8},
+        Invocation{65, ops::LinearPolicy::AllowA8}, Invocation{1024, ops::LinearPolicy::AllowA8},
     };
     constexpr std::int32_t kMaximumTokens = 1024;
     quantized_weight::PackedWeight host_weight =
@@ -128,8 +124,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::int32_t first_a8, std::uint32
         ops::linear_add(x, weight, residual, invocation.policy, workspace, nullptr);
         cuda_check(cudaDeviceSynchronize(), "synchronize FP8 linear_add");
 
-        const bool a8 =
-            invocation.policy == ops::LinearPolicy::AllowA8 && invocation.tokens >= first_a8;
+        const bool a8           = invocation.policy == ops::LinearPolicy::AllowA8;
         const std::string label = "FP8 linear_add [" + std::to_string(n) + "," + std::to_string(k) +
                                   "] " + (a8 ? "A8" : "A16") +
                                   " T=" + std::to_string(invocation.tokens);
@@ -177,8 +172,8 @@ int run_shape(std::int32_t n, std::int32_t k, std::int32_t first_a8, std::uint32
 
     const std::size_t a16_interval = ops::linear_add_workspace_capacity_bytes(
         QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::A16Only, 1, 2048);
-    const std::size_t pre_boundary = ops::linear_add_workspace_capacity_bytes(
-        QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 1, first_a8 - 1);
+    const std::size_t exact_one = ops::linear_add_workspace_capacity_bytes(
+        QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 1, 1);
     const std::size_t hot_interval = ops::linear_add_workspace_capacity_bytes(
         QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 1, 48);
     const std::size_t exact_48 = ops::linear_add_workspace_capacity_bytes(
@@ -187,7 +182,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::int32_t first_a8, std::uint32
         QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 1, 1024);
     const std::size_t exact_1024 = ops::linear_add_workspace_capacity_bytes(
         QType::FP8_E4M3FN_ROW_BF16S, n, k, ops::LinearPolicy::AllowA8, 1024, 1024);
-    if (a16_interval != 0 || pre_boundary != 0 || hot_interval != exact_48 ||
+    if (a16_interval != 0 || exact_one == 0 || hot_interval != exact_48 ||
         through_1024 != exact_1024 || exact_1024 <= exact_48) {
         std::cerr << "FP8 linear_add [" << n << ',' << k
                   << "]: workspace interval contract mismatch\n";
@@ -204,8 +199,8 @@ int main() {
         return 77;
     }
     int failures = 0;
-    failures += run_shape(5120, 6144, 22, 861U);
-    failures += run_shape(5120, 17408, 25, 863U);
+    failures += run_shape(5120, 6144, 861U);
+    failures += run_shape(5120, 17408, 863U);
     std::cout << (failures == 0 ? "OK" : "FAIL") << " FP8 linear_add\n";
     return failures == 0 ? 0 : 1;
 }
