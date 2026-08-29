@@ -77,13 +77,16 @@ __launch_bounds__(D) __global__ void materialize_prefill_slab_kernel(
     const auto* v_channel = reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
     const auto* v_scale = reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
     const auto* v_zero = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
+    const auto* k_words = reinterpret_cast<const std::uint32_t*>(
+        record + kKvarnKPackedOffset + d * (Group / 2));
+    std::uint32_t packed_k[Group / 8];
+#pragma unroll
+    for (int word = 0; word < Group / 8; ++word) packed_k[word] = k_words[word];
     const float column_scale = __half2float(k_scale[d]);
     const float column_zero = __half2float(k_zero[d]);
     const float channel_scale = __half2float(v_channel[d]);
     for (int token = 0; token < Group && page_begin + token < visible; ++token) {
-        const std::uint8_t k_packed =
-            record[kKvarnKPackedOffset + d * (Group / 2) + token / 2];
-        const int k_code = (k_packed >> (4 * (token & 1))) & 15;
+        const int k_code = (packed_k[token / 8] >> (4 * (token & 7))) & 15;
         const std::uint8_t v_packed =
             record[kKvarnVPackedOffset + token * (D / 4) + d / 4];
         const int v_code = (v_packed >> (2 * (d & 3))) & 3;
