@@ -43,12 +43,12 @@ static_assert(BT == N_WARPS * MMA_M,
               "kernel assigns one 16-row strip per warp; BT must equal N_WARPS * MMA_M");
 
 constexpr int BF16_MMA_K = 16;
-constexpr int K_PANEL     = 32;
-constexpr int D_PANEL     = 16;
-constexpr int N_K_PANELS  = kStateDim / K_PANEL;
-constexpr int N_D_PANELS  = kStateDim / D_PANEL;
-constexpr int N_TILES_BT  = BT / MMA_N;
-constexpr int K_TILES_BT  = BT / MMA_K;
+constexpr int K_PANEL    = 32;
+constexpr int D_PANEL    = 16;
+constexpr int N_K_PANELS = kStateDim / K_PANEL;
+constexpr int N_D_PANELS = kStateDim / D_PANEL;
+constexpr int N_TILES_BT = BT / MMA_N;
+constexpr int K_TILES_BT = BT / MMA_K;
 
 static_assert(K_PANEL % BF16_MMA_K == 0);
 static_assert(D_PANEL % MMA_N == 0);
@@ -58,13 +58,11 @@ struct kernel_dims {
     static constexpr int K_PANEL_BF16 = BT * K_PANEL;
     static constexpr int H_PANEL_BF16 = D_PANEL * kStateDim;
     static constexpr int V_PANEL_BF16 = BT * D_PANEL;
-    static constexpr int STAGE_BF16 =
-        K_PANEL_BF16 > H_PANEL_BF16 ? K_PANEL_BF16 : H_PANEL_BF16;
+    static constexpr int STAGE_BF16   = K_PANEL_BF16 > H_PANEL_BF16 ? K_PANEL_BF16 : H_PANEL_BF16;
     static_assert(STAGE_BF16 >= V_PANEL_BF16);
 
     static constexpr int BF16_SMEM_ELEMS = Q_BF16 + 2 * STAGE_BF16;
-    static constexpr int SMEM_BYTES =
-        BF16_SMEM_ELEMS * static_cast<int>(sizeof(__nv_bfloat16));
+    static constexpr int SMEM_BYTES = BF16_SMEM_ELEMS * static_cast<int>(sizeof(__nv_bfloat16));
 };
 
 template <int STRIDE>
@@ -82,9 +80,9 @@ struct Bf16SmemTile {
 };
 
 template <int ROWS, int COLS, int BLOCK_THREADS>
-__device__ __forceinline__ void
-issue_cp_bf16(Bf16SmemTile<COLS> dst, const __nv_bfloat16* __restrict__ src_row0,
-              std::int64_t src_row_stride, int tid) {
+__device__ __forceinline__ void issue_cp_bf16(Bf16SmemTile<COLS> dst,
+                                              const __nv_bfloat16* __restrict__ src_row0,
+                                              std::int64_t src_row_stride, int tid) {
     static_assert(COLS % 8 == 0);
     constexpr int VECS_PER_ROW = COLS / 8;
     constexpr int N_VECS       = ROWS * VECS_PER_ROW;
@@ -98,10 +96,9 @@ issue_cp_bf16(Bf16SmemTile<COLS> dst, const __nv_bfloat16* __restrict__ src_row0
 }
 
 template <int N_TILES, int K_TILES, int A_STRIDE, int B_STRIDE>
-__device__ __forceinline__ void
-mma_bf16_panel(float (&D)[N_TILES][4], Bf16SmemTile<A_STRIDE> A,
-               Bf16SmemTile<B_STRIDE> B, int a_row_base, int a_col_base, int b_col_base,
-               int lane) {
+__device__ __forceinline__ void mma_bf16_panel(float (&D)[N_TILES][4], Bf16SmemTile<A_STRIDE> A,
+                                               Bf16SmemTile<B_STRIDE> B, int a_row_base,
+                                               int a_col_base, int b_col_base, int lane) {
     const int lane_in_8 = lane & 7;
     const int lane_q    = lane >> 3;
     const int a_row     = a_row_base + lane_in_8 + ((lane_q & 1) << 3);
@@ -117,18 +114,16 @@ mma_bf16_panel(float (&D)[N_TILES][4], Bf16SmemTile<A_STRIDE> A,
 #pragma unroll
         for (int nt = 0; nt < N_TILES; ++nt) {
             unsigned bf[2];
-            ldmatrix_x2(bf[0], bf[1],
-                        smem_addr(B.ptr(nt * MMA_N + lane_in_8, b_col + k_off)));
-            mma_bf16(D[nt][0], D[nt][1], D[nt][2], D[nt][3], af[0], af[1], af[2], af[3],
-                     bf[0], bf[1]);
+            ldmatrix_x2(bf[0], bf[1], smem_addr(B.ptr(nt * MMA_N + lane_in_8, b_col + k_off)));
+            mma_bf16(D[nt][0], D[nt][1], D[nt][2], D[nt][3], af[0], af[1], af[2], af[3], bf[0],
+                     bf[1]);
         }
     }
 }
 
 template <int N_TILES>
-__device__ __forceinline__ void mma_av_panel(float (&D)[N_TILES][4],
-                                              const float A_a[K_TILES_BT][4],
-                                              Bf16SmemTile<D_PANEL> V, int lane_g, int lane_t) {
+__device__ __forceinline__ void mma_av_panel(float (&D)[N_TILES][4], const float A_a[K_TILES_BT][4],
+                                             Bf16SmemTile<D_PANEL> V, int lane_g, int lane_t) {
 #pragma unroll
     for (int kt = 0; kt < K_TILES_BT; ++kt) {
         const int k_off = kt * MMA_K;
@@ -148,19 +143,15 @@ __device__ __forceinline__ void mma_av_panel(float (&D)[N_TILES][4],
 }
 
 __device__ __forceinline__ void
-output_job(const __nv_bfloat16* __restrict__ q_in,
-           const __nv_bfloat16* __restrict__ k_in,
-           const __nv_bfloat16* __restrict__ v_new_in,
-           const float* __restrict__ g_cumsum_in,
-           const __nv_bfloat16* __restrict__ h_chunk_in,
-           __nv_bfloat16* __restrict__ attn_out, head_map qk_map, float scale, int chunk, int h_v,
-           float* smem) {
+output_job(const __nv_bfloat16* __restrict__ q_in, const __nv_bfloat16* __restrict__ k_in,
+           const __nv_bfloat16* __restrict__ v_new_in, const float* __restrict__ g_cumsum_in,
+           const __nv_bfloat16* __restrict__ h_chunk_in, __nv_bfloat16* __restrict__ attn_out,
+           head_map qk_map, float scale, int chunk, int h_v, float* smem) {
     auto* const bf16_smem = reinterpret_cast<__nv_bfloat16*>(smem);
     auto* const q_smem    = bf16_smem;
     auto* const stage0    = q_smem + kernel_dims::Q_BF16;
     auto* const stage1    = stage0 + kernel_dims::STAGE_BF16;
-    float* const g_smem =
-        reinterpret_cast<float*>(stage0 + kernel_dims::V_PANEL_BF16);
+    float* const g_smem   = reinterpret_cast<float*>(stage0 + kernel_dims::V_PANEL_BF16);
 
     Bf16SmemTile<kStateDim> q_view{q_smem};
     Bf16SmemTile<K_PANEL> k_stage0{stage0};
@@ -180,8 +171,7 @@ output_job(const __nv_bfloat16* __restrict__ q_in,
     const std::int64_t qk_head_idx = static_cast<std::int64_t>(qk_map.qk_head(h_v)) * kStateDim;
     const std::int64_t q_base      = cs * qk_stride_t + qk_head_idx;
     const std::int64_t k_base      = cs * qk_stride_t + qk_head_idx;
-    const std::int64_t vn_base =
-        cs * H_v * kStateDim + static_cast<std::int64_t>(h_v) * kStateDim;
+    const std::int64_t vn_base = cs * H_v * kStateDim + static_cast<std::int64_t>(h_v) * kStateDim;
     const std::int64_t hc_base =
         (static_cast<std::int64_t>(chunk) * H_v + h_v) * kStateDim * kStateDim;
 
@@ -209,12 +199,11 @@ output_job(const __nv_bfloat16* __restrict__ q_in,
         } else if (tid < BT) {
             // stage0 was consumed by panel 2 and is now dead. Reuse its
             // otherwise-idle tail for g while panel 3 consumes stage1.
-            g_smem[tid] =
-                g_cumsum_in[(cs + static_cast<std::int64_t>(tid)) * H_v + h_v];
+            g_smem[tid] = g_cumsum_in[(cs + static_cast<std::int64_t>(tid)) * H_v + h_v];
         }
 
-        mma_bf16_panel<N_TILES_BT, K_PANEL / BF16_MMA_K>(
-            A_strip, q_view, current, warp * MMA_M, panel * K_PANEL, 0, lane);
+        mma_bf16_panel<N_TILES_BT, K_PANEL / BF16_MMA_K>(A_strip, q_view, current, warp * MMA_M,
+                                                         panel * K_PANEL, 0, lane);
 
         if (panel + 1 < N_K_PANELS) {
             cp_wait<0>();
@@ -296,8 +285,8 @@ output_job(const __nv_bfloat16* __restrict__ q_in,
         cp_commit();
 
         float D_frag[D_PANEL / MMA_N][4] = {};
-        mma_bf16_panel<D_PANEL / MMA_N, kStateDim / BF16_MMA_K>(
-            D_frag, q_view, h_view, warp * MMA_M, 0, 0, lane);
+        mma_bf16_panel<D_PANEL / MMA_N, kStateDim / BF16_MMA_K>(D_frag, q_view, h_view,
+                                                                warp * MMA_M, 0, 0, lane);
 
 #pragma unroll
         for (int nt = 0; nt < D_PANEL / MMA_N; ++nt) {
@@ -312,8 +301,8 @@ output_job(const __nv_bfloat16* __restrict__ q_in,
 
         if (panel + 1 < N_D_PANELS) {
             issue_cp_bf16<D_PANEL, kStateDim, THREADS>(
-                h_view, h_chunk_in + hc_base +
-                            static_cast<std::int64_t>(panel + 1) * D_PANEL * kStateDim,
+                h_view,
+                h_chunk_in + hc_base + static_cast<std::int64_t>(panel + 1) * D_PANEL * kStateDim,
                 kStateDim, tid);
             cp_commit();
         }

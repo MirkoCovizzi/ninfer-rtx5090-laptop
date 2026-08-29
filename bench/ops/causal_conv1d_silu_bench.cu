@@ -44,7 +44,8 @@ struct Options {
 };
 
 // The candidate partition for a channel extent. Which partitions are registered is the entry's
-// business, not the benchmark's: this builds the obvious one and lets the entry accept or reject it.
+// business, not the benchmark's: this builds the obvious one and lets the entry accept or reject
+// it.
 constexpr std::int32_t kSplitKeyDim = 2048;
 
 bool split_partition(std::int32_t channels, std::int32_t& key_dim, std::int32_t& value_dim) {
@@ -320,7 +321,7 @@ void run_snapshot(const Options& options) {
     // and publishes three BF16 state columns.
     const double bytes = 8.0 * options.channels + 6.0 * options.channels * options.batch +
                          10.0 * static_cast<double>(n);
-    const Result r     = time_stage(
+    const Result r = time_stage(
         options,
         [&](cudaStream_t s) {
             ops::causal_conv1d_silu_snapshot(tx, tw, ts, tvalid, tslot, tsnapshot_base, tout, s);
@@ -329,7 +330,7 @@ void run_snapshot(const Options& options) {
     const std::string tag = shape_tag(
         cache_tag(options, options.valid_columns.empty() ? "snapshot dense" : "snapshot masked")
             .c_str(),
-                  options.channels, options.tokens, options.batch);
+        options.channels, options.tokens, options.batch);
     print_result(tag.c_str(), r);
 }
 
@@ -430,8 +431,8 @@ bool parse_options(int argc, char** argv, Options& options) {
         return false;
     }
     for (const std::int32_t tokens : options.token_list.empty()
-                                        ? std::vector<std::int32_t>{options.tokens}
-                                        : options.token_list) {
+                                         ? std::vector<std::int32_t>{options.tokens}
+                                         : options.token_list) {
         if (options.batch > 1 && tokens > 16) { return false; }
         if (options.snapshot && options.batch == 1 && tokens > options.slots) { return false; }
         for (const std::int32_t valid : options.valid_columns) {

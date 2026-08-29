@@ -17,6 +17,7 @@ namespace ninfer::ops::detail {
 // channel tile together may not exceed the hardware block ceiling.
 static_assert(kCausalConvChannelTile * kCausalConvParallelMaxTokens <= 1024,
               "small-T block would exceed 1024 threads");
+
 namespace {
 
 int grid_for(std::int64_t n, int block, const char* label) {

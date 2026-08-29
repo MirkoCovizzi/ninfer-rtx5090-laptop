@@ -52,12 +52,12 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     const int kv_head     = static_cast<int>(blockIdx.x);
     const int split       = static_cast<int>(blockIdx.y);
     const int flat_column = static_cast<int>(blockIdx.z);
-    const int batch       = MultiBatch ? (CanonicalColumns ? flat_column / tokens : flat_column) : 0;
-    const int column      = CanonicalColumns ? flat_column - batch * tokens : 0;
-    const int split_count = static_cast<int>(gridDim.y);
-    const int tid         = static_cast<int>(threadIdx.x);
-    const int warp        = tid >> 5;
-    const int lane        = tid & 31;
+    const int batch  = MultiBatch ? (CanonicalColumns ? flat_column / tokens : flat_column) : 0;
+    const int column = CanonicalColumns ? flat_column - batch * tokens : 0;
+    const int split_count   = static_cast<int>(gridDim.y);
+    const int tid           = static_cast<int>(threadIdx.x);
+    const int warp          = tid >> 5;
+    const int lane          = tid & 31;
     const int active_tokens = CanonicalColumns ? 1 : tokens;
     int valid_tokens        = active_tokens;
     if constexpr (Masked) {
@@ -69,10 +69,9 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     std::int64_t current_base = column_begin;
     if constexpr (MultiBatch) { current_base += static_cast<std::int64_t>(batch) * full_width; }
     const std::int32_t* current_pos = pos + current_base;
-    const int current_remaining = Masked ? valid_columns[batch] - column_begin : tokens;
-    const int current_tokens = current_remaining <= 0
-                                   ? 0
-                                   : (current_remaining < tokens ? current_remaining : tokens);
+    const int current_remaining     = Masked ? valid_columns[batch] - column_begin : tokens;
+    const int current_tokens =
+        current_remaining <= 0 ? 0 : (current_remaining < tokens ? current_remaining : tokens);
     const std::int32_t current_first_pos = current_tokens > 0 ? current_pos[0] : -1;
     const std::int64_t column_base       = current_base + column;
     q += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::QHeads * column_base;
@@ -98,10 +97,10 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
             causal_small_t_tc_row_to_qt<Geometry>(row, active_tokens, kv_head, q_head, token);
             const int output_token = column + token;
             if (causal_valid_q_head<Geometry>(kv_head, q_head)) {
-                partial_m[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] =
-                    -CUDART_INF_F;
-                partial_l[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] =
-                    0.0f;
+                partial_m[causal_partial_stat_index<Geometry>(q_head, output_token, split,
+                                                              tokens)] = -CUDART_INF_F;
+                partial_l[causal_partial_stat_index<Geometry>(q_head, output_token, split,
+                                                              tokens)] = 0.0f;
             }
         }
         for (int idx = tid; idx < row_count * D; idx += Threads) {
@@ -112,16 +111,15 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
             causal_small_t_tc_row_to_qt<Geometry>(row, active_tokens, kv_head, q_head, token);
             const int output_token = column + token;
             if (causal_valid_q_head<Geometry>(kv_head, q_head)) {
-                partial_acc[
-                    causal_partial_acc_index<Geometry>(q_head, d, output_token, split, tokens)] =
-                    __float2bfloat16(0.0f);
+                partial_acc[causal_partial_acc_index<Geometry>(q_head, d, output_token, split,
+                                                               tokens)] = __float2bfloat16(0.0f);
             }
         }
     };
 
     if (kv_head < 0 || kv_head >= Geometry::KVHeads || active_tokens < 1 ||
-        active_tokens > TokenTile || column < 0 || column >= tokens ||
-        row_count > Br || split_count <= 0) {
+        active_tokens > TokenTile || column < 0 || column >= tokens || row_count > Br ||
+        split_count <= 0) {
         return;
     }
     if (valid_tokens == 0) {
@@ -172,7 +170,7 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
                 const int input_token = CanonicalColumns ? column + token : token;
                 const std::int64_t new_off =
                     kv_cache_int8_new_index<Geometry>(kv_head, d, input_token);
-                const int lane             = tid & 31;
+                const int lane    = tid & 31;
                 int physical_page = lane == 0 ? paged_kv_physical_page(block_table, p_tok) : 0;
                 physical_page     = __shfl_sync(FullMask, physical_page, 0);
                 const std::int64_t cache_off = causal_cache_index<Geometry>(
@@ -400,16 +398,20 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
             int token  = 0;
             causal_small_t_tc_row_to_qt<Geometry>(row0, active_tokens, kv_head, q_head, token);
             const int output_token = column + token;
-            partial_m[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] = m0;
-            partial_l[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] = l0;
+            partial_m[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] =
+                m0;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] =
+                l0;
         }
         if (row1 < row_count) {
             int q_head = 0;
             int token  = 0;
             causal_small_t_tc_row_to_qt<Geometry>(row1, active_tokens, kv_head, q_head, token);
             const int output_token = column + token;
-            partial_m[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] = m1;
-            partial_l[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] = l1;
+            partial_m[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] =
+                m1;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, output_token, split, tokens)] =
+                l1;
         }
     }
 

@@ -254,15 +254,13 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
             const float weight =
                 expf(partial_m[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)] -
                      head_m);
-            const std::int64_t index =
-                partial_acc_offset +
-                causal_partial_acc_index<Geometry>(q_head, d, token, split, tokens);
+            const std::int64_t index = partial_acc_offset + causal_partial_acc_index<Geometry>(
+                                                                q_head, d, token, split, tokens);
             float partial = 0.0f;
             if constexpr (Int8) {
                 partial = static_cast<const float*>(partial_acc)[index];
             } else {
-                partial =
-                    __bfloat162float(static_cast<const __nv_bfloat16*>(partial_acc)[index]);
+                partial = __bfloat162float(static_cast<const __nv_bfloat16*>(partial_acc)[index]);
             }
             numerator += partial * weight;
         }

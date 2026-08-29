@@ -265,7 +265,7 @@ int split_rejection_case(std::int32_t T) {
     // same storage, and this is neither.
     Tensor shifted_state_out(static_cast<std::uint16_t*>(state_in.data()) + 2, DType::BF16, {C, 3});
 
-    int failures = 0;
+    int failures         = 0;
     auto expect_rejected = [&](bool rejected, const char* what) {
         if (!rejected) {
             std::cout << "FAIL causal_conv1d_silu_split T=" << T << " accepted " << what << "\n";
@@ -355,9 +355,9 @@ int split_case(std::int32_t C, std::int32_t q_dim, std::int32_t k_dim, std::int3
     ops::causal_conv1d_silu_split(tx, tw, ts_in, ts_out, tq, tk, tv, nullptr);
     cuda_synchronize();
 
-    const std::string tag     = "causal_conv1d_silu_split C=" + std::to_string(C) +
-                                " T=" + std::to_string(T) + (alias_state ? " alias" : "") +
-                                (offset_pairs ? " offset" : "");
+    const std::string tag = "causal_conv1d_silu_split C=" + std::to_string(C) +
+                            " T=" + std::to_string(T) + (alias_state ? " alias" : "") +
+                            (offset_pairs ? " offset" : "");
     const std::size_t q_count = static_cast<std::size_t>(q_dim) * static_cast<std::size_t>(T);
     const std::size_t k_count = static_cast<std::size_t>(k_dim) * static_cast<std::size_t>(T);
     const std::size_t v_count = static_cast<std::size_t>(value_dim) * static_cast<std::size_t>(T);

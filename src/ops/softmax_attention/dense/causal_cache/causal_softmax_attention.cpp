@@ -260,9 +260,8 @@ SmallTWorkspace allocate_small_t_workspace(Allocator& workspace, std::int32_t q_
                                            std::int32_t tokens, std::int32_t splits,
                                            std::int32_t batch_size, DType cache_dtype) {
     return {
-        workspace.alloc(cache_dtype == DType::I8 || cache_dtype == DType::FP8_E4M3FN
-                            ? DType::FP32
-                            : DType::BF16,
+        workspace.alloc(cache_dtype == DType::I8 || cache_dtype == DType::FP8_E4M3FN ? DType::FP32
+                                                                                     : DType::BF16,
                         {kHeadDim, q_heads, tokens, splits * batch_size}),
         workspace.alloc(DType::FP32, {q_heads, tokens, splits * batch_size}),
         workspace.alloc(DType::FP32, {q_heads, tokens, splits * batch_size}),

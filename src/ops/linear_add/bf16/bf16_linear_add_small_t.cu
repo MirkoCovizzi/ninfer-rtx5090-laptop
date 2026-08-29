@@ -34,10 +34,10 @@ struct Bf16LinearAddSmallTProductionSchedule {
     // independent row occupancy choice.
     static constexpr int kRowsPerWarp =
         (ActiveTokens == 4 || ActiveTokens == 6) ? 2 : (ActiveTokens <= 8 ? 4 : 2);
-    using Type = Bf16SmallTInnerSchedule<4, 1, kRowsPerWarp, 16, 1, 4,
-                                         Bf16SmallTActivationAccess::WarpPacked,
-                                         Bf16WeightCache::Default, Bf16PhaseOrder::Sequential, 1,
-                                         2, 1, 2>;
+    using Type =
+        Bf16SmallTInnerSchedule<4, 1, kRowsPerWarp, 16, 1, 4,
+                                Bf16SmallTActivationAccess::WarpPacked, Bf16WeightCache::Default,
+                                Bf16PhaseOrder::Sequential, 1, 2, 1, 2>;
 };
 
 template <int ActiveTokens>

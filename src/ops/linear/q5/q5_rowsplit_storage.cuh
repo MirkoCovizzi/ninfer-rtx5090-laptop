@@ -81,15 +81,15 @@ struct Q5MmaDecodeAtom {
         const unsigned high = high_chunk[0];
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
-            const unsigned byte        = (word >> (8 * i)) & 0xffu;
-            const int q0               = ((static_cast<int>(byte & 0x0fu) |
-                                           static_cast<int>(((high >> (2 * i)) & 1u) << 4)) ^
-                                          0x10) -
-                                         0x10;
-            const int q1               = ((static_cast<int>(byte >> 4) |
-                                           static_cast<int>(((high >> (2 * i + 1)) & 1u) << 4)) ^
-                                          0x10) -
-                                         0x10;
+            const unsigned byte = (word >> (8 * i)) & 0xffu;
+            const int q0        = ((static_cast<int>(byte & 0x0fu) |
+                             static_cast<int>(((high >> (2 * i)) & 1u) << 4)) ^
+                            0x10) -
+                           0x10;
+            const int q1 = ((static_cast<int>(byte >> 4) |
+                             static_cast<int>(((high >> (2 * i + 1)) & 1u) << 4)) ^
+                            0x10) -
+                           0x10;
             const __nv_bfloat162 value = __floats2bfloat162_rn(static_cast<float>(q0) * scale,
                                                                static_cast<float>(q1) * scale);
             out[i]                     = *reinterpret_cast<const unsigned*>(&value);

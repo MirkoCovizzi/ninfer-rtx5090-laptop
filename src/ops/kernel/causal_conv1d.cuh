@@ -82,14 +82,14 @@ __global__ void causal_conv1d_prefill_kernel(const __nv_bfloat16* x, const __nv_
     const std::int64_t c64      = c_base + threadIdx.x;
     if (t >= T || c64 >= C64) { return; }
 
-    const std::int32_t c       = static_cast<std::int32_t>(c64);
+    const std::int32_t c      = static_cast<std::int32_t>(c64);
     const std::int64_t in_idx = static_cast<std::int64_t>(t) * C64 + c64;
-    const __nv_bfloat16 x0     = (t >= 3) ? x[static_cast<std::int64_t>(t - 3) * C64 + c64]
-                                          : conv_state[static_cast<std::int64_t>(t) * C64 + c64];
-    const __nv_bfloat16 x1     = (t >= 2) ? x[static_cast<std::int64_t>(t - 2) * C64 + c64]
-                                          : conv_state[static_cast<std::int64_t>(t + 1) * C64 + c64];
-    const __nv_bfloat16 x2     = (t >= 1) ? x[static_cast<std::int64_t>(t - 1) * C64 + c64]
-                                          : conv_state[static_cast<std::int64_t>(t + 2) * C64 + c64];
+    const __nv_bfloat16 x0    = (t >= 3) ? x[static_cast<std::int64_t>(t - 3) * C64 + c64]
+                                         : conv_state[static_cast<std::int64_t>(t) * C64 + c64];
+    const __nv_bfloat16 x1    = (t >= 2) ? x[static_cast<std::int64_t>(t - 2) * C64 + c64]
+                                         : conv_state[static_cast<std::int64_t>(t + 1) * C64 + c64];
+    const __nv_bfloat16 x2    = (t >= 1) ? x[static_cast<std::int64_t>(t - 1) * C64 + c64]
+                                         : conv_state[static_cast<std::int64_t>(t + 2) * C64 + c64];
     const __nv_bfloat16 x3    = x[in_idx];
 
     float acc = 0.0f;
@@ -118,12 +118,12 @@ __global__ void causal_conv1d_prefill_pairs_kernel(const __nv_bfloat16* x,
     const auto* state2  = reinterpret_cast<const __nv_bfloat162*>(conv_state);
 
     const std::int64_t in_idx = static_cast<std::int64_t>(t) * C2 + p;
-    const __nv_bfloat162 x0    = (t >= 3) ? x2[static_cast<std::int64_t>(t - 3) * C2 + p]
-                                          : state2[static_cast<std::int64_t>(t) * C2 + p];
-    const __nv_bfloat162 x1    = (t >= 2) ? x2[static_cast<std::int64_t>(t - 2) * C2 + p]
-                                          : state2[static_cast<std::int64_t>(t + 1) * C2 + p];
-    const __nv_bfloat162 x2v   = (t >= 1) ? x2[static_cast<std::int64_t>(t - 1) * C2 + p]
-                                          : state2[static_cast<std::int64_t>(t + 2) * C2 + p];
+    const __nv_bfloat162 x0   = (t >= 3) ? x2[static_cast<std::int64_t>(t - 3) * C2 + p]
+                                         : state2[static_cast<std::int64_t>(t) * C2 + p];
+    const __nv_bfloat162 x1   = (t >= 2) ? x2[static_cast<std::int64_t>(t - 2) * C2 + p]
+                                         : state2[static_cast<std::int64_t>(t + 1) * C2 + p];
+    const __nv_bfloat162 x2v  = (t >= 1) ? x2[static_cast<std::int64_t>(t - 1) * C2 + p]
+                                         : state2[static_cast<std::int64_t>(t + 2) * C2 + p];
     const __nv_bfloat162 x3   = x2[in_idx];
 
     float acc0 = 0.0f;

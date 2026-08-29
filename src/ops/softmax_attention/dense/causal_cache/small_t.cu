@@ -320,8 +320,7 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
         causal_attention_small_t_reduce_output_kernel<Geometry, kDChunk, Int8, MultiBatch, Masked,
                                                       Offset>
             <<<reduce_grid, kReduceBlock, 0, stream>>>(
-                partial_acc.data,
-                static_cast<const float*>(partial_m.data),
+                partial_acc.data, static_cast<const float*>(partial_m.data),
                 static_cast<const float*>(partial_l.data),
                 static_cast<const std::int32_t*>(pos.data),
                 invocation.valid_columns == nullptr

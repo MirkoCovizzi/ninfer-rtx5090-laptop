@@ -60,10 +60,10 @@ struct Q6MmaDecodeAtom {
                 ((static_cast<int>(byte & 0x0fu) | static_cast<int>(((high >> shift) & 3u) << 4)) ^
                  0x20) -
                 0x20;
-            const int q1               = ((static_cast<int>(byte >> 4) |
-                                           static_cast<int>(((high >> (shift + 2)) & 3u) << 4)) ^
-                                          0x20) -
-                                         0x20;
+            const int q1 = ((static_cast<int>(byte >> 4) |
+                             static_cast<int>(((high >> (shift + 2)) & 3u) << 4)) ^
+                            0x20) -
+                           0x20;
             const __nv_bfloat162 value = __floats2bfloat162_rn(static_cast<float>(q0) * scale,
                                                                static_cast<float>(q1) * scale);
             out[i]                     = *reinterpret_cast<const unsigned*>(&value);

@@ -93,8 +93,7 @@ int verify_nvfp4(const std::filesystem::path& path, WeightsProfile expected_prof
         return 1;
     }
     ninfer::artifact::Binder binder(reader);
-    const ArtifactLoadPlan plan =
-        bind_artifact(binder, expected_profile, all_features());
+    const ArtifactLoadPlan plan = bind_artifact(binder, expected_profile, all_features());
     if (plan.materialization.object_count != 1307 ||
         plan.materialization.device_objects.size() != 1054 ||
         plan.materialization.host_objects.size() != 6 ||
@@ -260,8 +259,8 @@ int main() {
     if (std::filesystem::is_regular_file(groupwise) && std::filesystem::is_regular_file(nvfp4)) {
         ran = true;
         if (const int result = verify_groupwise(groupwise); result != 0) { return result; }
-        if (const int result = verify_nvfp4(nvfp4, WeightsProfile::Qwen36Nvfp4,
-                                            NumericFormat::W8G32_F16S);
+        if (const int result =
+                verify_nvfp4(nvfp4, WeightsProfile::Qwen36Nvfp4, NumericFormat::W8G32_F16S);
             result != 0) {
             return result;
         }

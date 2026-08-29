@@ -85,9 +85,7 @@ std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
     if (policy == LinearPolicy::A16Only) { return 0; }
 
     std::size_t maximum = 0;
-    if (min_tokens <= 48) {
-        maximum = fused_workspace_bytes(std::min(max_tokens, 48));
-    }
+    if (min_tokens <= 48) { maximum = fused_workspace_bytes(std::min(max_tokens, 48)); }
     if (min_tokens <= kPrimaryT && max_tokens >= kPrimaryT) {
         maximum = fused_workspace_bytes(kPrimaryT);
     }

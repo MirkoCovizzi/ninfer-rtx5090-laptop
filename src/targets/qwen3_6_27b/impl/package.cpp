@@ -110,17 +110,15 @@ Package::WeightsProfile Package::resolve_weights(const artifact::Reader& reader)
                              artifact::StorageLayout::RowSplitK128V1) &&
             endpoint_matches(reader, "text/output_head", artifact::NumericFormat::W8G32_F16S,
                              artifact::StorageLayout::RowSplitK128V1);
-        const bool current_fp8 = endpoint_matches(
-            reader, "text/token_embedding", artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
-            artifact::StorageLayout::RowScaleV1) &&
-                                 endpoint_matches(
-                                     reader, "text/output_head",
-                                     artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
-                                     artifact::StorageLayout::RowScaleV1);
+        const bool current_fp8 = endpoint_matches(reader, "text/token_embedding",
+                                                  artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
+                                                  artifact::StorageLayout::RowScaleV1) &&
+                                 endpoint_matches(reader, "text/output_head",
+                                                  artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
+                                                  artifact::StorageLayout::RowScaleV1);
         if (legacy_w8) { return WeightsProfile::Qwen38Nvfp4LegacyW8; }
         if (current_fp8) { return WeightsProfile::Qwen38Nvfp4; }
-        throw std::runtime_error(
-            "unsupported qwen3.8-27b/nvfp4 endpoint storage profile");
+        throw std::runtime_error("unsupported qwen3.8-27b/nvfp4 endpoint storage profile");
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' is not supported by target '" + std::string(target_key) + "'");
