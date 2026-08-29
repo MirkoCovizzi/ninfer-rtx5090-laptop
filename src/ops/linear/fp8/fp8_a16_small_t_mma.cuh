@@ -1,6 +1,6 @@
 #pragma once
 
-// Row-scaled E4M3 weight x BF16 activation Tensor Core mainloop.
+// Small-T row-scaled E4M3 weight x BF16 activation Tensor Core mainloop.
 //
 // A CTA owns sixteen output rows and splits K across compile-time-selected warps. Persistent E4M3
 // codes are widened exactly to BF16 MMA operands; the represented BF16 row multiplier is applied
@@ -8,38 +8,19 @@
 
 #include "ops/common/mma.cuh"
 #include "ops/common/memory.cuh"
+#include "ops/linear/fp8/fp8_a16_codec.cuh"
 #include "ops/linear/fp8/fp8_config.h"
 #include "ops/linear/fp8/fp8_output.cuh"
 
 #include <cuda_bf16.h>
-#include <cuda_fp16.h>
-#include <cuda_fp8.h>
 
 #include <cstdint>
 
 namespace ninfer::ops::detail {
 
-__device__ __forceinline__ int fp8_a16_mma_swizzle_64(int row, int col) {
-    return (((col >> 3) ^ (row & 7)) << 3) | (col & 7);
-}
-
-union Fp8A16MmaPairBits {
-    __nv_bfloat162 pair;
-    unsigned bits;
-};
-
-__device__ __forceinline__ unsigned fp8_e4m3x2_to_bf16x2_bits(unsigned packed) {
-    __nv_fp8x2_e4m3 fp8;
-    fp8.__x                 = static_cast<std::uint16_t>(packed);
-    const __half2 half_pair = static_cast<__half2>(fp8);
-    Fp8A16MmaPairBits result;
-    result.pair = __halves2bfloat162(__nv_bfloat16(__low2half(half_pair)),
-                                     __nv_bfloat16(__high2half(half_pair)));
-    return result.bits;
-}
-
 template <class Geometry, int ActiveTokens, class Schedule, class Output = Fp8ContiguousOutput>
-__global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a16_mma_kernel(
+__global__
+__launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a16_small_t_mma_kernel(
     const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ weight_codes,
     const __nv_bfloat16* __restrict__ row_scales, Output output) {
     constexpr int kHidden     = Geometry::kInputRows;
@@ -78,15 +59,16 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
 
     const auto stage_activation = [&](int group_k0) {
         constexpr auto kActivationCache =
-            Schedule::kActivationCache == Fp8A16MmaCache::Default ? Cache::ca : Cache::cg;
-        constexpr bool kPadded = Schedule::kActivationStage == Fp8A16MmaActivationStage::PaddedZero;
+            Schedule::kActivationCache == Fp8A16SmallTMmaCache::Default ? Cache::ca : Cache::cg;
+        constexpr bool kPadded =
+            Schedule::kActivationStage == Fp8A16SmallTMmaActivationStage::PaddedZero;
         constexpr int kStageTokens = kPadded ? kTileTokens : ActiveTokens;
         constexpr int kItems       = kStageTokens * (kTileK / 8);
         for (int item = lane; item < kItems; item += 32) {
             const int token = item / (kTileK / 8);
             const int k8    = item - token * (kTileK / 8);
             auto* destination =
-                &x_shared[warp][token * kTileK + fp8_a16_mma_swizzle_64(token, k8 * 8)];
+                &x_shared[warp][token * kTileK + fp8_a16_shared_col_64(token, k8 * 8)];
             if constexpr (!kPadded || ActiveTokens == kTileTokens) {
                 cp_async<16, kActivationCache>(destination,
                                                x + static_cast<std::int64_t>(token) * kHidden +
@@ -104,7 +86,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
 
     const auto stage_codes = [&](int group_k0) {
         constexpr auto kWeightCache =
-            Schedule::kWeightCache == Fp8A16MmaCache::Default ? Cache::ca : Cache::cg;
+            Schedule::kWeightCache == Fp8A16SmallTMmaCache::Default ? Cache::ca : Cache::cg;
 #pragma unroll
         for (int row_item = 0; row_item < Schedule::kRowsPerLoaderWarp; ++row_item) {
             const int row = warp * Schedule::kRowsPerLoaderWarp + row_item;
@@ -151,7 +133,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
                 const int row = token_mma * 8 + b_row;
                 ldmatrix_x2(
                     b0, b1,
-                    smem_addr(&x_shared[warp][row * kTileK + fp8_a16_mma_swizzle_64(
+                    smem_addr(&x_shared[warp][row * kTileK + fp8_a16_shared_col_64(
                                                                  row, k_step * 16 + b_k_offset)]));
                 mma_bf16(accumulators[token_mma][0], accumulators[token_mma][1],
                          accumulators[token_mma][2], accumulators[token_mma][3], a0, a1, a2, a3, b0,

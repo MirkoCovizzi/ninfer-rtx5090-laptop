@@ -5,6 +5,7 @@
 #include "targets/qwen3_6/impl/runtime/schedule.h"
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
+#include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scatter.h"
 #include "ninfer/ops/speculative_round.h"
 #include <cuda_runtime.h>
@@ -7774,6 +7775,28 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
         lanes[row] = lane;
     }
 
+    const bool count_forced_tokens = std::any_of(
+        lanes.begin(), lanes.begin() + static_cast<std::ptrdiff_t>(members.size()),
+        [&](std::uint32_t lane) { return requests[lane].sampling_host.token_counts != nullptr; });
+    if (count_forced_tokens) {
+        work.reset();
+        Tensor forced_ids =
+            work.alloc(DType::I32, {checked_i32(static_cast<std::uint32_t>(row_major_tokens.size()),
+                                                "forced-token batch exceeds int32")});
+        CUDA_CHECK(cudaMemcpyAsync(forced_ids.data, row_major_tokens.data(), forced_ids.bytes(),
+                                   cudaMemcpyHostToDevice, device.stream));
+        for (std::size_t row = 0; row < members.size(); ++row) {
+            const std::uint32_t lane = lanes[row];
+            if (requests[lane].sampling_host.token_counts == nullptr) { continue; }
+            Tensor ids    = forced_ids.slice(0, static_cast<std::int32_t>(row * row_stride),
+                                             static_cast<std::int32_t>(row_stride));
+            Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(lane), 1)
+                                .view({TextConfig::token_domain});
+            ops::increment_token_counts(ids, counts, device.stream);
+        }
+        work.reset();
+    }
+
     try {
         for (std::size_t row = 0; row < members.size(); ++row) {
             timing.resume_submit();
@@ -9846,7 +9869,6 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
                                        const ops::SamplingConfig& config) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({TextConfig::token_domain});
-    CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream));
     request.sampling_host     = config;
     request.speculative_stats = SpeculativeStats{
         .backend               = speculative_backend,
@@ -9856,6 +9878,7 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
     };
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F;
+    if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }
     request.sampling_host.token_counts =
         penalties ? static_cast<std::int32_t*>(counts.data) : nullptr;
     Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(sequence.lane), 1);

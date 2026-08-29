@@ -26,9 +26,10 @@ benchmark-report, and external protocol behavior. Repository verification princi
   and the opt-in real public-Engine route;
 - `test_ninfer_artifact_reader.cpp` — C++ framing, directory, encoded-size, payload-span, and
   geometry behavior against a self-contained C++ fixture;
-- `test_openai_schema.cpp`, `test_responses_schema.cpp`, `test_response_store.cpp`,
-  `test_anthropic_schema.cpp`, and `test_tool_call_parser.cpp` — current protocol translation,
-  Responses Item/state/SSE behavior, and incremental tool-call behavior;
+- `test_openai_schema.cpp`, `test_openai_responses.cpp`,
+  `test_openai_responses_store.cpp`, `test_anthropic_schema.cpp`, and
+  `test_tool_call_parser.cpp` — current protocol translation, Responses Item/state/SSE behavior,
+  and incremental tool-call behavior;
 - `test_request_log.cpp` and `test_http_error_handler.cpp` — generation lifecycle records,
   preparation rejections, protocol-shaped payload-limit errors, and application-error preservation;
 - `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v13 reports;

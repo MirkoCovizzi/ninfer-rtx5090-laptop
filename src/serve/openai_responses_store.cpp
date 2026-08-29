@@ -1,4 +1,4 @@
-#include "serve/response_store.h"
+#include "serve/openai_responses_store.h"
 
 #include <algorithm>
 #include <limits>
@@ -10,6 +10,7 @@ namespace {
 
 std::size_t estimate_turn_bytes(const ChatTurn& turn) {
     std::size_t bytes = sizeof(ChatTurn) + turn.tool_call_id.size() + turn.reasoning_content.size();
+    if (turn.tool_result_name) { bytes += turn.tool_result_name->size(); }
     for (const ContentPart& part : turn.content) {
         bytes += sizeof(ContentPart) + part.text.size() + part.type_raw.size() +
                  part.source.value.size() + part.source.media_type.size() +
@@ -21,9 +22,9 @@ std::size_t estimate_turn_bytes(const ChatTurn& turn) {
     return bytes;
 }
 
-std::size_t record_envelope_bytes(const StoredResponse& record) {
-    std::size_t bytes = sizeof(StoredResponse) + record.id.size() + record.session_key.size() +
-                        record.response.dump().size();
+std::size_t record_envelope_bytes(const StoredOpenAIResponse& record) {
+    std::size_t bytes = sizeof(StoredOpenAIResponse) + record.id.size() +
+                        record.session_key.size() + record.response.dump().size();
     for (const nlohmann::json& item : record.input_items) {
         bytes += sizeof(nlohmann::json) + item.dump().size();
     }
@@ -48,11 +49,12 @@ std::size_t checked_add(std::size_t left, std::size_t right, const char* label) 
 
 } // namespace
 
-ResponseContext append_response_context(ResponseContext parent, std::vector<ChatTurn> turns) {
-    auto node         = std::make_shared<ResponseContextNode>();
+OpenAIResponseContext append_openai_response_context(OpenAIResponseContext parent,
+                                                     std::vector<ChatTurn> turns) {
+    auto node         = std::make_shared<OpenAIResponseContextNode>();
     node->parent      = std::move(parent);
     node->turns       = std::move(turns);
-    node->owned_bytes = sizeof(ResponseContextNode);
+    node->owned_bytes = sizeof(OpenAIResponseContextNode);
     for (const ChatTurn& turn : node->turns) { node->owned_bytes += estimate_turn_bytes(turn); }
     node->cumulative_bytes =
         checked_add(node->owned_bytes, node->parent ? node->parent->cumulative_bytes : 0,
@@ -63,9 +65,9 @@ ResponseContext append_response_context(ResponseContext parent, std::vector<Chat
     return node;
 }
 
-std::vector<ChatTurn> flatten_response_context(const ResponseContext& context) {
-    std::vector<const ResponseContextNode*> nodes;
-    for (ResponseContext node = context; node != nullptr; node = node->parent) {
+std::vector<ChatTurn> flatten_openai_response_context(const OpenAIResponseContext& context) {
+    std::vector<const OpenAIResponseContextNode*> nodes;
+    for (OpenAIResponseContext node = context; node != nullptr; node = node->parent) {
         nodes.push_back(node.get());
     }
     std::vector<ChatTurn> turns;
@@ -76,14 +78,14 @@ std::vector<ChatTurn> flatten_response_context(const ResponseContext& context) {
     return turns;
 }
 
-ResponseStore::ResponseStore(std::size_t max_records, std::size_t max_bytes)
+OpenAIResponsesStore::OpenAIResponsesStore(std::size_t max_records, std::size_t max_bytes)
     : max_records_(max_records), max_bytes_(max_bytes) {
     if (max_records_ == 0 || max_bytes_ == 0) {
         throw std::invalid_argument("response store limits must be positive");
     }
 }
 
-std::shared_ptr<const StoredResponse> ResponseStore::get(const std::string& id) {
+std::shared_ptr<const StoredOpenAIResponse> OpenAIResponsesStore::get(const std::string& id) {
     std::lock_guard lock(mutex_);
     const auto found = records_.find(id);
     if (found == records_.end()) { return {}; }
@@ -91,7 +93,7 @@ std::shared_ptr<const StoredResponse> ResponseStore::get(const std::string& id) 
     return found->second.response;
 }
 
-void ResponseStore::put(StoredResponse response) {
+void OpenAIResponsesStore::put(StoredOpenAIResponse response) {
     if (response.id.empty() || response.session_key.empty() ||
         response.session_key.size() > kMaximumContextCacheSessionKeyBytes ||
         !response.response.is_object()) {
@@ -104,7 +106,7 @@ void ResponseStore::put(StoredResponse response) {
         throw_store_capacity();
     }
 
-    auto owned = std::make_shared<const StoredResponse>(std::move(response));
+    auto owned = std::make_shared<const StoredOpenAIResponse>(std::move(response));
     std::lock_guard lock(mutex_);
     if (records_.contains(owned->id)) {
         throw std::logic_error("duplicate response id in response store");
@@ -141,24 +143,24 @@ void ResponseStore::put(StoredResponse response) {
     }
 }
 
-bool ResponseStore::erase(const std::string& id) {
+bool OpenAIResponsesStore::erase(const std::string& id) {
     std::lock_guard lock(mutex_);
     if (!records_.contains(id)) { return false; }
     erase_locked(id);
     return true;
 }
 
-std::size_t ResponseStore::size() const {
+std::size_t OpenAIResponsesStore::size() const {
     std::lock_guard lock(mutex_);
     return records_.size();
 }
 
-std::size_t ResponseStore::bytes() const {
+std::size_t OpenAIResponsesStore::bytes() const {
     std::lock_guard lock(mutex_);
     return current_bytes_;
 }
 
-void ResponseStore::retain_context_locked(const ResponseContext& context) {
+void OpenAIResponsesStore::retain_context_locked(const OpenAIResponseContext& context) {
     if (!context) { return; }
     const auto root = live_context_references_.find(context.get());
     if (root != live_context_references_.end()) {
@@ -169,8 +171,8 @@ void ResponseStore::retain_context_locked(const ResponseContext& context) {
         return;
     }
 
-    std::vector<ResponseContext> new_nodes;
-    ResponseContext cursor = context;
+    std::vector<OpenAIResponseContext> new_nodes;
+    OpenAIResponseContext cursor = context;
     while (cursor && !live_context_references_.contains(cursor.get())) {
         new_nodes.push_back(cursor);
         cursor = cursor->parent;
@@ -185,7 +187,7 @@ void ResponseStore::retain_context_locked(const ResponseContext& context) {
         }
     };
     try {
-        for (const ResponseContext& node : new_nodes) {
+        for (const OpenAIResponseContext& node : new_nodes) {
             const std::size_t next_bytes = checked_add(current_bytes_, node->owned_bytes,
                                                        "response store byte accounting overflowed");
             const auto [entry, added]    = live_context_references_.emplace(node.get(), 1);
@@ -213,8 +215,8 @@ void ResponseStore::retain_context_locked(const ResponseContext& context) {
     }
 }
 
-void ResponseStore::release_context_locked(const ResponseContext& context) {
-    for (ResponseContext node = context; node != nullptr; node = node->parent) {
+void OpenAIResponsesStore::release_context_locked(const OpenAIResponseContext& context) {
+    for (OpenAIResponseContext node = context; node != nullptr; node = node->parent) {
         const auto found = live_context_references_.find(node.get());
         if (found == live_context_references_.end() || found->second == 0) {
             throw std::logic_error("response context release lost its live node");
@@ -231,7 +233,7 @@ void ResponseStore::release_context_locked(const ResponseContext& context) {
     }
 }
 
-void ResponseStore::erase_locked(const std::string& id) {
+void OpenAIResponsesStore::erase_locked(const std::string& id) {
     const auto found = records_.find(id);
     if (found == records_.end()) { return; }
     if (current_bytes_ < found->second.envelope_bytes) {

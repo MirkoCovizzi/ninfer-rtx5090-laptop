@@ -79,8 +79,9 @@ public:
 
     // Establishes queue membership synchronously with a fixed output consumer mode. Destroying an
     // unconsumed handle cancels its request; wait() owns result consumption and may run
-    // independently from GPU execution. Streaming mode requires a non-null sink in wait();
-    // Aggregate mode requires a null sink.
+    // independently from GPU execution. Streaming mode requires a non-null sink in wait() and
+    // publishes one exact GenerationStart before output deltas; Aggregate mode requires a null
+    // sink.
     [[nodiscard]] GenerationHandle
     submit(PreparedPrompt prompt, RequestOptions options,
            OutputConsumerMode consumer_mode                       = OutputConsumerMode::Aggregate,

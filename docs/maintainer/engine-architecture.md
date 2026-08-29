@@ -76,7 +76,7 @@ Frontend 拥有模型家族的输入与输出语义：
 
 - tokenizer、chat template、Vision preprocessing 和 MRoPE prompt construction；
 - owning `PreparedPrompt` 及其内容 identity；
-- stop、thinking/content channel、detokenization 和最终文本；
+- stop、thinking/content channel、detokenization、最终文本和模型私有结构化输出；
 - 每个请求独占的 `OutputSession`。
 
 Frontend 可以预览一次模型输出将产生的语义效果，但只有 Engine 完成提交后才能发布该效果。
@@ -204,6 +204,8 @@ Free -> Materializing -> Active -> TerminalPending -> Free
 
 请求只有在 materialization 的物理结果和逻辑结果均成功采用后才能进入 Active。Terminal request
 必须保留 active ownership，直到完整 checkpoint 被发布或全部 active resources 被释放。
+Streaming request 在 admission 选择提交后、任何输出 delta 前发布一次 `GenerationStart`；其中的
+prompt token 和 reused-prefix token 是已提交的资源选择事实，不等待 prefill 完成。
 
 Control lane、StateImage slot、KV execution row 和 decode batch row 是不同身份：
 

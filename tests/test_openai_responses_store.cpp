@@ -1,4 +1,4 @@
-#include "serve/response_store.h"
+#include "serve/openai_responses_store.h"
 
 #include <nlohmann/json.hpp>
 
@@ -28,8 +28,8 @@ ChatTurn text_turn(ninfer::ChatRole role, std::string text) {
     return turn;
 }
 
-StoredResponse record(std::string id, ResponseContext context) {
-    StoredResponse value;
+StoredOpenAIResponse record(std::string id, OpenAIResponseContext context) {
+    StoredOpenAIResponse value;
     value.id          = std::move(id);
     value.session_key = "session-" + value.id;
     value.response =
@@ -40,13 +40,13 @@ StoredResponse record(std::string id, ResponseContext context) {
 }
 
 int test_context_dag() {
-    const ResponseContext first =
-        append_response_context({}, {text_turn(ninfer::ChatRole::User, "one"),
-                                     text_turn(ninfer::ChatRole::Assistant, "a")});
-    const ResponseContext second =
-        append_response_context(first, {text_turn(ninfer::ChatRole::User, "two"),
-                                        text_turn(ninfer::ChatRole::Assistant, "b")});
-    const std::vector<ChatTurn> flattened = flatten_response_context(second);
+    const OpenAIResponseContext first =
+        append_openai_response_context({}, {text_turn(ninfer::ChatRole::User, "one"),
+                                            text_turn(ninfer::ChatRole::Assistant, "a")});
+    const OpenAIResponseContext second =
+        append_openai_response_context(first, {text_turn(ninfer::ChatRole::User, "two"),
+                                               text_turn(ninfer::ChatRole::Assistant, "b")});
+    const std::vector<ChatTurn> flattened = flatten_openai_response_context(second);
     int failures                          = 0;
     failures += check(flattened.size() == 4, "context chain flattened all turns");
     failures += check(flattened[0].content[0].text == "one" && flattened[3].content[0].text == "b",
@@ -56,16 +56,16 @@ int test_context_dag() {
 }
 
 int test_lru_and_delete() {
-    ResponseStore store(2, 1ULL << 20);
-    const ResponseContext root =
-        append_response_context({}, {text_turn(ninfer::ChatRole::User, "root")});
+    OpenAIResponsesStore store(2, 1ULL << 20);
+    const OpenAIResponseContext root =
+        append_openai_response_context({}, {text_turn(ninfer::ChatRole::User, "root")});
     store.put(record("resp_1", root));
-    const ResponseContext child =
-        append_response_context(root, {text_turn(ninfer::ChatRole::Assistant, "child")});
+    const OpenAIResponseContext child =
+        append_openai_response_context(root, {text_turn(ninfer::ChatRole::Assistant, "child")});
     store.put(record("resp_2", child));
     (void)store.get("resp_1"); // resp_2 becomes the least-recently used entry.
-    store.put(record("resp_3",
-                     append_response_context(root, {text_turn(ninfer::ChatRole::User, "fork")})));
+    store.put(record("resp_3", append_openai_response_context(
+                                   root, {text_turn(ninfer::ChatRole::User, "fork")})));
 
     int failures = 0;
     failures += check(store.get("resp_1") != nullptr, "get refreshes LRU recency");
@@ -77,17 +77,17 @@ int test_lru_and_delete() {
                       "deleted response is no longer addressable");
     // The child/fork context owns a shared parent even when the parent's public
     // response entry is deleted.
-    const std::shared_ptr<const StoredResponse> fork = store.get("resp_3");
-    failures += check(fork && flatten_response_context(fork->context).size() == 2,
+    const std::shared_ptr<const StoredOpenAIResponse> fork = store.get("resp_3");
+    failures += check(fork && flatten_openai_response_context(fork->context).size() == 2,
                       "descendant context survives parent response deletion");
     return failures;
 }
 
 int test_oversized_record() {
-    ResponseStore store(4, 256);
-    StoredResponse large = record(
-        "resp_large",
-        append_response_context({}, {text_turn(ninfer::ChatRole::User, std::string(1024, 'x'))}));
+    OpenAIResponsesStore store(4, 256);
+    StoredOpenAIResponse large =
+        record("resp_large", append_openai_response_context(
+                                 {}, {text_turn(ninfer::ChatRole::User, std::string(1024, 'x'))}));
     std::string code;
     try {
         store.put(std::move(large));

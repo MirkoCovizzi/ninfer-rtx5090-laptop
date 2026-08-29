@@ -167,18 +167,18 @@ set_tests_properties(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test
 ninfer_add_test(ninfer_openai_schema_test
   SOURCES test_openai_schema.cpp
   LIBRARIES ninfer_serve)
-ninfer_add_test(ninfer_responses_schema_test
-  SOURCES test_responses_schema.cpp
+ninfer_add_test(ninfer_openai_responses_test
+  SOURCES test_openai_responses.cpp
   LIBRARIES ninfer_serve)
-ninfer_add_test(ninfer_response_store_test
-  SOURCES test_response_store.cpp
+ninfer_add_test(ninfer_openai_responses_store_test
+  SOURCES test_openai_responses_store.cpp
   LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_anthropic_schema_test
   SOURCES test_anthropic_schema.cpp
   LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_tool_call_parser_test
   SOURCES test_tool_call_parser.cpp
-  LIBRARIES ninfer_serve)
+  LIBRARIES ninfer_engine)
 ninfer_add_test(ninfer_serve_options_test
   SOURCES test_serve_options.cpp
   LIBRARIES ninfer_serve)
@@ -192,6 +192,11 @@ ninfer_add_test(ninfer_http_error_handler_test
   SOURCES test_http_error_handler.cpp
   LIBRARIES ninfer_serve)
 target_include_directories(ninfer_http_error_handler_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
+ninfer_add_test(ninfer_http_transport_test
+  SOURCES test_http_transport.cpp
+  LIBRARIES ninfer_serve)
+target_include_directories(ninfer_http_transport_test PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
 ninfer_add_test(ninfer_bench_support_test
   SOURCES test_ninfer_bench_support.cpp
