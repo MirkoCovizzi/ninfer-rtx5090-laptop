@@ -10,7 +10,7 @@ namespace ninfer::ops::detail {
 
 inline constexpr std::int32_t kBf16LinearAddSmallTMinTokens   = 1;
 inline constexpr std::int32_t kBf16LinearAddSmallTMaxTokens   = 32;
-inline constexpr std::int32_t kBf16LinearAddSmallTDispatchEnd = 8 * 6;
+inline constexpr std::int32_t kBf16LinearAddSmallTDispatchEnd = 8 * 9;
 inline constexpr std::int32_t kBf16LinearAddAggregateMmaEnd   = 48;
 
 enum class Bf16LinearAddScheduleId : std::uint8_t {

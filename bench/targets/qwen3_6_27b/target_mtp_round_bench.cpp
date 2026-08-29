@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -31,19 +32,24 @@ namespace {
 namespace target = ninfer::targets::qwen3_6_27b;
 
 struct Options {
-    std::filesystem::path artifact = "out/qwen3_6_27b.ninfer";
-    int device                     = 0;
-    int warmup                     = 2;
-    int repetitions                = 10;
-    std::uint32_t draft_tokens     = 5;
-    ninfer::ProposalHead proposal  = ninfer::ProposalHead::Optimized;
-    bool use_cuda_graph            = true;
+    std::filesystem::path artifact  = "out/qwen3_6_27b.ninfer";
+    std::filesystem::path corpus    = "bench/fixtures/bench_corpus.ids";
+    int device                      = 0;
+    int warmup                      = 2;
+    int repetitions                 = 10;
+    std::uint32_t draft_tokens      = 5;
+    std::uint32_t frontier          = 6;
+    ninfer::ProposalHead proposal   = ninfer::ProposalHead::Optimized;
+    ninfer::KvCacheStorage kv_cache = ninfer::KvCacheStorage::BFloat16;
+    bool use_cuda_graph             = true;
 };
 
 void print_usage(const char* executable) {
     std::cout << "usage: " << executable
-              << " [--artifact <model.ninfer>] [--device <id>] [--warmup <n>] [--reps <n>]"
-                 " [--draft-tokens <1..5>] [--proposal-head full|optimized]"
+              << " [--artifact <model.ninfer>] [--corpus <tokens.ids>] [--device <id>]"
+                 " [--warmup <n>] [--reps <n>]"
+                 " [--draft-tokens <1..15>] [--proposal-head full|optimized]"
+                 " [--frontier <tokens>] [--kv-dtype bf16|int8|fp8]"
                  " [--no-cuda-graph]\n";
 }
 
@@ -59,6 +65,8 @@ Options parse_options(int argc, char** argv) {
         };
         if (argument == "--artifact") {
             options.artifact = value("--artifact");
+        } else if (argument == "--corpus") {
+            options.corpus = value("--corpus");
         } else if (argument == "--device") {
             options.device = std::stoi(value("--device"));
         } else if (argument == "--warmup") {
@@ -67,6 +75,19 @@ Options parse_options(int argc, char** argv) {
             options.repetitions = std::stoi(value("--reps"));
         } else if (argument == "--draft-tokens") {
             options.draft_tokens = static_cast<std::uint32_t>(std::stoul(value("--draft-tokens")));
+        } else if (argument == "--frontier") {
+            options.frontier = static_cast<std::uint32_t>(std::stoul(value("--frontier")));
+        } else if (argument == "--kv-dtype") {
+            const std::string_view storage(value("--kv-dtype"));
+            if (storage == "bf16") {
+                options.kv_cache = ninfer::KvCacheStorage::BFloat16;
+            } else if (storage == "int8") {
+                options.kv_cache = ninfer::KvCacheStorage::Int8Group64;
+            } else if (storage == "fp8") {
+                options.kv_cache = ninfer::KvCacheStorage::Fp8E4M3Row256;
+            } else {
+                throw std::invalid_argument("--kv-dtype must be bf16, int8, or fp8");
+            }
         } else if (argument == "--proposal-head") {
             const std::string_view head(value("--proposal-head"));
             if (head == "full") {
@@ -88,9 +109,10 @@ Options parse_options(int argc, char** argv) {
     if (options.device < 0) { throw std::invalid_argument("--device must be nonnegative"); }
     if (options.warmup < 0) { throw std::invalid_argument("--warmup must be nonnegative"); }
     if (options.repetitions <= 0) { throw std::invalid_argument("--reps must be positive"); }
-    if (options.draft_tokens == 0 || options.draft_tokens > 5) {
-        throw std::invalid_argument("--draft-tokens must be in [1,5]");
+    if (options.draft_tokens == 0 || options.draft_tokens > 15) {
+        throw std::invalid_argument("--draft-tokens must be in [1,15]");
     }
+    if (options.frontier == 0) { throw std::invalid_argument("--frontier must be positive"); }
     return options;
 }
 
@@ -118,29 +140,58 @@ RoundMeasurement measure_round(target::Package::Program& program, ninfer::Device
     return RoundMeasurement{.milliseconds = milliseconds, .licensed_tokens = licensed};
 }
 
+std::vector<ninfer::TokenId> load_corpus(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    if (!input) { throw std::runtime_error("failed to open corpus: " + path.string()); }
+    std::vector<ninfer::TokenId> tokens;
+    std::int64_t token = 0;
+    while (input >> token) {
+        if (token < 0 || token > std::numeric_limits<ninfer::TokenId>::max()) {
+            throw std::runtime_error("corpus contains an invalid token id");
+        }
+        tokens.push_back(static_cast<ninfer::TokenId>(token));
+    }
+    if (tokens.empty()) { throw std::runtime_error("corpus is empty: " + path.string()); }
+    return tokens;
+}
+
 int run(const Options& options) {
     if (!std::filesystem::exists(options.artifact)) {
         std::cout << "SKIP: artifact not present: " << options.artifact.string() << '\n';
         return 0;
     }
 
-    const std::vector<ninfer::TokenId> seed{248045, 846, 198, 5834, 248046, 198};
-    const std::uint32_t measured_rounds =
+    const std::vector<ninfer::TokenId> seed_pattern = load_corpus(options.corpus);
+    std::vector<ninfer::TokenId> seed(options.frontier);
+    for (std::size_t index = 0; index < seed.size(); ++index) {
+        seed[index] = seed_pattern[index % seed_pattern.size()];
+    }
+    const std::uint32_t startup_rounds = options.draft_tokens - 1;
+    const std::uint32_t steady_rounds =
         static_cast<std::uint32_t>(options.warmup + options.repetitions);
+    const std::uint32_t total_rounds = startup_rounds + steady_rounds;
     ninfer::EngineOptions engine;
-    engine.artifact_path       = options.artifact;
-    engine.device              = options.device;
-    engine.max_context         = static_cast<std::uint32_t>(seed.size() + 64ULL +
-                                                            static_cast<std::uint64_t>(measured_rounds) *
-                                                                (options.draft_tokens + 1ULL) +
-                                                            2ULL * options.draft_tokens);
-    engine.kv_capacity         = ninfer::KvCapacityPolicy::explicit_capacity(engine.max_context);
-    engine.prefill_chunk       = 128;
-    engine.kv_cache            = ninfer::KvCacheStorage::BFloat16;
-    engine.speculative.backend = ninfer::SpeculativeBackend::Mtp;
-    engine.speculative.draft_tokens  = options.draft_tokens;
-    engine.speculative.proposal_head = options.proposal;
-    engine.use_cuda_graph            = options.use_cuda_graph;
+    engine.artifact_path         = options.artifact;
+    engine.device                = options.device;
+    engine.max_context           = static_cast<std::uint32_t>(seed.size() + 64ULL +
+                                                              static_cast<std::uint64_t>(total_rounds) *
+                                                                  (options.draft_tokens + 1ULL) +
+                                                              2ULL * options.draft_tokens);
+    engine.kv_capacity           = ninfer::KvCapacityPolicy::explicit_capacity(engine.max_context);
+    engine.prefill_chunk         = 128;
+    engine.kv_cache              = options.kv_cache;
+    engine.context_cache.enabled = false;
+    engine.context_cache.device_state_slots                = 0;
+    engine.context_cache.host_state_slots                  = 0;
+    engine.context_cache.host_kv_capacity_bytes            = 0;
+    engine.context_cache.max_private_continuations         = 1;
+    engine.context_cache.max_shared_prefixes               = 0;
+    engine.context_cache.max_long_anchors_per_continuation = 0;
+    engine.context_cache.max_cache_markers_per_request     = 4;
+    engine.speculative.backend                             = ninfer::SpeculativeBackend::Mtp;
+    engine.speculative.draft_tokens                        = options.draft_tokens;
+    engine.speculative.proposal_head                       = options.proposal;
+    engine.use_cuda_graph                                  = options.use_cuda_graph;
 
     ninfer::DeviceContext device(options.device);
     ninfer::artifact::Reader reader(options.artifact);
@@ -160,7 +211,7 @@ int run(const Options& options) {
     auto sequence = std::move(planner).finalize(resolution.main_page_groups);
     auto program  = target::Package::create_program(*model, std::move(sequence), device);
     ninfer::runtime::ResolvedExecutionOptions execution;
-    execution.requested_output_tokens = 1 + measured_rounds * (options.draft_tokens + 1);
+    execution.requested_output_tokens = 1 + total_rounds * (options.draft_tokens + 1);
     execution.allow_prefix_reuse      = false;
     auto request_base                 = program->plan_request(prompt, execution);
     const auto machine_cost           = ninfer::runtime::generic_context_machine_cost_model();
@@ -195,16 +246,30 @@ int run(const Options& options) {
     }
     auto started = std::move(*published->published);
     program->finalize_context_transaction();
-    auto progress = program->advance_prefill(started.sequence);
-    if (!progress.complete || !progress.pending || progress.pending->tokens().size() != 1) {
-        throw std::runtime_error("benchmark seed prefill did not complete in one scheduling unit");
-    }
+    auto pending = [&]() {
+        for (;;) {
+            auto progress = program->advance_prefill(started.sequence);
+            if (!progress.complete) {
+                if (progress.pending) {
+                    throw std::runtime_error(
+                        "benchmark seed prefill published an intermediate token");
+                }
+                continue;
+            }
+            if (!progress.pending || progress.pending->tokens().size() != 1) {
+                throw std::runtime_error("benchmark seed prefill did not publish one token");
+            }
+            return std::move(*progress.pending);
+        }
+    }();
     const std::array<ninfer::runtime::CommitDecision, 1> begin_decision{
         ninfer::runtime::CommitDecision{.accepted_tokens = 1}};
-    (void)program->commit(std::move(*progress.pending), begin_decision);
+    (void)program->commit(std::move(pending), begin_decision);
     const auto active_sequence = started.sequence;
 
-    constexpr std::uint64_t rounds_before = 0;
+    for (std::uint32_t iteration = 0; iteration < startup_rounds; ++iteration) {
+        (void)measure_round(*program, device, active_sequence, options.draft_tokens);
+    }
     for (int iteration = 0; iteration < options.warmup; ++iteration) {
         (void)measure_round(*program, device, active_sequence, options.draft_tokens);
     }
@@ -220,8 +285,9 @@ int run(const Options& options) {
         throw std::runtime_error("benchmark could not release its active sequence");
     }
     const ninfer::SpeculativeStats stats = aborted.speculative;
-    if (stats.rounds - rounds_before != measured_rounds || stats.fallback_steps != 0) {
-        throw std::runtime_error("benchmark did not stay on the native MTP proposal/verify path");
+    if (!stats.enabled || stats.draft_window != options.draft_tokens ||
+        stats.rounds + stats.fallback_steps != total_rounds) {
+        throw std::runtime_error("benchmark returned inconsistent physical-round accounting");
     }
 
     std::vector<float> milliseconds;
@@ -239,8 +305,22 @@ int run(const Options& options) {
 
     std::cout << "format,ninfer_qwen3_6_27b_mtp_round_bench_v1\n";
     std::cout << "artifact," << options.artifact.string() << '\n';
+    std::cout << "corpus," << options.corpus.string() << '\n';
     std::cout << "device," << device.props.name << '\n';
     std::cout << "draft_tokens," << options.draft_tokens << '\n';
+    std::cout << "initial_frontier," << options.frontier << '\n';
+    std::cout << "kv_cache,";
+    switch (options.kv_cache) {
+    case ninfer::KvCacheStorage::BFloat16:
+        std::cout << "bf16\n";
+        break;
+    case ninfer::KvCacheStorage::Int8Group64:
+        std::cout << "int8-group64\n";
+        break;
+    case ninfer::KvCacheStorage::Fp8E4M3Row256:
+        std::cout << "fp8-e4m3-row256\n";
+        break;
+    }
     std::cout << "proposal_head,"
               << (options.proposal == ninfer::ProposalHead::Optimized ? "optimized" : "full")
               << '\n';
@@ -251,6 +331,8 @@ int run(const Options& options) {
     std::cout << "mtp_round_min_ms," << *minimum << '\n';
     std::cout << "mtp_round_max_ms," << *maximum << '\n';
     std::cout << "mean_licensed_tokens," << mean_licensed << '\n';
+    std::cout << "speculative_rounds," << stats.rounds << '\n';
+    std::cout << "fallback_steps," << stats.fallback_steps << '\n';
     std::cout << "accepted_draft_tokens," << stats.accepted_tokens << '\n';
     return 0;
 }

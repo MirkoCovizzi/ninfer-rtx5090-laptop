@@ -55,7 +55,8 @@ struct GdnReplayRecords {
     GdnReplayRecords() = default;
     GdnReplayRecords(DeviceSpan backing, const GdnReplayRecordLayout& layout);
 
-    [[nodiscard]] GdnReplayRecordLayer layer(std::int32_t layer, std::int32_t rows) const;
+    [[nodiscard]] GdnReplayRecordLayer layer(std::int32_t layer, std::int32_t rows,
+                                             std::int32_t active_width) const;
 };
 
 } // namespace ninfer

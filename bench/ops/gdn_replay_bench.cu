@@ -300,6 +300,8 @@ public:
 
     [[nodiscard]] const ops::GdnReplayFoldPlan& fold_plan() const { return fold_plan_; }
 
+    [[nodiscard]] std::int32_t width() const noexcept { return width_; }
+
 private:
     static GdnReplayRecordLayout make_record_layout(const Profile& profile, std::int32_t width,
                                                     LayoutBuilder& builder) {
@@ -470,7 +472,7 @@ Measurement measure_fold(const FoldResources& resources,
                          int warmup, int repeat) {
     cudaStream_t stream = nullptr;
     const auto launch   = [&](cudaStream_t launch_stream) {
-        resources.fold_plan().execute(rows, launch_stream);
+        resources.fold_plan().execute(rows, resources.width(), launch_stream);
     };
     Measurement result;
     result.warm           = bench::measure_launch(launch, stream, warmup, repeat);

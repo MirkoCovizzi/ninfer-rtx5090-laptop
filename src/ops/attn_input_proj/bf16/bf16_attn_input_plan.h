@@ -12,7 +12,7 @@ namespace ninfer::ops::detail {
 // benchmark-callable so the production boundary is not conflated with template availability.
 inline constexpr std::int32_t kBf16AttnInputSmallTMinTokens   = 1;
 inline constexpr std::int32_t kBf16AttnInputSmallTMaxTokens   = 32;
-inline constexpr std::int32_t kBf16AttnInputSmallTDispatchEnd = 8 * 6;
+inline constexpr std::int32_t kBf16AttnInputSmallTDispatchEnd = 8 * 9;
 
 void bf16_attn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                                    Tensor& k, Tensor& v, cudaStream_t stream);

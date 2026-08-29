@@ -2,15 +2,29 @@ from __future__ import annotations
 
 import json
 
-from tools.bench.run_ninfer_bench_matrix import BenchCase, report_rows
+from tools.bench.run_ninfer_bench_matrix import BenchCase, build_cases, report_rows
 
 
-def test_schema_v13_report_is_flattened_for_matrix_summary(tmp_path) -> None:
+def test_core_matrix_covers_fixed_and_adaptive_mtp_windows() -> None:
+    cases = build_cases("core")
+    fixed = [case for case in cases if case.suite == "mtp_sweep"]
+    adaptive = [case for case in cases if case.suite == "adaptive_mtp_sweep"]
+
+    assert len(fixed) == 16
+    assert len(adaptive) == 15
+    assert [case.name for case in fixed] == [f"mtp_sweep_k{k}_graph" for k in range(16)]
+    assert [case.name for case in adaptive] == [
+        f"adaptive_mtp_sweep_k{k}_graph" for k in range(1, 16)
+    ]
+    assert all("--adaptive-mtp" in case.args for case in adaptive)
+
+
+def test_schema_v15_report_is_flattened_for_matrix_summary(tmp_path) -> None:
     report_path = tmp_path / "report.json"
     report_path.write_text(
         json.dumps(
             {
-                "schema_version": 13,
+                "schema_version": 15,
                 "artifact_type": "ninfer_bench_report",
                 "tool": "ninfer_bench",
                 "artifact": {"path": "model.ninfer"},
@@ -42,6 +56,7 @@ def test_schema_v13_report_is_flattened_for_matrix_summary(tmp_path) -> None:
                     "kv_cache": "int8-group64",
                     "mtp_draft_tokens": 5,
                     "proposal_head": "optimized",
+                    "mtp_policy": "adaptive",
                     "decode_path": "cuda-graph",
                     "decode_graph_prime": {"primed": True, "output_tokens": 13},
                     "repetitions": 2,
@@ -66,7 +81,17 @@ def test_schema_v13_report_is_flattened_for_matrix_summary(tmp_path) -> None:
                             "drafted_tokens": 5,
                             "accepted_tokens": 5,
                             "fallback_steps": 3,
+                            "adaptive": True,
+                            "window_transitions": 2,
                             "accepted_per_position": [1, 1, 1, 1, 1],
+                            "drafted_per_position": [1, 1, 1, 1, 1],
+                            "rounds_per_window": [3, 0, 0, 0, 1],
+                            "fallbacks_per_window": [2, 0, 0, 0, 1],
+                            "drafted_tokens_per_window": [3, 0, 0, 0, 5],
+                            "accepted_tokens_per_window": [2, 0, 0, 0, 5],
+                            "committed_tokens_per_window": [5, 0, 0, 0, 6],
+                            "decode_seconds_per_window": [0.3, 0.0, 0.0, 0.0, 0.2],
+                            "window_transition_counts": [0] * 25,
                         },
                     }
                 ],
@@ -99,6 +124,7 @@ def test_schema_v13_report_is_flattened_for_matrix_summary(tmp_path) -> None:
         True,
     )
     assert row["decode_graph_prime_output_tokens"] == 13
+    assert row["mtp_policy"] == "adaptive"
     assert row["kv_capacity"] == 8192
     assert row["host_to_device_bytes"] == 17_400_000_000
     assert row["workspace_capacity_bytes"] == 100_000_000
@@ -111,3 +137,13 @@ def test_schema_v13_report_is_flattened_for_matrix_summary(tmp_path) -> None:
     assert row["decode_engine_tok_s_mean"] == 7.5
     assert row["spec_fallback_steps"] == 3
     assert row["spec_accepted_per_position"] == "[1,1,1,1,1]"
+    assert row["spec_adaptive"] is True
+    assert row["spec_drafted_per_position"] == "[1,1,1,1,1]"
+    assert row["spec_rounds_per_window"] == "[3,0,0,0,1]"
+    assert row["spec_fallbacks_per_window"] == "[2,0,0,0,1]"
+    assert row["spec_drafted_tokens_per_window"] == "[3,0,0,0,5]"
+    assert row["spec_accepted_tokens_per_window"] == "[2,0,0,0,5]"
+    assert row["spec_committed_tokens_per_window"] == "[5,0,0,0,6]"
+    assert row["spec_decode_seconds_per_window"] == "[0.3,0.0,0.0,0.0,0.2]"
+    assert row["spec_window_transitions"] == 2
+    assert row["spec_window_transition_counts"] == "[" + ",".join(["0"] * 25) + "]"

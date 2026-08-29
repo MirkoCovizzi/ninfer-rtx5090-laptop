@@ -212,7 +212,8 @@ All registered model IDs support:
 - text generation with thinking and non-thinking prompt modes;
 - image, multi-image, video, and mixed multimodal messages;
 - chunked prefill, exact-batch CUDA Graph decode, and startup-bounded batched decode;
-- MTP speculative decoding with draft windows from one to five;
+- MTP speculative decoding with fixed or adaptive draft windows from one to eight on 27B targets
+  and one to five on 35B-A3B;
 - BF16, INT8 group-64, and row-scaled FP8 E4M3 KV storage;
 - private and shared exact-prefix reuse with Device/Host State and KV retention;
 - model-aware sampling defaults and explicit sampler overrides;

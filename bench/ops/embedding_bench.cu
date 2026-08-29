@@ -44,13 +44,13 @@ struct ProfileSpec {
 constexpr ProfileSpec profile_spec(Profile profile) {
     switch (profile) {
     case Profile::Q6D5120:
-        return {"q6-d5120", QType::Q6G64_F16S, 5120, 64, 5};
+        return {"q6-d5120", QType::Q6G64_F16S, 5120, 64, 8};
     case Profile::W8D5120:
-        return {"w8-d5120", QType::W8G32_F16S, 5120, 32, 5};
+        return {"w8-d5120", QType::W8G32_F16S, 5120, 32, 8};
     case Profile::W8D2048:
         return {"w8-d2048", QType::W8G32_F16S, 2048, 32, 15};
     case Profile::Fp8D5120:
-        return {"fp8-d5120", QType::FP8_E4M3FN_ROW_BF16S, 5120, 5120, 5};
+        return {"fp8-d5120", QType::FP8_E4M3FN_ROW_BF16S, 5120, 5120, 8};
     }
     throw std::logic_error("unknown embedding profile");
 }

@@ -238,7 +238,7 @@ int run_bf16_target() {
         std::cerr << "BF16 attention input workspace interval is not zero-capacity\n";
         ++failures;
     }
-    for (const std::int32_t tokens : {1, 2, 4, 8, 16, 17, 22, 23, 32, 33, 128, 129, 1024}) {
+    for (const std::int32_t tokens : {1, 2, 4, 8, 16, 17, 22, 23, 32, 33, 72, 73, 128, 129, 1024}) {
         failures += run_bf16_target_case(parent, tokens);
     }
     return failures;

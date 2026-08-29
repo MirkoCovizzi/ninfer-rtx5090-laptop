@@ -7,6 +7,7 @@
 #include "ninfer/ops/sparse_moe.h"
 
 #include <algorithm>
+#include <array>
 #include <stdexcept>
 
 #define NINFER_QWEN36_VARIANT    ::ninfer::targets::qwen3_6_35b_a3b::detail::Variant
@@ -81,6 +82,12 @@ void validate_token_interval(std::int32_t first, std::int32_t last) {
 
 constexpr std::size_t kMinimumLeafWorkspaceBytes = 1;
 
+constexpr std::array<qwen3_6::MtpAdaptiveCostPoint, 1> kMtpAdaptiveCostPoints{{
+    {0U,
+     {1.000F, 1.075F, 1.064F, 1.125F, 1.177F, 1.227F, 1.281F, 1.334F, 1.388F, 1.442F, 1.496F,
+      1.550F, 1.604F, 1.658F, 1.712F}},
+}};
+
 std::size_t gdn_record_workspace_bytes(const Tensor& hidden) {
     return std::max(kMinimumLeafWorkspaceBytes,
                     ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
@@ -95,18 +102,28 @@ std::vector<GraphExecutionProfile> Variant::ordinary_graph_profiles(std::uint32_
 }
 
 std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t capacity,
-                                                               std::uint32_t draft_window) {
-    if (draft_window == 0 || capacity == 0) { return {}; }
+                                                               std::uint32_t draft_window,
+                                                               std::uint32_t proposal_window,
+                                                               std::uint32_t) {
+    if (draft_window == 0 || draft_window > proposal_window || capacity == 0) { return {}; }
     std::vector<std::uint32_t> ends;
     const auto add_shifted = [&](std::uint32_t visible_end, std::uint32_t offset) {
         if (visible_end >= offset) { ends.push_back(visible_end - offset); }
     };
     for (const std::uint32_t visible_end : {128U, 512U, 2048U, 4096U, 8198U, 16390U, 32768U}) {
-        add_shifted(visible_end, 2 * draft_window);
+        add_shifted(visible_end, draft_window + proposal_window);
     }
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
     return graph_profiles_through(capacity - 1, ends);
+}
+
+qwen3_6::MtpAdaptiveCostProfile Variant::mtp_adaptive_cost_profile(WeightsProfile, DType,
+                                                                   std::int32_t) {
+    qwen3_6::MtpAdaptiveCostProfile profile;
+    profile.batch_curves.fill(
+        std::span<const qwen3_6::MtpAdaptiveCostPoint>(kMtpAdaptiveCostPoints));
+    return profile;
 }
 
 std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t capacity,

@@ -93,6 +93,8 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         Invocation{4, ops::LinearPolicy::A16Only},
         Invocation{first_a4, ops::LinearPolicy::AllowA4},
         Invocation{17, ops::LinearPolicy::AllowA4},
+        Invocation{72, ops::LinearPolicy::AllowA4},
+        Invocation{73, ops::LinearPolicy::AllowA4},
         Invocation{1024, ops::LinearPolicy::AllowA4},
     };
     constexpr std::int32_t kMaximumTokens = 1024;

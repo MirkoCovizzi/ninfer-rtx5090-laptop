@@ -2,6 +2,7 @@
 
 #include "targets/qwen3_6_35b_a3b/impl/config.h"
 #include "targets/qwen3_6_35b_a3b/impl/load/bindings.h"
+#include <ninfer/targets/qwen3_6/mtp_adaptive_cost.h>
 #include <ninfer/targets/qwen3_6/runtime.h>
 
 #include <cstddef>
@@ -38,7 +39,11 @@ struct Variant {
     [[nodiscard]] static std::vector<GraphExecutionProfile>
     ordinary_graph_profiles(std::uint32_t capacity);
     [[nodiscard]] static std::vector<GraphExecutionProfile>
-    mtp_graph_profiles(std::uint32_t capacity, std::uint32_t draft_window);
+    mtp_graph_profiles(std::uint32_t capacity, std::uint32_t verification_window,
+                       std::uint32_t proposal_window, std::uint32_t batch_size);
+    [[nodiscard]] static qwen3_6::MtpAdaptiveCostProfile
+    mtp_adaptive_cost_profile(WeightsProfile weights_profile, DType kv_dtype,
+                              std::int32_t kv_quant_group);
     [[nodiscard]] static std::vector<GraphExecutionProfile>
     dflash_graph_profiles(std::uint32_t capacity, std::uint32_t draft_window,
                           std::uint32_t batch_size);

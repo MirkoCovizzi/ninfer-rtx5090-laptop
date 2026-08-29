@@ -74,6 +74,7 @@ struct SequencePlanningInputs {
     DType kv_dtype                         = DType::BF16;
     std::int32_t kv_quant_group            = 0;
     ProposalHead proposal_head             = ProposalHead::Full;
+    MtpDraftPolicy mtp_policy              = MtpDraftPolicy::Fixed;
     StartupFeatures features;
     bool use_cuda_graph = true;
     int device          = 0;
@@ -97,6 +98,7 @@ struct SequencePlanImpl<NINFER_QWEN36_VARIANT> {
     DType kv_dtype                         = DType::BF16;
     std::int32_t kv_quant_group            = 0;
     ProposalHead proposal_head             = ProposalHead::Full;
+    MtpDraftPolicy mtp_policy              = MtpDraftPolicy::Fixed;
     StartupFeatures features;
     bool use_cuda_graph = true;
     int device          = 0;

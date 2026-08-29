@@ -162,6 +162,15 @@ void append_stat(std::ostringstream& out, std::string_view name, const std::vect
 
 SpeculativeStats aggregate_speculative(const TestResult& result) {
     SpeculativeStats out;
+    const auto add_vector = [](std::vector<std::uint64_t>& target,
+                               const std::vector<std::uint64_t>& source) {
+        if (target.size() < source.size()) { target.resize(source.size()); }
+        for (std::size_t i = 0; i < source.size(); ++i) { target[i] += source[i]; }
+    };
+    const auto add_seconds = [](std::vector<double>& target, const std::vector<double>& source) {
+        if (target.size() < source.size()) { target.resize(source.size()); }
+        for (std::size_t i = 0; i < source.size(); ++i) { target[i] += source[i]; }
+    };
     for (const RepTiming& rep : result.reps) {
         const SpeculativeStats& in = rep.speculative;
         out.enabled                = out.enabled || in.enabled;
@@ -170,12 +179,17 @@ SpeculativeStats aggregate_speculative(const TestResult& result) {
         out.drafted_tokens += in.drafted_tokens;
         out.accepted_tokens += in.accepted_tokens;
         out.fallback_steps += in.fallback_steps;
-        if (out.accepted_per_position.size() < in.accepted_per_position.size()) {
-            out.accepted_per_position.resize(in.accepted_per_position.size());
-        }
-        for (std::size_t i = 0; i < in.accepted_per_position.size(); ++i) {
-            out.accepted_per_position[i] += in.accepted_per_position[i];
-        }
+        out.adaptive = out.adaptive || in.adaptive;
+        out.window_transitions += in.window_transitions;
+        add_vector(out.accepted_per_position, in.accepted_per_position);
+        add_vector(out.drafted_per_position, in.drafted_per_position);
+        add_vector(out.rounds_per_window, in.rounds_per_window);
+        add_vector(out.fallbacks_per_window, in.fallbacks_per_window);
+        add_vector(out.drafted_tokens_per_window, in.drafted_tokens_per_window);
+        add_vector(out.accepted_tokens_per_window, in.accepted_tokens_per_window);
+        add_vector(out.committed_tokens_per_window, in.committed_tokens_per_window);
+        add_seconds(out.decode_seconds_per_window, in.decode_seconds_per_window);
+        add_vector(out.window_transition_counts, in.window_transition_counts);
     }
     return out;
 }
@@ -226,6 +240,8 @@ void append_speculative_json(std::ostringstream& out, const SpeculativeStats& st
         << indent << "  \"drafted_tokens\": " << stats.drafted_tokens << ",\n"
         << indent << "  \"accepted_tokens\": " << stats.accepted_tokens << ",\n"
         << indent << "  \"fallback_steps\": " << stats.fallback_steps << ",\n"
+        << indent << "  \"adaptive\": " << (stats.adaptive ? "true" : "false") << ",\n"
+        << indent << "  \"window_transitions\": " << stats.window_transitions << ",\n"
         << indent << "  \"acceptance_rate\": ";
     if (stats.drafted_tokens == 0) {
         out << "null";
@@ -244,6 +260,46 @@ void append_speculative_json(std::ostringstream& out, const SpeculativeStats& st
     for (std::size_t i = 0; i < stats.accepted_per_position.size(); ++i) {
         if (i != 0) { out << ", "; }
         out << stats.accepted_per_position[i];
+    }
+    out << "],\n" << indent << "  \"drafted_per_position\": [";
+    for (std::size_t i = 0; i < stats.drafted_per_position.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        out << stats.drafted_per_position[i];
+    }
+    out << "],\n" << indent << "  \"rounds_per_window\": [";
+    for (std::size_t i = 0; i < stats.rounds_per_window.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        out << stats.rounds_per_window[i];
+    }
+    out << "],\n" << indent << "  \"fallbacks_per_window\": [";
+    for (std::size_t i = 0; i < stats.fallbacks_per_window.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        out << stats.fallbacks_per_window[i];
+    }
+    out << "],\n" << indent << "  \"drafted_tokens_per_window\": [";
+    for (std::size_t i = 0; i < stats.drafted_tokens_per_window.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        out << stats.drafted_tokens_per_window[i];
+    }
+    out << "],\n" << indent << "  \"accepted_tokens_per_window\": [";
+    for (std::size_t i = 0; i < stats.accepted_tokens_per_window.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        out << stats.accepted_tokens_per_window[i];
+    }
+    out << "],\n" << indent << "  \"committed_tokens_per_window\": [";
+    for (std::size_t i = 0; i < stats.committed_tokens_per_window.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        out << stats.committed_tokens_per_window[i];
+    }
+    out << "],\n" << indent << "  \"decode_seconds_per_window\": [";
+    for (std::size_t i = 0; i < stats.decode_seconds_per_window.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        out << number(stats.decode_seconds_per_window[i]);
+    }
+    out << "],\n" << indent << "  \"window_transition_counts\": [";
+    for (std::size_t i = 0; i < stats.window_transition_counts.size(); ++i) {
+        if (i != 0) { out << ", "; }
+        out << stats.window_transition_counts[i];
     }
     out << "]\n" << indent << '}';
 }
@@ -292,7 +348,8 @@ std::string usage_text(std::string_view program) {
         << "  --prefill-chunk <tokens>    multiple of " << kPrefillChunkAlignment
         << " (default: " << kDefaultPrefillChunk << ")\n"
         << "  --kv-dtype <bf16|int8|fp8>  KV cache storage (default: bf16)\n"
-        << "  --mtp-draft-tokens <0..5>   speculative draft window (default: 0)\n"
+        << "  --mtp-draft-tokens <0..15>  speculative draft window (default: 0)\n"
+        << "  --adaptive-mtp              adapt physical MTP width up to the configured maximum\n"
         << "  --lm-head-draft             use the optimized proposal head; requires MTP\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
         << "  --no-cuda-graph             use eager decode\n"
@@ -348,8 +405,10 @@ BenchOptions parse_args(int argc, char** argv) {
             options.mtp_draft_tokens =
                 parse_u32(value("--mtp-draft-tokens"), "mtp-draft-tokens", true);
             if (options.mtp_draft_tokens > kMaxMtpDraftTokens) {
-                throw std::invalid_argument("--mtp-draft-tokens must be in [0,5]");
+                throw std::invalid_argument("--mtp-draft-tokens must be in [0,15]");
             }
+        } else if (arg == "--adaptive-mtp") {
+            options.mtp_policy = MtpDraftPolicy::Adaptive;
         } else if (arg == "--lm-head-draft") {
             options.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--device") {
@@ -383,6 +442,9 @@ BenchOptions parse_args(int argc, char** argv) {
         throw std::invalid_argument(
             "--lm-head-draft requires --mtp-draft-tokens greater than zero");
     }
+    if (options.mtp_policy == MtpDraftPolicy::Adaptive && options.mtp_draft_tokens == 0) {
+        throw std::invalid_argument("--adaptive-mtp requires --mtp-draft-tokens greater than zero");
+    }
     return options;
 }
 
@@ -413,7 +475,7 @@ std::uint32_t resolve_max_context(const std::vector<BenchTest>& tests,
                                   std::optional<std::uint32_t> override_max_context,
                                   std::uint32_t mtp_draft_tokens, bool use_cuda_graph) {
     if (mtp_draft_tokens > kMaxMtpDraftTokens) {
-        throw std::invalid_argument("mtp draft window must be in [0,5]");
+        throw std::invalid_argument("mtp draft window must be in [0,15]");
     }
     std::uint32_t required = 0;
     std::string driver;
@@ -480,7 +542,7 @@ std::string decode_path_name(bool use_cuda_graph, std::uint32_t mtp_draft_tokens
 
 std::uint32_t decode_graph_prime_output_tokens(std::uint32_t mtp_draft_tokens) {
     if (mtp_draft_tokens > kMaxMtpDraftTokens) {
-        throw std::invalid_argument("mtp draft window must be in [0,5]");
+        throw std::invalid_argument("mtp draft window must be in [0,15]");
     }
     return mtp_draft_tokens == 0 ? 3 : 2 * (mtp_draft_tokens + 1) + 1;
 }
@@ -696,6 +758,8 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "    \"prefill_chunk\": " << env.prefill_chunk << ",\n"
         << "    \"kv_cache\": \"" << kv_cache_name(env.kv_cache) << "\",\n"
         << "    \"mtp_draft_tokens\": " << env.mtp_draft_tokens << ",\n"
+        << "    \"mtp_policy\": \""
+        << (env.mtp_policy == MtpDraftPolicy::Adaptive ? "adaptive" : "fixed") << "\",\n"
         << "    \"proposal_head\": \"" << proposal_head_name(env.proposal_head) << "\",\n"
         << "    \"use_cuda_graph\": " << (env.use_cuda_graph ? "true" : "false") << ",\n"
         << "    \"decode_path\": \"" << decode_path_name(env.use_cuda_graph, env.mtp_draft_tokens)

@@ -12,7 +12,7 @@
 
 namespace ninfer::ops::detail {
 
-enum class CausalAttentionRoute { SmallT, ChunkedSmallT, Prompt };
+enum class CausalAttentionRoute { SmallT, ColumnSmallT, ChunkedSmallT, Prompt };
 
 struct CausalSmallTInvocation {
     const Tensor* valid_columns = nullptr;
@@ -30,7 +30,8 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
 bool causal_attention_uses_small_t(std::int32_t tokens);
 
 CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::int32_t width,
-                                                    std::int32_t batch_size,
+                                                    std::int32_t batch_size, DType cache_dtype,
+                                                    bool appends_kv,
                                                     CausalAttentionExecutionEnvelope envelope);
 
 const char* causal_attention_route_name(CausalAttentionRoute route);

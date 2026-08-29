@@ -230,7 +230,7 @@ void HttpServer::log_request_rejected(const RequestRejectionLogContext& context)
 
 void HttpServer::log_request_done(const RequestLogContext& context,
                                   const GenerationOutcome& outcome) {
-    log_line(format_request_done(context, outcome));
+    log_line(format_request_done(context, outcome, options_.log_adaptive_mtp_stats));
     request_jsonl_.write_request_done(context, outcome);
 }
 

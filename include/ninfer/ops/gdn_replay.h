@@ -45,7 +45,8 @@ class GdnReplayFoldPlan {
 public:
     GdnReplayFoldPlan(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states);
 
-    void execute(std::span<const GdnReplayFoldRow> rows, cudaStream_t stream) const;
+    void execute(std::span<const GdnReplayFoldRow> rows, std::int32_t active_width,
+                 cudaStream_t stream) const;
 
 private:
     GdnReplayRecords records_;

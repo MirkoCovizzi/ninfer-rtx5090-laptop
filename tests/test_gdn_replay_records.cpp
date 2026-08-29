@@ -102,7 +102,7 @@ int main() {
                                 records.gate.bytes(),
                             "record payload bytes");
 
-    const auto layer2 = records.layer(2, 3);
+    const auto layer2 = records.layer(2, 3, spec.width);
     failures += expect_shape(layer2.conv, 256, 4, 3, 1, "layer conv slice");
     failures += expect_shape(layer2.key, 128, 2, 4, 3, "layer key slice");
     failures += expect_shape(layer2.value, 128, 6, 4, 3, "layer value slice");
@@ -115,10 +115,20 @@ int main() {
         static_cast<std::byte*>(layer2.key.data) - static_cast<std::byte*>(records.key.data) ==
             static_cast<std::ptrdiff_t>(2 * spec.record_capacity * records.key.nb[3]),
         "layer key slice offset differs");
-    failures += expect_throw([&] { (void)records.layer(-1, 1); }, "negative layer");
-    failures += expect_throw([&] { (void)records.layer(3, 1); }, "past-end layer");
-    failures += expect_throw([&] { (void)records.layer(0, 0); }, "zero active rows");
-    failures += expect_throw([&] { (void)records.layer(0, 6); }, "excess active rows");
+    const auto packed_layer2 = records.layer(2, 3, 2);
+    failures += expect_shape(packed_layer2.conv, 256, 2, 3, 1, "packed layer conv slice");
+    failures += expect_shape(packed_layer2.key, 128, 2, 2, 3, "packed layer key slice");
+    failures += expect(packed_layer2.conv.data == layer2.conv.data,
+                       "packed layer conv changed its stable base address");
+    failures += expect(packed_layer2.key.data == layer2.key.data,
+                       "packed layer key changed its stable base address");
+    failures += expect_throw([&] { (void)records.layer(-1, 1, spec.width); }, "negative layer");
+    failures += expect_throw([&] { (void)records.layer(3, 1, spec.width); }, "past-end layer");
+    failures += expect_throw([&] { (void)records.layer(0, 0, spec.width); }, "zero active rows");
+    failures += expect_throw([&] { (void)records.layer(0, 6, spec.width); }, "excess active rows");
+    failures += expect_throw([&] { (void)records.layer(0, 1, 0); }, "zero active width");
+    failures +=
+        expect_throw([&] { (void)records.layer(0, 1, spec.width + 1); }, "excess active width");
 
     failures += expect_size(record_bytes({.layers          = 48,
                                           .record_capacity = 8,

@@ -304,7 +304,7 @@ acceptance and throughput; it must not change the distribution of emitted target
 
 The greedy product contract is stronger than distributional equivalence. For one fixed artifact,
 prepared prompt, KV-cache dtype, and otherwise identical Engine and request configuration, MTP-off
-and MTP draft windows `1..5` must publish exactly the same committed token IDs. Draft-window and
+and fixed MTP draft windows `1..15` or adaptive MTP must publish exactly the same committed token IDs. Draft-window and
 proposal-head choices may change acceptance and execution work only. The contract does not require
 bit-identical target logits or private intermediates and does not compare different artifacts or KV
 dtypes. Stochastic execution preserves the processed target distribution but need not reproduce the

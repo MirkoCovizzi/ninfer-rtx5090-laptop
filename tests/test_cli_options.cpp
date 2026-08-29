@@ -59,5 +59,21 @@ int main() {
                   (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--top-k", "21"});
               }),
               "CLI accepted top_k beyond the executable candidate domain");
+    const ninfer::cli::Options adaptive =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp", "--draft-tokens",
+               "15", "--adaptive-mtp"});
+    failures += check(adaptive.speculative.draft_tokens == 15 &&
+                          adaptive.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive,
+                      "adaptive MTP options were not preserved");
+    failures += check(
+        rejects([] {
+            (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--adaptive-mtp"});
+        }),
+        "--adaptive-mtp was accepted without MTP");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec",
+                                       "dflash", "--draft-tokens", "3", "--adaptive-mtp"});
+                      }),
+                      "--adaptive-mtp was accepted with DFlash");
     return failures == 0 ? 0 : 1;
 }

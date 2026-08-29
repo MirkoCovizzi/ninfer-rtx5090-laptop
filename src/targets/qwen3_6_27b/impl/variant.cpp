@@ -10,8 +10,10 @@
 #include "ninfer/ops/mtp_pack.h"
 #include "ninfer/ops/residual_add.h"
 #include "ninfer/ops/silu_mul.h"
+#include <ninfer/targets/qwen3_6/decoder_state.h>
 
 #include <algorithm>
+#include <array>
 #include <stdexcept>
 
 #define NINFER_QWEN36_VARIANT    ::ninfer::targets::qwen3_6_27b::detail::Variant
@@ -45,6 +47,42 @@ void validate_token_interval(std::int32_t first, std::int32_t last) {
 
 constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::AllowA4;
 constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::AllowA8;
+
+constexpr std::array<qwen3_6::MtpAdaptiveCostPoint, 4> kNvfp4MtpAdaptiveCostPoints{{
+    {256U,
+     {26.596376F, 28.936277F, 28.380552F, 30.002042F, 31.503180F, 32.890608F, 34.562589F,
+      35.847892F, 37.133195F, 38.418498F, 39.703801F, 40.989104F, 42.274407F, 43.559710F,
+      44.845013F}},
+    {2304U,
+     {26.833267F, 29.024762F, 28.546263F, 30.285130F, 31.876161F, 33.354065F, 35.014126F,
+      36.521353F, 38.028580F, 39.535807F, 41.043034F, 42.550261F, 44.057488F, 45.564715F,
+      47.071942F}},
+    {33024U,
+     {28.569155F, 31.277367F, 30.686196F, 33.010791F, 34.600379F, 36.198991F, 37.756093F,
+      40.721584F, 43.687075F, 46.652566F, 49.618057F, 52.583548F, 55.549039F, 58.514530F,
+      61.480021F}},
+    {65792U,
+     {30.287110F, 33.148583F, 32.678933F, 34.791146F, 37.190267F, 38.946149F, 40.639731F,
+      42.889582F, 45.139433F, 47.389284F, 49.639135F, 51.888986F, 54.138837F, 56.388688F,
+      58.638539F}},
+}};
+
+constexpr std::array<qwen3_6::MtpAdaptiveCostPoint, 1> kBaselineMtpAdaptiveCostPoints{{
+    {0U,
+     {1.000F, 1.075F, 1.064F, 1.125F, 1.177F, 1.227F, 1.281F, 1.334F, 1.388F, 1.442F, 1.496F,
+      1.550F, 1.604F, 1.658F, 1.712F}},
+}};
+
+constexpr std::array<qwen3_6::MtpAdaptiveCostPoint, 2> kQuasarInt8MtpAdaptiveCostPoints{{
+    {8704U,
+     {26.541810F, 28.463230F, 30.265199F, 32.467409F, 34.708594F, 36.943396F, 39.190712F,
+      41.380007F, 43.498577F, 45.696578F, 47.869682F, 50.018806F, 52.148634F, 54.278462F,
+      56.408290F}},
+    {66048U,
+     {32.464752F, 38.322128F, 44.179464F, 50.037088F, 55.767953F, 61.624083F, 67.653992F,
+      72.802868F, 78.938889F, 84.858690F, 90.351772F, 96.394252F, 101.805492F, 107.216731F,
+      112.627971F}},
+}};
 
 ops::LinearPolicy text_policy(const Weight& weight) {
     switch (weight.qtype) {
@@ -122,15 +160,17 @@ std::vector<GraphExecutionProfile> Variant::ordinary_graph_profiles(std::uint32_
 }
 
 std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t capacity,
-                                                               std::uint32_t draft_window) {
-    if (draft_window == 0 || capacity == 0) { return {}; }
+                                                               std::uint32_t draft_window,
+                                                               std::uint32_t proposal_window,
+                                                               std::uint32_t) {
+    if (draft_window == 0 || draft_window > proposal_window || capacity == 0) { return {}; }
     // Bound the final AR window E+2K at split-policy transitions until the grid reaches its cap.
     std::vector<std::uint32_t> ends;
     const auto add_shifted = [&](std::uint32_t visible_end, std::uint32_t offset) {
         if (visible_end >= offset) { ends.push_back(visible_end - offset); }
     };
     for (const std::uint32_t visible_end : {128U, 512U, 2048U, 4096U, 8198U, 16390U, 32768U}) {
-        add_shifted(visible_end, 2 * draft_window);
+        add_shifted(visible_end, draft_window + proposal_window);
     }
     // Target verify and MTP batch both have T=K+1 and W=E+K+1. Preserve one concrete INT8
     // implementation per range at the T=4/5/6 launch boundaries.
@@ -148,6 +188,23 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
     return graph_profiles_through(capacity - 1, ends);
+}
+
+qwen3_6::MtpAdaptiveCostProfile Variant::mtp_adaptive_cost_profile(WeightsProfile weights_profile,
+                                                                   DType kv_dtype,
+                                                                   std::int32_t kv_quant_group) {
+    qwen3_6::MtpAdaptiveCostProfile profile;
+    profile.batch_curves.fill(
+        std::span<const qwen3_6::MtpAdaptiveCostPoint>(kBaselineMtpAdaptiveCostPoints));
+    if (weights_profile == WeightsProfile::Qwen38Nvfp4LegacyW8) {
+        profile.batch_curves[0] =
+            std::span<const qwen3_6::MtpAdaptiveCostPoint>(kNvfp4MtpAdaptiveCostPoints);
+    } else if (weights_profile == WeightsProfile::Qwen38Nvfp4Quasar && kv_dtype == DType::I8 &&
+               kv_quant_group == qwen3_6::kKvInt8QuantGroup) {
+        profile.batch_curves[0] =
+            std::span<const qwen3_6::MtpAdaptiveCostPoint>(kQuasarInt8MtpAdaptiveCostPoints);
+    }
+    return profile;
 }
 
 std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t, std::uint32_t,
