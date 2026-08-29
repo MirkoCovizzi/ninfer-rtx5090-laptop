@@ -1,0 +1,48 @@
+name: Build Binaries
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# Cache and artifact storage use job-scoped runtime credentials, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build product image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ninfer:ci
+          cache-from: type=gha,scope=product-image
+          cache-to: type=gha,mode=max,scope=product-image
+
+      - name: Extract product binaries
+        run: |
+          container=$(docker create ninfer:ci)
+          mkdir artifacts
+          docker cp "$container:/usr/local/bin/ninfer" artifacts/ninfer
+          docker cp "$container:/usr/local/bin/ninfer-serve" artifacts/ninfer-serve
+          docker rm "$container"
+          tar -C artifacts -czf ninfer-linux-x86_64-sm120a.tar.gz ninfer ninfer-serve
+
+      - name: Upload product binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ninfer-linux-x86_64-sm120a
+          path: ninfer-linux-x86_64-sm120a.tar.gz
+          if-no-files-found: error
+          retention-days: 7
