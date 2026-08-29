@@ -28,6 +28,8 @@ UNSLOTH_TOKENIZER_SHA256 = (
     ((convert_27b.load_resources, MODEL_27B), (convert_35b.load_resources, MODEL_35B)),
 )
 def test_both_official_sources_pass_the_shared_preflight(loader, model_dir):
+    if not model_dir.is_dir():
+        pytest.skip(f"the local official checkpoint is unavailable at {model_dir}")
     resources = loader(model_dir)
 
     assert tuple(resource.name for resource in resources) == tuple(

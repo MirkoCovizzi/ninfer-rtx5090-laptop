@@ -1,0 +1,6 @@
+# PyTorch 2.7.1 is installed separately from its CPU-only wheel index.
+numpy>=1.24
+pytest>=8
+PyYAML==6.0.3
+rich==15.0.0
+safetensors>=0.4

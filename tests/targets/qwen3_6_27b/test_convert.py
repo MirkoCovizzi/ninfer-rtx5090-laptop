@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import torch
 
 from tools.artifact.container import (
@@ -22,6 +23,10 @@ OFFICIAL_MODEL = Path(
 )
 
 
+@pytest.mark.skipif(
+    not (OFFICIAL_MODEL / "config.json").is_file(),
+    reason="the local official Qwen3.6-27B checkpoint is unavailable",
+)
 def test_official_config_uses_only_nested_mtp_field():
     config = json.loads((OFFICIAL_MODEL / "config.json").read_text())
 
