@@ -259,8 +259,7 @@ void TextContext::set_gdn_state_action(GdnStateAction action,
     replay_records_   = replay_records;
 }
 
-void TextContext::commit_text_kvarn_pages(const Tensor& positions,
-                                          const Tensor& accepted_columns,
+void TextContext::commit_text_kvarn_pages(const Tensor& positions, const Tensor& accepted_columns,
                                           const Tensor& kv_table_rows) {
     if (batch_text_kv_ == nullptr ||
         batch_text_kv_->storage() != KvCacheStorage::KvarnK4V2Group64) {
@@ -272,11 +271,9 @@ void TextContext::commit_text_kvarn_pages(const Tensor& positions,
     }
 }
 
-void TextContext::commit_mtp_kvarn_pages(const Tensor& positions,
-                                         const Tensor& accepted_columns,
+void TextContext::commit_mtp_kvarn_pages(const Tensor& positions, const Tensor& accepted_columns,
                                          const Tensor& kv_table_rows) {
-    if (batch_mtp_kv_ == nullptr ||
-        batch_mtp_kv_->storage() != KvCacheStorage::KvarnK4V2Group64) {
+    if (batch_mtp_kv_ == nullptr || batch_mtp_kv_->storage() != KvCacheStorage::KvarnK4V2Group64) {
         return;
     }
     for (std::uint32_t layer = 0; layer < batch_mtp_kv_->layers(); ++layer) {
@@ -424,10 +421,10 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
         Tensor a_batch        = a.view({kCfg.head_dim, kCfg.n_q, width, active_sequence_batch_});
         Tensor position_batch = positions.view({width, active_sequence_batch_});
         if (batch_mtp_kv_->storage() == KvCacheStorage::KvarnK4V2Group64) {
-            ops::kvarn_attention(q_batch, k_batch, v_batch, position_batch,
-                                 *active_valid_columns_, *active_backend_kv_table_rows_,
-                                 kAttnScale, batch_mtp_kv_->kvarn_batch_layer_view(0),
-                                 kvarn_provisional_, envelope, work_, a_batch, s);
+            ops::kvarn_attention(q_batch, k_batch, v_batch, position_batch, *active_valid_columns_,
+                                 *active_backend_kv_table_rows_, kAttnScale,
+                                 batch_mtp_kv_->kvarn_batch_layer_view(0), kvarn_provisional_,
+                                 envelope, work_, a_batch, s);
         } else {
             ops::causal_softmax_attention(
                 q_batch, k_batch, v_batch, position_batch, *active_valid_columns_,
@@ -440,11 +437,10 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
                                  kAttnScale, batch_mtp_kv_->kvarn_batch_layer_view(0),
                                  kvarn_provisional_, envelope, work_, a, s);
         } else {
-            ops::causal_softmax_attention(qn, kn, v, positions, Tensor{},
-                                           io_.backend_kv_table_row,
-                                           {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
-                                           batch_mtp_kv_->batch_layer_view(0), envelope, work_, a,
-                                           s);
+            ops::causal_softmax_attention(qn, kn, v, positions, Tensor{}, io_.backend_kv_table_row,
+                                          {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
+                                          batch_mtp_kv_->batch_layer_view(0), envelope, work_, a,
+                                          s);
         }
     }
     ops::sigmoid_mul(gate, a, s);
@@ -586,8 +582,8 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
                                         a, s);
         } else {
             ops::causal_softmax_attention_cached(qn, last_position,
-                                                  {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
-                                                  mtp_kv_.layer_view(0), envelope, work_, a, s);
+                                                 {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
+                                                 mtp_kv_.layer_view(0), envelope, work_, a, s);
         }
         ops::sigmoid_mul(gate, a, s);
 
@@ -913,26 +909,25 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
         if (batch_text_kv_->storage() == KvCacheStorage::KvarnK4V2Group64) {
             ops::kvarn_attention(q_batch, k_batch, v_batch, position_batch, valid, kv_table_rows,
-                                  kAttnScale, batch_text_kv_->kvarn_batch_layer_view(fidx),
-                                  kvarn_provisional_, *active_causal_attention_envelope_, work_,
-                                  a_batch, s);
+                                 kAttnScale, batch_text_kv_->kvarn_batch_layer_view(fidx),
+                                 kvarn_provisional_, *active_causal_attention_envelope_, work_,
+                                 a_batch, s);
         } else {
             ops::causal_softmax_attention(q_batch, k_batch, v_batch, position_batch, valid,
-                                           kv_table_rows, {kCfg.head_dim, kCfg.n_q, kCfg.n_kv},
-                                           kAttnScale, batch_text_kv_->batch_layer_view(fidx),
-                                           *active_causal_attention_envelope_, work_, a_batch, s);
+                                          kv_table_rows, {kCfg.head_dim, kCfg.n_q, kCfg.n_kv},
+                                          kAttnScale, batch_text_kv_->batch_layer_view(fidx),
+                                          *active_causal_attention_envelope_, work_, a_batch, s);
         }
     } else {
         if (batch_text_kv_->storage() == KvCacheStorage::KvarnK4V2Group64) {
             ops::kvarn_attention(qn, kn, v, cache_positions, Tensor{}, kv_table_rows, kAttnScale,
-                                  batch_text_kv_->kvarn_batch_layer_view(fidx),
-                                  kvarn_provisional_, *active_causal_attention_envelope_, work_, a,
-                                  s);
+                                 batch_text_kv_->kvarn_batch_layer_view(fidx), kvarn_provisional_,
+                                 *active_causal_attention_envelope_, work_, a, s);
         } else {
             ops::causal_softmax_attention(qn, kn, v, cache_positions, Tensor{}, kv_table_rows,
-                                           {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
-                                           batch_text_kv_->batch_layer_view(fidx),
-                                           *active_causal_attention_envelope_, work_, a, s);
+                                          {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, kAttnScale,
+                                          batch_text_kv_->batch_layer_view(fidx),
+                                          *active_causal_attention_envelope_, work_, a, s);
         }
     }
     ops::sigmoid_mul(gate, a, s);

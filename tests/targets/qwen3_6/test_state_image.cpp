@@ -130,15 +130,15 @@ void expect_slot(q36::StateImageDevicePool& pool, std::int32_t slot, unsigned ch
             const auto tail = pool.kvarn_text_tail(layer, slot);
             expect_bytes(tail.k, static_cast<unsigned char>(base + 0x50 + layer), "KVarN Text K");
             expect_bytes(tail.v, static_cast<unsigned char>(base + 0x60 + layer), "KVarN Text V");
-            expect_bytes(tail.logical_pages,
-                         static_cast<unsigned char>(base + 0x70 + layer), "KVarN Text markers");
+            expect_bytes(tail.logical_pages, static_cast<unsigned char>(base + 0x70 + layer),
+                         "KVarN Text markers");
         }
         for (std::uint32_t layer = 0; layer < pool.kvarn_mtp_layers(); ++layer) {
             const auto tail = pool.kvarn_mtp_tail(layer, slot);
             expect_bytes(tail.k, static_cast<unsigned char>(base + 0x80 + layer), "KVarN MTP K");
             expect_bytes(tail.v, static_cast<unsigned char>(base + 0x90 + layer), "KVarN MTP V");
-            expect_bytes(tail.logical_pages,
-                         static_cast<unsigned char>(base + 0xa0 + layer), "KVarN MTP markers");
+            expect_bytes(tail.logical_pages, static_cast<unsigned char>(base + 0xa0 + layer),
+                         "KVarN MTP markers");
         }
     }
 }

@@ -14,18 +14,18 @@ using namespace ninfer;
 
 namespace {
 
-constexpr int kD = ops::kKvarnHeadDim;
+constexpr int kD     = ops::kKvarnHeadDim;
 constexpr int kGroup = ops::kKvarnGroup;
 
 struct Options {
-    int tiles = 64;
+    int tiles  = 64;
     int warmup = 5;
     int repeat = 30;
 };
 
 int parse_positive(const char* text, const char* label) {
-    errno = 0;
-    char* end = nullptr;
+    errno            = 0;
+    char* end        = nullptr;
     const long value = std::strtol(text, &end, 10);
     if (errno != 0 || end == text || *end != '\0' || value <= 0 || value > 1'000'000) {
         throw std::invalid_argument(std::string("invalid ") + label);
@@ -44,7 +44,8 @@ Options parse_options(int argc, char** argv) {
         } else if (argument == "--repeat" && index + 1 < argc) {
             options.repeat = parse_positive(argv[++index], "repeat");
         } else {
-            throw std::invalid_argument("usage: ninfer_kvarn_codec_bench [--tiles N] [--warmup N] [--repeat N]");
+            throw std::invalid_argument(
+                "usage: ninfer_kvarn_codec_bench [--tiles N] [--warmup N] [--repeat N]");
         }
     }
     return options;
@@ -96,10 +97,10 @@ void print_result(const char* operation, int tiles, double logical_bytes,
 
 int main(int argc, char** argv) {
     try {
-        const Options options = parse_options(argc, argv);
+        const Options options      = parse_options(argc, argv);
         const std::size_t elements = static_cast<std::size_t>(kD) * kGroup * options.tiles;
-        DeviceBuffer key = bench::make_bf16(elements);
-        DeviceBuffer value = bench::make_bf16(elements);
+        DeviceBuffer key           = bench::make_bf16(elements);
+        DeviceBuffer value         = bench::make_bf16(elements);
         DeviceBuffer decoded_key(elements * sizeof(float));
         DeviceBuffer decoded_value(elements * sizeof(float));
         Storage storage(options.tiles);
@@ -108,26 +109,27 @@ int main(int argc, char** argv) {
         Tensor decoded_key_tensor(decoded_key.p, DType::FP32, {kD, kGroup, options.tiles});
         Tensor decoded_value_tensor(decoded_value.p, DType::FP32, {kD, kGroup, options.tiles});
         ops::KvarnTileStorage storage_view = storage.view();
-        cudaStream_t stream = nullptr;
+        cudaStream_t stream                = nullptr;
 
         const auto store_timing = bench::measure_launch(
             [&](cudaStream_t active) {
                 ops::kvarn_store(key_tensor, value_tensor, storage_view, active);
-            }, stream, options.warmup, options.repeat);
+            },
+            stream, options.warmup, options.repeat);
         const double source_bytes = 2.0 * elements * sizeof(std::uint16_t);
         print_result("store", options.tiles, source_bytes, store_timing);
 
         const auto dequant_timing = bench::measure_launch(
             [&](cudaStream_t active) {
                 ops::kvarn_dequant(storage_view, decoded_key_tensor, decoded_value_tensor, active);
-            }, stream, options.warmup, options.repeat);
+            },
+            stream, options.warmup, options.repeat);
         const double output_bytes = 2.0 * elements * sizeof(float);
         print_result("dequant", options.tiles, output_bytes, dequant_timing);
 
         const auto hadamard_timing = bench::measure_launch(
-            [&](cudaStream_t active) {
-                ops::kvarn_hadamard(key_tensor, value_tensor, active);
-            }, stream, options.warmup, options.repeat);
+            [&](cudaStream_t active) { ops::kvarn_hadamard(key_tensor, value_tensor, active); },
+            stream, options.warmup, options.repeat);
         print_result("hadamard", options.tiles * kGroup,
                      static_cast<double>(elements) * 2.0 * sizeof(std::uint16_t), hadamard_timing);
         return 0;

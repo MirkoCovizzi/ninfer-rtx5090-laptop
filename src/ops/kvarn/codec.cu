@@ -33,25 +33,21 @@ std::int32_t validate_storage(const KvarnTileStorage& storage) {
     require_tensor(storage.k_codes, DType::U8, kvarn::Group / 2, kvarn::D, tiles, "K codes");
     require_tensor(storage.k_scales, DType::FP16, kvarn::D, tiles, 1, "K scales");
     require_tensor(storage.k_zeros, DType::FP16, kvarn::D, tiles, 1, "K zeros");
-    require_tensor(storage.k_token_scales, DType::FP16, kvarn::Group, tiles, 1,
-                   "K token scales");
+    require_tensor(storage.k_token_scales, DType::FP16, kvarn::Group, tiles, 1, "K token scales");
     require_tensor(storage.v_codes, DType::U8, kvarn::D / 4, kvarn::Group, tiles, "V codes");
-    require_tensor(storage.v_channel_scales, DType::FP16, kvarn::D, tiles, 1,
-                   "V channel scales");
-    require_tensor(storage.v_token_scales, DType::FP16, kvarn::Group, tiles, 1,
-                   "V token scales");
-    require_tensor(storage.v_token_zeros, DType::FP16, kvarn::Group, tiles, 1,
-                   "V token zeros");
+    require_tensor(storage.v_channel_scales, DType::FP16, kvarn::D, tiles, 1, "V channel scales");
+    require_tensor(storage.v_token_scales, DType::FP16, kvarn::Group, tiles, 1, "V token scales");
+    require_tensor(storage.v_token_zeros, DType::FP16, kvarn::Group, tiles, 1, "V token zeros");
     return tiles;
 }
 
 __global__ void store_kernel(const __nv_bfloat16* k, const __nv_bfloat16* v,
                              kvarn::StorePointers output, int tiles) {
     extern __shared__ float shared[];
-    float* tile = shared;
-    const int encoded = static_cast<int>(blockIdx.x);
-    const bool key    = encoded < tiles;
-    const int record  = key ? encoded : encoded - tiles;
+    float* tile             = shared;
+    const int encoded       = static_cast<int>(blockIdx.x);
+    const bool key          = encoded < tiles;
+    const int record        = key ? encoded : encoded - tiles;
     const std::int64_t base = static_cast<std::int64_t>(record) * kvarn::D * kvarn::Group;
     for (int index = static_cast<int>(threadIdx.x); index < kvarn::D * kvarn::Group;
          index += static_cast<int>(blockDim.x)) {
@@ -72,11 +68,11 @@ __global__ void store_kernel(const __nv_bfloat16* k, const __nv_bfloat16* v,
 __global__ void dequant_kernel(const std::uint8_t* k_codes, const __half* k_scales,
                                const __half* k_zeros, const __half* k_token_scales,
                                const std::uint8_t* v_codes, const __half* v_channel_scales,
-                               const __half* v_token_scales, const __half* v_token_zeros,
-                               float* k, float* v, int tiles) {
+                               const __half* v_token_scales, const __half* v_token_zeros, float* k,
+                               float* v, int tiles) {
     const int record = static_cast<int>(blockIdx.y);
-    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) +
-                      static_cast<int>(threadIdx.x);
+    const int index =
+        static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (record >= tiles || index >= kvarn::D * kvarn::Group) { return; }
     const int token = index / kvarn::D;
     const int d     = index - token * kvarn::D;
@@ -86,10 +82,9 @@ __global__ void dequant_kernel(const std::uint8_t* k_codes, const __half* k_scal
     const std::int64_t k_byte =
         (static_cast<std::int64_t>(record) * kvarn::D + d) * (kvarn::Group / 2) + token / 2;
     const int k_code = (k_codes[k_byte] >> (4 * (token & 1))) & 15;
-    k[destination] =
-        (static_cast<float>(k_code) * __half2float(k_scales[record * kvarn::D + d]) +
-         __half2float(k_zeros[record * kvarn::D + d])) *
-        __half2float(k_token_scales[record * kvarn::Group + token]);
+    k[destination]   = (static_cast<float>(k_code) * __half2float(k_scales[record * kvarn::D + d]) +
+                      __half2float(k_zeros[record * kvarn::D + d])) *
+                     __half2float(k_token_scales[record * kvarn::Group + token]);
 
     const std::int64_t v_byte =
         (static_cast<std::int64_t>(record) * kvarn::Group + token) * (kvarn::D / 4) + d / 4;
@@ -108,9 +103,8 @@ __global__ void hadamard_kernel(const __nv_bfloat16* source, __nv_bfloat16* dest
     if (vector >= vectors) { return; }
 
     float value = __bfloat162float(source[static_cast<std::int64_t>(vector) * kvarn::D + d]);
-    value = kvarn::detail::hadamard_block(value, stage, d);
-    destination[static_cast<std::int64_t>(vector) * kvarn::D + d] =
-        __float2bfloat16_rn(value);
+    value       = kvarn::detail::hadamard_block(value, stage, d);
+    destination[static_cast<std::int64_t>(vector) * kvarn::D + d] = __float2bfloat16_rn(value);
 }
 
 } // namespace
@@ -120,9 +114,9 @@ void kvarn_store(const Tensor& rotated_k, const Tensor& rotated_v, KvarnTileStor
     const std::int32_t tiles = validate_storage(storage);
     require_tensor(rotated_k, DType::BF16, kvarn::D, kvarn::Group, tiles, "rotated K");
     require_tensor(rotated_v, DType::BF16, kvarn::D, kvarn::Group, tiles, "rotated V");
-    static const cudaError_t attribute = cudaFuncSetAttribute(
-        store_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        static_cast<int>(kStoreSharedBytes));
+    static const cudaError_t attribute =
+        cudaFuncSetAttribute(store_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             static_cast<int>(kStoreSharedBytes));
     CUDA_CHECK(attribute);
     const kvarn::StorePointers output{
         static_cast<std::uint8_t*>(storage.k_codes.data),
@@ -155,8 +149,8 @@ void kvarn_dequant(const KvarnTileStorage& storage, Tensor& rotated_k, Tensor& r
         static_cast<const std::uint8_t*>(storage.v_codes.data),
         static_cast<const __half*>(storage.v_channel_scales.data),
         static_cast<const __half*>(storage.v_token_scales.data),
-        static_cast<const __half*>(storage.v_token_zeros.data),
-        static_cast<float*>(rotated_k.data), static_cast<float*>(rotated_v.data), tiles);
+        static_cast<const __half*>(storage.v_token_zeros.data), static_cast<float*>(rotated_k.data),
+        static_cast<float*>(rotated_v.data), tiles);
     CUDA_CHECK(cudaGetLastError());
 }
 

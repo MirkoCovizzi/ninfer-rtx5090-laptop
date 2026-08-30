@@ -51,11 +51,10 @@ int main() {
                               ninfer::kDefaultHostKvCapacityBytes,
                       "Host context-cache defaults mismatch");
     failures += check(defaults.speculative.backend == ninfer::SpeculativeBackend::None,
-                       "speculative decoding is not disabled by default");
-    const ServeOptions kvarn =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "kvarn"});
+                      "speculative decoding is not disabled by default");
+    const ServeOptions kvarn = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "kvarn"});
     failures += check(kvarn.kv_cache == ninfer::KvCacheStorage::KvarnK4V2Group64,
-                       "--kv-dtype kvarn did not select KVarN K4V2-G64");
+                      "--kv-dtype kvarn did not select KVarN K4V2-G64");
     failures += check(defaults.response_store_max_records == kDefaultResponseStoreRecords &&
                           defaults.response_store_max_bytes == kDefaultResponseStoreBytes,
                       "Responses store defaults mismatch");

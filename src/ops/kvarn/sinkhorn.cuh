@@ -18,11 +18,11 @@ struct Range {
 template <int Count>
 __device__ Range block_range(float value, float* scratch) {
     constexpr unsigned mask = 0xffffffffU;
-    const int tid            = static_cast<int>(threadIdx.x);
-    const int lane           = tid & 31;
-    const int warp           = tid >> 5;
-    float minimum            = tid < Count ? value : CUDART_INF_F;
-    float maximum            = tid < Count ? value : -CUDART_INF_F;
+    const int tid           = static_cast<int>(threadIdx.x);
+    const int lane          = tid & 31;
+    const int warp          = tid >> 5;
+    float minimum           = tid < Count ? value : CUDART_INF_F;
+    float maximum           = tid < Count ? value : -CUDART_INF_F;
 #pragma unroll
     for (int delta = 16; delta != 0; delta >>= 1) {
         minimum = fminf(minimum, __shfl_down_sync(mask, minimum, delta));
@@ -68,10 +68,10 @@ struct Orientation {
 };
 
 template <bool Key>
-__device__ float row_std(const float* tile, const float* row_inverse,
-                         const float* column_inverse, int row) {
-    using O = Orientation<Key>;
-    float sum = 0.0F;
+__device__ float row_std(const float* tile, const float* row_inverse, const float* column_inverse,
+                         int row) {
+    using O           = Orientation<Key>;
+    float sum         = 0.0F;
     float sum_squared = 0.0F;
     for (int col = 0; col < O::Cols; ++col) {
         const float x = O::get(tile, row, col) * row_inverse[row] * column_inverse[col];
@@ -85,8 +85,8 @@ __device__ float row_std(const float* tile, const float* row_inverse,
 template <bool Key>
 __device__ float column_std(const float* tile, const float* row_inverse,
                             const float* column_inverse, int col) {
-    using O = Orientation<Key>;
-    float sum = 0.0F;
+    using O           = Orientation<Key>;
+    float sum         = 0.0F;
     float sum_squared = 0.0F;
     for (int row = 0; row < O::Rows; ++row) {
         const float x = O::get(tile, row, col) * row_inverse[row] * column_inverse[col];
@@ -103,14 +103,15 @@ __device__ float measure_imbalance(const float* tile, const float* row_inverse,
                                    float* column_deviation, float* scratch) {
     using O       = Orientation<Key>;
     const int tid = static_cast<int>(threadIdx.x);
-    if (tid < O::Rows) { row_deviation[tid] = row_std<Key>(tile, row_inverse, column_inverse, tid); }
+    if (tid < O::Rows) {
+        row_deviation[tid] = row_std<Key>(tile, row_inverse, column_inverse, tid);
+    }
     if (tid < O::Cols) {
         column_deviation[tid] = column_std<Key>(tile, row_inverse, column_inverse, tid);
     }
     __syncthreads();
     const Range rows = block_range<O::Rows>(tid < O::Rows ? row_deviation[tid] : 0.0F, scratch);
-    const Range cols =
-        block_range<O::Cols>(tid < O::Cols ? column_deviation[tid] : 0.0F, scratch);
+    const Range cols = block_range<O::Cols>(tid < O::Cols ? column_deviation[tid] : 0.0F, scratch);
     return rows.maximum / fmaxf(rows.minimum, 1.0e-8F) +
            cols.maximum / fmaxf(cols.minimum, 1.0e-8F);
 }
@@ -136,8 +137,8 @@ __device__ void variance_normalize(const float* tile, float* log_column, float* 
                                         column_deviation, scratch);
     for (int iteration = 0; iteration < Iterations; ++iteration) {
         if (tid < O::Cols) {
-            const float update = logf(fminf(StdMax, fmaxf(StdMin, column_deviation[tid])));
-            log_column[tid] = fminf(LogMax, fmaxf(LogMin, log_column[tid] + update));
+            const float update  = logf(fminf(StdMax, fmaxf(StdMin, column_deviation[tid])));
+            log_column[tid]     = fminf(LogMax, fmaxf(LogMin, log_column[tid] + update));
             column_inverse[tid] = expf(-log_column[tid]);
         }
         __syncthreads();
@@ -147,8 +148,8 @@ __device__ void variance_normalize(const float* tile, float* log_column, float* 
         __syncthreads();
         if (tid < O::Rows) {
             const float update = logf(fminf(StdMax, fmaxf(StdMin, row_deviation[tid])));
-            log_row[tid] = fminf(LogMax, fmaxf(LogMin, log_row[tid] + update));
-            row_inverse[tid] = expf(-log_row[tid]);
+            log_row[tid]       = fminf(LogMax, fmaxf(LogMin, log_row[tid] + update));
+            row_inverse[tid]   = expf(-log_row[tid]);
         }
         __syncthreads();
         const float current = measure_imbalance<Key>(tile, row_inverse, column_inverse,

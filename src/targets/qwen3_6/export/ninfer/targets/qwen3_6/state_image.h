@@ -181,14 +181,15 @@ public:
     [[nodiscard]] const CyclicKVCache* dflash_local() const noexcept;
 
     [[nodiscard]] bool has_kvarn() const noexcept { return kvarn_images_.data != nullptr; }
-    [[nodiscard]] std::uint32_t kvarn_text_layers() const noexcept {
-        return kvarn_text_layers_;
-    }
+
+    [[nodiscard]] std::uint32_t kvarn_text_layers() const noexcept { return kvarn_text_layers_; }
+
     [[nodiscard]] std::uint32_t kvarn_mtp_layers() const noexcept { return kvarn_mtp_layers_; }
+
     [[nodiscard]] ops::KvarnTailStateView kvarn_text_tail(std::uint32_t layer,
-                                                           std::int32_t slot) const;
-    [[nodiscard]] ops::KvarnTailStateView kvarn_mtp_tail(std::uint32_t layer,
                                                           std::int32_t slot) const;
+    [[nodiscard]] ops::KvarnTailStateView kvarn_mtp_tail(std::uint32_t layer,
+                                                         std::int32_t slot) const;
 
     [[nodiscard]] const StateImageHostLayout& host_layout() const noexcept { return host_layout_; }
 

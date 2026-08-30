@@ -117,11 +117,9 @@ bool same_host_layout(const StateImageHostLayout& left,
            left.image_bytes == right.image_bytes;
 }
 
-KvarnContinuationImageLayout
-plan_kvarn_continuation_image(const KvarnContinuationStateSpec& spec) {
+KvarnContinuationImageLayout plan_kvarn_continuation_image(const KvarnContinuationStateSpec& spec) {
     const Tensor tail(nullptr, DType::BF16,
-                      {spec.head_dim, ops::kKvarnGroup,
-                       spec.kv_heads * ops::kKvarnTailSlots});
+                      {spec.head_dim, ops::kKvarnGroup, spec.kv_heads * ops::kKvarnTailSlots});
     const Tensor markers(nullptr, DType::I32, {ops::kKvarnTailSlots});
     KvarnContinuationImageLayout out{
         .spec               = spec,
@@ -129,13 +127,13 @@ plan_kvarn_continuation_image(const KvarnContinuationStateSpec& spec) {
         .marker_layer_bytes = markers.bytes(),
     };
     LayoutBuilder builder;
-    const auto add = [&](std::uint32_t layers, std::size_t& k, std::size_t& v,
-                         std::size_t& marker, const char* label) {
+    const auto add = [&](std::uint32_t layers, std::size_t& k, std::size_t& v, std::size_t& marker,
+                         const char* label) {
         if (layers == 0) { return; }
         const std::size_t tail_bytes =
             checked_mul(out.tail_layer_bytes, layers, "KVarN continuation tail bytes overflow");
-        const std::size_t marker_bytes = checked_mul(
-            out.marker_layer_bytes, layers, "KVarN continuation marker bytes overflow");
+        const std::size_t marker_bytes =
+            checked_mul(out.marker_layer_bytes, layers, "KVarN continuation marker bytes overflow");
         k      = builder.add(tail_bytes, kStateImageAlignment, label).offset;
         v      = builder.add(tail_bytes, kStateImageAlignment, label).offset;
         marker = builder.add(marker_bytes, kStateImageAlignment, label).offset;
@@ -160,9 +158,8 @@ StateImageHostLayout plan_host_state_image(const StateImageSpec& spec) {
                               spec.dflash_local->head_dim <= 0)) {
         throw std::invalid_argument("StateImage host DFlash geometry is invalid");
     }
-    if (spec.kvarn &&
-        (spec.kvarn->text_layers == 0 || spec.kvarn->kv_heads <= 0 ||
-         spec.kvarn->head_dim != ops::kKvarnHeadDim)) {
+    if (spec.kvarn && (spec.kvarn->text_layers == 0 || spec.kvarn->kv_heads <= 0 ||
+                       spec.kvarn->head_dim != ops::kKvarnHeadDim)) {
         throw std::invalid_argument("StateImage host KVarN geometry is invalid");
     }
 
@@ -203,8 +200,8 @@ StateImageHostLayout plan_host_state_image(const StateImageSpec& spec) {
     }
     if (spec.kvarn) {
         host.kvarn_layout = plan_kvarn_continuation_image(*spec.kvarn);
-        host.kvarn = builder.add(host.kvarn_layout->image_bytes, kStateImageAlignment,
-                                 "StateImage host KVarN continuation");
+        host.kvarn        = builder.add(host.kvarn_layout->image_bytes, kStateImageAlignment,
+                                        "StateImage host KVarN continuation");
     }
     host.image_bytes = builder.finish(kStateImageAlignment, "StateImage host image");
     return host;
@@ -241,7 +238,7 @@ StateImageDeviceLayout plan_state_image_device_pool(LayoutBuilder& builder,
     }
     if (spec.kvarn) {
         KvarnContinuationStateLayout tails;
-        tails.image = plan_kvarn_continuation_image(*spec.kvarn);
+        tails.image  = plan_kvarn_continuation_image(*spec.kvarn);
         tails.images = builder.add_tensor(
             DType::U8,
             {checked_i32(tails.image.image_bytes, "KVarN continuation image exceeds int32"),
@@ -384,16 +381,15 @@ StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageD
         dflash_local_.emplace(backing, *layout.dflash_local);
     }
     if (layout.kvarn) {
-        kvarn_images_ = layout.kvarn->images.bind(backing);
-        kvarn_layout_ = layout.kvarn->image;
+        kvarn_images_                           = layout.kvarn->images.bind(backing);
+        kvarn_layout_                           = layout.kvarn->image;
         const KvarnContinuationStateSpec& kvarn = kvarn_layout_->spec;
         if (kvarn_images_.dtype != DType::U8 ||
-            kvarn_images_.ne[0] != checked_i32(kvarn_layout_->image_bytes,
-                                               "KVarN continuation image exceeds int32") ||
+            kvarn_images_.ne[0] !=
+                checked_i32(kvarn_layout_->image_bytes, "KVarN continuation image exceeds int32") ||
             kvarn_images_.ne[1] != linear_.slot_count() ||
-            !same_kvarn_layout(kvarn_layout_,
-                               std::optional<KvarnContinuationImageLayout>(
-                                   plan_kvarn_continuation_image(kvarn)))) {
+            !same_kvarn_layout(kvarn_layout_, std::optional<KvarnContinuationImageLayout>(
+                                                  plan_kvarn_continuation_image(kvarn)))) {
             throw std::invalid_argument("StateImage KVarN layout is inconsistent");
         }
         kvarn_text_layers_ = kvarn.text_layers;
@@ -436,25 +432,22 @@ ops::KvarnTailStateView kvarn_tail_view(const Tensor& image,
                                         const KvarnContinuationImageLayout& layout, bool mtp,
                                         std::uint32_t layer) {
     const std::uint32_t layers = mtp ? layout.spec.mtp_layers : layout.spec.text_layers;
-    if (layer >= layers) {
-        throw std::out_of_range("StateImage KVarN tail slot is out of range");
-    }
-    const std::size_t k_offset = (mtp ? layout.mtp_k_offset : layout.text_k_offset) +
-                                 layer * layout.tail_layer_bytes;
-    const std::size_t v_offset = (mtp ? layout.mtp_v_offset : layout.text_v_offset) +
-                                 layer * layout.tail_layer_bytes;
-    const std::size_t marker_offset =
-        (mtp ? layout.mtp_marker_offset : layout.text_marker_offset) +
-        layer * layout.marker_layer_bytes;
-    auto* base = static_cast<std::byte*>(image.data);
+    if (layer >= layers) { throw std::out_of_range("StateImage KVarN tail slot is out of range"); }
+    const std::size_t k_offset =
+        (mtp ? layout.mtp_k_offset : layout.text_k_offset) + layer * layout.tail_layer_bytes;
+    const std::size_t v_offset =
+        (mtp ? layout.mtp_v_offset : layout.text_v_offset) + layer * layout.tail_layer_bytes;
+    const std::size_t marker_offset = (mtp ? layout.mtp_marker_offset : layout.text_marker_offset) +
+                                      layer * layout.marker_layer_bytes;
+    auto* base                   = static_cast<std::byte*>(image.data);
     const std::int32_t row_heads = layout.spec.kv_heads * ops::kKvarnTailSlots;
     return {
-        .k = Tensor(base + k_offset, DType::BF16,
-                    {layout.spec.head_dim, ops::kKvarnGroup, row_heads}),
-        .v = Tensor(base + v_offset, DType::BF16,
-                    {layout.spec.head_dim, ops::kKvarnGroup, row_heads}),
+        .k             = Tensor(base + k_offset, DType::BF16,
+                                {layout.spec.head_dim, ops::kKvarnGroup, row_heads}),
+        .v             = Tensor(base + v_offset, DType::BF16,
+                                {layout.spec.head_dim, ops::kKvarnGroup, row_heads}),
         .logical_pages = Tensor(base + marker_offset, DType::I32, {ops::kKvarnTailSlots}),
-        .num_kv_heads = layout.spec.kv_heads,
+        .num_kv_heads  = layout.spec.kv_heads,
     };
 }
 
@@ -496,8 +489,8 @@ void StateImageDevicePool::zero_slot(std::int32_t slot, cudaStream_t stream) {
         const Tensor image = kvarn_images_.slice(1, slot, 1).view({kvarn_images_.ne[0]});
         CUDA_CHECK(cudaMemsetAsync(image.data, 0, image.bytes(), stream));
         const auto reset_markers = [&](const ops::KvarnTailStateView& tail) {
-            CUDA_CHECK(cudaMemsetAsync(tail.logical_pages.data, 0xff,
-                                       tail.logical_pages.bytes(), stream));
+            CUDA_CHECK(
+                cudaMemsetAsync(tail.logical_pages.data, 0xff, tail.logical_pages.bytes(), stream));
         };
         for (std::uint32_t layer = 0; layer < kvarn_text_layers_; ++layer) {
             reset_markers(kvarn_text_tail(layer, slot));
@@ -547,12 +540,11 @@ void StateImageDevicePool::copy_slot(std::int32_t source, std::int32_t destinati
         dflash_local_->copy_slot_from(*dflash_local_, source, destination, stream);
     }
     if (has_kvarn()) {
-        const Tensor source_image =
-            kvarn_images_.slice(1, source, 1).view({kvarn_images_.ne[0]});
+        const Tensor source_image = kvarn_images_.slice(1, source, 1).view({kvarn_images_.ne[0]});
         const Tensor destination_image =
             kvarn_images_.slice(1, destination, 1).view({kvarn_images_.ne[0]});
-        CUDA_CHECK(cudaMemcpyAsync(destination_image.data, source_image.data,
-                                   source_image.bytes(), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(destination_image.data, source_image.data, source_image.bytes(),
+                                   cudaMemcpyDeviceToDevice, stream));
     }
 }
 
@@ -656,8 +648,7 @@ void StateImageDevicePool::copy_from_host(HostStateImageConstView source, std::i
         }
     }
     if (has_kvarn()) {
-        const Tensor image =
-            kvarn_images_.slice(1, destination, 1).view({kvarn_images_.ne[0]});
+        const Tensor image = kvarn_images_.slice(1, destination, 1).view({kvarn_images_.ne[0]});
         CUDA_CHECK(cudaMemcpyAsync(image.data, byte_offset(source.data, host_layout_.kvarn->offset),
                                    image.bytes(), cudaMemcpyHostToDevice, stream));
     }

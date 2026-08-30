@@ -723,10 +723,9 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
       speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
-      kv_dtype(plan.kv_dtype),
-      kv_quant_group(plan.kv_quant_group), proposal_head(plan.proposal_head),
-      vision_enabled(plan.features.vision), use_cuda_graph(plan.use_cuda_graph),
-      kv_payload_bytes(plan.persistent.kv_payload_bytes),
+      kv_dtype(plan.kv_dtype), kv_quant_group(plan.kv_quant_group),
+      proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
+      use_cuda_graph(plan.use_cuda_graph), kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
       persistent(plan.persistent.bytes), workspace_storage(plan.workspace.capacity),
       work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}),
@@ -9440,7 +9439,7 @@ void ProgramImplCore::commit_sequence_kv(SequenceState& sequence, std::uint32_t 
 }
 
 void ProgramImplCore::trim_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
-                                        std::uint32_t backend_tokens) {
+                                       std::uint32_t backend_tokens) {
     if (!sequence.kv || main_tokens > capacity || backend_tokens > main_tokens) {
         throw std::logic_error("KV trim request is outside the sequence bundle");
     }
@@ -9455,8 +9454,8 @@ void ProgramImplCore::trim_sequence_kv(SequenceState& sequence, std::uint32_t ma
 }
 
 void ProgramImplCore::restore_sequence_kvarn_tail(SequenceState& sequence,
-                                                   std::uint32_t main_tokens,
-                                                   std::uint32_t backend_tokens) {
+                                                  std::uint32_t main_tokens,
+                                                  std::uint32_t backend_tokens) {
     if (!sequence.kv) { return; }
     const auto restore = [&](qwen3_6::PagedKVCache& cache, KVAddressSpaceStore& addresses,
                              KVAddressSpaceHandle address, std::uint32_t frontier) {
@@ -9479,13 +9478,13 @@ void ProgramImplCore::restore_sequence_kvarn_tail(SequenceState& sequence,
 }
 
 void ProgramImplCore::capture_sequence_kvarn_tail(const SequenceState& sequence,
-                                                   StateImageHandle image) {
+                                                  StateImageHandle image) {
     if (!sequence.kv || decoder->text_kv.storage() != KvCacheStorage::KvarnK4V2Group64) { return; }
     if (!state_images->has_kvarn()) {
         throw std::logic_error("KVarN continuation StateImage storage is unavailable");
     }
     const std::int32_t slot = state_store->physical_slot(image);
-    const auto capture = [&](qwen3_6::PagedKVCache& cache, KVAddressSpaceStore& addresses,
+    const auto capture      = [&](qwen3_6::PagedKVCache& cache, KVAddressSpaceStore& addresses,
                              KVAddressSpaceHandle address, bool mtp) {
         if (!addresses.active(address)) {
             throw std::logic_error("KVarN continuation capture requires active KV storage");
@@ -9501,17 +9500,16 @@ void ProgramImplCore::capture_sequence_kvarn_tail(const SequenceState& sequence,
             const ops::KvarnPagedLayerView source = execution.kvarn_layer_view(layer);
             const ops::KvarnTailStateView destination =
                 mtp ? state_images->kvarn_mtp_tail(layer, slot)
-                    : state_images->kvarn_text_tail(layer, slot);
+                         : state_images->kvarn_text_tail(layer, slot);
             CUDA_CHECK(cudaMemcpyAsync(destination.k.data, source.tail_k.data,
-                                       destination.k.bytes(), cudaMemcpyDeviceToDevice,
-                                       device.stream));
+                                            destination.k.bytes(), cudaMemcpyDeviceToDevice,
+                                            device.stream));
             CUDA_CHECK(cudaMemcpyAsync(destination.v.data, source.tail_v.data,
-                                       destination.v.bytes(), cudaMemcpyDeviceToDevice,
-                                       device.stream));
-            CUDA_CHECK(cudaMemcpyAsync(destination.logical_pages.data,
-                                       source.tail_logical_pages.data,
-                                       destination.logical_pages.bytes(), cudaMemcpyDeviceToDevice,
-                                       device.stream));
+                                            destination.v.bytes(), cudaMemcpyDeviceToDevice,
+                                            device.stream));
+            CUDA_CHECK(cudaMemcpyAsync(
+                destination.logical_pages.data, source.tail_logical_pages.data,
+                destination.logical_pages.bytes(), cudaMemcpyDeviceToDevice, device.stream));
         }
     };
     capture(decoder->text_kv, *text_kv_addresses, sequence.kv->text, false);
@@ -9528,7 +9526,7 @@ void ProgramImplCore::activate_sequence_kvarn_tail(const SequenceState& sequence
     const StateImageHandle image =
         sequence.state.fork_pending ? sequence.state.read : sequence.state.write;
     const std::int32_t slot = state_store->physical_slot(image);
-    const auto activate = [&](qwen3_6::PagedKVCache& cache, KVAddressSpaceStore& addresses,
+    const auto activate     = [&](qwen3_6::PagedKVCache& cache, KVAddressSpaceStore& addresses,
                               KVAddressSpaceHandle address, bool mtp) {
         if (!addresses.active(address)) {
             throw std::logic_error("KVarN continuation activation requires active KV storage");
@@ -9541,17 +9539,16 @@ void ProgramImplCore::activate_sequence_kvarn_tail(const SequenceState& sequence
             throw std::logic_error("KVarN continuation StateImage layer count is invalid");
         }
         for (std::uint32_t layer = 0; layer < cache.layers(); ++layer) {
-            const ops::KvarnTailStateView source =
-                mtp ? state_images->kvarn_mtp_tail(layer, slot)
-                    : state_images->kvarn_text_tail(layer, slot);
+            const ops::KvarnTailStateView source = mtp ? state_images->kvarn_mtp_tail(layer, slot)
+                                                           : state_images->kvarn_text_tail(layer, slot);
             const ops::KvarnPagedLayerView destination = execution.kvarn_layer_view(layer);
             CUDA_CHECK(cudaMemcpyAsync(destination.tail_k.data, source.k.data, source.k.bytes(),
-                                       cudaMemcpyDeviceToDevice, device.stream));
+                                           cudaMemcpyDeviceToDevice, device.stream));
             CUDA_CHECK(cudaMemcpyAsync(destination.tail_v.data, source.v.data, source.v.bytes(),
-                                       cudaMemcpyDeviceToDevice, device.stream));
+                                           cudaMemcpyDeviceToDevice, device.stream));
             CUDA_CHECK(cudaMemcpyAsync(destination.tail_logical_pages.data,
-                                       source.logical_pages.data, source.logical_pages.bytes(),
-                                       cudaMemcpyDeviceToDevice, device.stream));
+                                           source.logical_pages.data, source.logical_pages.bytes(),
+                                           cudaMemcpyDeviceToDevice, device.stream));
         }
     };
     activate(decoder->text_kv, *text_kv_addresses, sequence.kv->text, false);
@@ -10917,10 +10914,10 @@ ProgramImplCore::resolve_non_speculative_pending(SequenceState& sequence, Reques
 
 MemorySummary ProgramImplCore::memory_summary() const noexcept {
     MemorySummary out;
-    out.device      = device.device;
-    out.max_context = capacity;
-    out.kv_capacity = kv_capacity;
-    out.kv_cache = kv_storage;
+    out.device           = device.device;
+    out.max_context      = capacity;
+    out.kv_capacity      = kv_capacity;
+    out.kv_cache         = kv_storage;
     DeviceArena& weights = *model.weights_arena;
     out.weights = ArenaMemorySummary{weights.capacity(), weights.used(), weights.peak_used()};
     out.sequence =

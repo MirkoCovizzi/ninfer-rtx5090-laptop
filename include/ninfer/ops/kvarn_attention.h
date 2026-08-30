@@ -22,17 +22,16 @@ void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& posit
                      const Tensor& valid_columns, const Tensor& kv_table_rows, float scale,
                      KvarnPagedBatchLayerView cache, bool provisional,
                      CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
-                     Tensor& output,
-                     cudaStream_t stream);
+                     Tensor& output, cudaStream_t stream);
 
 void kvarn_attention_cached(Tensor query, const Tensor& positions, const Tensor& kv_table_rows,
                             float scale, const KvarnPagedBatchLayerView& cache,
                             CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
                             Tensor& output, cudaStream_t stream);
 
-void kvarn_kv_append(Tensor key, Tensor value, const Tensor& positions,
-                     const Tensor& valid_columns, const Tensor& kv_table_rows,
-                     KvarnPagedBatchLayerView cache, bool provisional, cudaStream_t stream);
+void kvarn_kv_append(Tensor key, Tensor value, const Tensor& positions, const Tensor& valid_columns,
+                     const Tensor& kv_table_rows, KvarnPagedBatchLayerView cache, bool provisional,
+                     cudaStream_t stream);
 
 // accepted_columns is an I32 prefix count per batch row. Full non-sink pages in that accepted
 // prefix are encoded and their dynamic BF16 markers retired; sink pages remain lossless.

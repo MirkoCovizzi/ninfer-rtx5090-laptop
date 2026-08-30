@@ -1110,7 +1110,7 @@ private:
     void materialize_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
                                  std::uint32_t backend_tokens = 0);
     void trim_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
-                           std::uint32_t backend_tokens = 0);
+                          std::uint32_t backend_tokens = 0);
     void restore_sequence_kvarn_tail(SequenceState& sequence, std::uint32_t main_tokens,
                                      std::uint32_t backend_tokens);
     void capture_sequence_kvarn_tail(const SequenceState& sequence, StateImageHandle image);

@@ -16,9 +16,9 @@ using namespace ninfer;
 
 namespace {
 
-constexpr int kD = ops::kKvarnHeadDim;
-constexpr int kGroup = ops::kKvarnGroup;
-constexpr int kKvHeads = 4;
+constexpr int kD          = ops::kKvarnHeadDim;
+constexpr int kGroup      = ops::kKvarnGroup;
+constexpr int kKvHeads    = 4;
 constexpr int kQueryHeads = 24;
 
 int parse_context(int argc, char** argv) {
@@ -26,7 +26,7 @@ int parse_context(int argc, char** argv) {
     if (argc != 3 || std::string_view(argv[1]) != "--context") {
         throw std::invalid_argument("usage: ninfer_kvarn_attention_bench [--context N]");
     }
-    char* end = nullptr;
+    char* end        = nullptr;
     const long value = std::strtol(argv[2], &end, 10);
     if (end == argv[2] || *end != '\0' || value < 128 || value > 262144) {
         throw std::invalid_argument("context must be in [128,262144]");
@@ -39,9 +39,8 @@ int parse_context(int argc, char** argv) {
 int main(int argc, char** argv) {
     try {
         const int context = parse_context(argc, argv);
-        const int pages = (context + kGroup - 1) / kGroup + 1;
-        DeviceBuffer records(static_cast<std::size_t>(pages) * kKvHeads *
-                             ops::kKvarnRecordBytes);
+        const int pages   = (context + kGroup - 1) / kGroup + 1;
+        DeviceBuffer records(static_cast<std::size_t>(pages) * kKvHeads * ops::kKvarnRecordBytes);
         DeviceBuffer tail_k(static_cast<std::size_t>(kD) * kGroup * kKvHeads *
                             ops::kKvarnTailSlots * 2);
         DeviceBuffer tail_v(tail_k.bytes);
@@ -62,21 +61,20 @@ int main(int argc, char** argv) {
         ops::KvarnPagedBatchLayerView cache{
             .records = Tensor(records.p, DType::U8,
                               {ops::kKvarnRecordBytes / kGroup, kGroup, kKvHeads, pages}),
-            .tail_k = Tensor(tail_k.p, DType::BF16,
-                             {kD, kGroup, kKvHeads * ops::kKvarnTailSlots, 1}),
-            .tail_v = Tensor(tail_v.p, DType::BF16,
-                             {kD, kGroup, kKvHeads * ops::kKvarnTailSlots, 1}),
-            .tail_logical_pages =
-                Tensor(markers.p, DType::I32, {ops::kKvarnTailSlots, 1}),
-            .block_tables = Tensor(block_table.p, DType::I32, {pages, 1}),
-            .num_kv_heads = kKvHeads,
+            .tail_k =
+                Tensor(tail_k.p, DType::BF16, {kD, kGroup, kKvHeads * ops::kKvarnTailSlots, 1}),
+            .tail_v =
+                Tensor(tail_v.p, DType::BF16, {kD, kGroup, kKvHeads * ops::kKvarnTailSlots, 1}),
+            .tail_logical_pages = Tensor(markers.p, DType::I32, {ops::kKvarnTailSlots, 1}),
+            .block_tables       = Tensor(block_table.p, DType::I32, {pages, 1}),
+            .num_kv_heads       = kKvHeads,
         };
         Tensor row_tensor(row.p, DType::I32, {1});
 
         constexpr int kAppendChunk = 1024;
         for (int begin = 0; begin < context; begin += kAppendChunk) {
-            const int width = std::min(kAppendChunk, context - begin);
-            DeviceBuffer key = bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
+            const int width    = std::min(kAppendChunk, context - begin);
+            DeviceBuffer key   = bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
             DeviceBuffer value = bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
             std::vector<std::int32_t> host_positions(width);
             for (int column = 0; column < width; ++column) host_positions[column] = begin + column;
@@ -91,9 +89,8 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaDeviceSynchronize());
 
         const auto measure_append = [&](int width) {
-            DeviceBuffer key = bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
-            DeviceBuffer value =
-                bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
+            DeviceBuffer key   = bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
+            DeviceBuffer value = bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
             std::vector<std::int32_t> host_positions(width);
             for (int column = 0; column < width; ++column) {
                 host_positions[column] = context + column;
@@ -124,8 +121,7 @@ int main(int argc, char** argv) {
         Tensor output_tensor(output.p, DType::BF16, {kD, kQueryHeads, 1, 1});
         Tensor position_tensor(position.p, DType::I32, {1, 1});
         WorkspaceArena workspace(ops::kvarn_attention_workspace_capacity_bytes(
-            kQueryHeads, {static_cast<std::uint32_t>(context),
-                          static_cast<std::uint32_t>(context)},
+            kQueryHeads, {static_cast<std::uint32_t>(context), static_cast<std::uint32_t>(context)},
             1, 1, 1));
         const auto timing = bench::measure_launch(
             [&](cudaStream_t stream) {
@@ -133,7 +129,8 @@ int main(int argc, char** argv) {
                     query_tensor, position_tensor, row_tensor, 0.0625F, cache,
                     {static_cast<std::uint32_t>(context), static_cast<std::uint32_t>(context)},
                     workspace, output_tensor, stream);
-            }, nullptr, 5, 30);
+            },
+            nullptr, 5, 30);
         std::printf("context=%d median_us=%.3f min_us=%.3f p95_us=%.3f\n", context,
                     timing.median_us, timing.min_us, timing.p95_us);
 
@@ -163,9 +160,10 @@ int main(int argc, char** argv) {
                 ops::kvarn_attention(pq, pk, pv, pp, Tensor{}, row_tensor, 0.0625F, cache, false,
                                      {1, static_cast<std::uint32_t>(context)}, prefill_workspace,
                                      po, stream);
-            }, nullptr, 1, 3);
-        std::printf("prefill=%d median_us=%.3f tok_per_s=%.1f\n", prefill,
-                    prefill_timing.median_us, prefill * 1.0e6 / prefill_timing.median_us);
+            },
+            nullptr, 1, 3);
+        std::printf("prefill=%d median_us=%.3f tok_per_s=%.1f\n", prefill, prefill_timing.median_us,
+                    prefill * 1.0e6 / prefill_timing.median_us);
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "error: %s\n", error.what());

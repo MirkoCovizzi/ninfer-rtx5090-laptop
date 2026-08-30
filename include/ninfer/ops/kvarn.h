@@ -15,16 +15,16 @@ inline constexpr std::int32_t kKvarnIterations = 8;
 inline constexpr std::int32_t kKvarnSinkPages  = 2;
 inline constexpr std::int32_t kKvarnTailSlots  = 4;
 
-inline constexpr std::int32_t kKvarnKPackedOffset      = 0;
-inline constexpr std::int32_t kKvarnKScaleOffset       = 8192;
-inline constexpr std::int32_t kKvarnKZeroOffset        = 8704;
-inline constexpr std::int32_t kKvarnKTokenScaleOffset  = 9216;
-inline constexpr std::int32_t kKvarnVPackedOffset      = 9344;
+inline constexpr std::int32_t kKvarnKPackedOffset       = 0;
+inline constexpr std::int32_t kKvarnKScaleOffset        = 8192;
+inline constexpr std::int32_t kKvarnKZeroOffset         = 8704;
+inline constexpr std::int32_t kKvarnKTokenScaleOffset   = 9216;
+inline constexpr std::int32_t kKvarnVPackedOffset       = 9344;
 inline constexpr std::int32_t kKvarnVChannelScaleOffset = 13440;
-inline constexpr std::int32_t kKvarnVTokenScaleOffset  = 13952;
-inline constexpr std::int32_t kKvarnVTokenZeroOffset   = 14080;
-inline constexpr std::int32_t kKvarnRecordPayloadBytes = 14208;
-inline constexpr std::int32_t kKvarnRecordBytes        = 16384;
+inline constexpr std::int32_t kKvarnVTokenScaleOffset   = 13952;
+inline constexpr std::int32_t kKvarnVTokenZeroOffset    = 14080;
+inline constexpr std::int32_t kKvarnRecordPayloadBytes  = 14208;
+inline constexpr std::int32_t kKvarnRecordBytes         = 16384;
 
 struct KvarnTileStorage {
     Tensor k_codes;          // U8   [G/2,D,N]
@@ -45,20 +45,20 @@ struct KvarnTailStateView {
 };
 
 struct KvarnPagedLayerView {
-    Tensor records;           // U8 [record_bytes / P,P,Hkv,Nphysical]
-    Tensor tail_k;            // BF16 [D,P,Hkv*tail_slots]
-    Tensor tail_v;            // BF16 [D,P,Hkv*tail_slots]
+    Tensor records;            // U8 [record_bytes / P,P,Hkv,Nphysical]
+    Tensor tail_k;             // BF16 [D,P,Hkv*tail_slots]
+    Tensor tail_v;             // BF16 [D,P,Hkv*tail_slots]
     Tensor tail_logical_pages; // I32 [tail_slots]
-    Tensor block_table;       // I32 [Nlogical]
+    Tensor block_table;        // I32 [Nlogical]
     std::int32_t num_kv_heads = 0;
 };
 
 struct KvarnPagedBatchLayerView {
-    Tensor records;           // U8 [record_bytes / P,P,Hkv,Nphysical]
-    Tensor tail_k;            // BF16 [D,P,Hkv*tail_slots,C]
-    Tensor tail_v;            // BF16 [D,P,Hkv*tail_slots,C]
+    Tensor records;            // U8 [record_bytes / P,P,Hkv,Nphysical]
+    Tensor tail_k;             // BF16 [D,P,Hkv*tail_slots,C]
+    Tensor tail_v;             // BF16 [D,P,Hkv*tail_slots,C]
     Tensor tail_logical_pages; // I32 [tail_slots,C]
-    Tensor block_tables;      // I32 [Nlogical,C]
+    Tensor block_tables;       // I32 [Nlogical,C]
     std::int32_t num_kv_heads = 0;
 };
 

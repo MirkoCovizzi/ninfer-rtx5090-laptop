@@ -137,9 +137,9 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                      .mtp_layers                = TextConfig::mtp_layers,
                      .capacity                  = plan.capacity,
                      .kv_heads                  = TextConfig::kv_heads,
-                      .attention_head_dim        = TextConfig::head_dim,
-                      .kv_storage                = plan.kv_storage,
-                      .kv_dtype                  = plan.kv_dtype,
+                     .attention_head_dim        = TextConfig::head_dim,
+                     .kv_storage                = plan.kv_storage,
+                     .kv_dtype                  = plan.kv_dtype,
                      .kv_quant_group            = plan.kv_quant_group,
                      .enable_mtp                = plan.features.mtp(),
                      .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
@@ -291,8 +291,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                        std::int32_t batch_size, std::int32_t min_width,
                                        std::int32_t max_width) {
         if (plan.kv_storage == KvCacheStorage::KvarnK4V2Group64) {
-            return ops::kvarn_attention_workspace_capacity_bytes(
-                TextConfig::query_heads, envelope, batch_size, min_width, max_width);
+            return ops::kvarn_attention_workspace_capacity_bytes(TextConfig::query_heads, envelope,
+                                                                 batch_size, min_width, max_width);
         }
         return ops::causal_softmax_attention_workspace_capacity_bytes(
             {TextConfig::head_dim, TextConfig::query_heads, TextConfig::kv_heads}, plan.kv_dtype,

@@ -83,6 +83,7 @@ public:
     [[nodiscard]] std::uint32_t max_context() const noexcept { return max_context_; }
 
     [[nodiscard]] std::uint32_t layers() const noexcept { return layers_; }
+
     [[nodiscard]] KvCacheStorage storage() const noexcept { return storage_; }
 
     [[nodiscard]] DeviceKVPagePool& page_pool() noexcept { return pages_; }
@@ -98,15 +99,13 @@ public:
     [[nodiscard]] PagedKVCacheView execution_view(const KVExecutionRowLease& row) const;
 
     [[nodiscard]] PagedKVBatchLayerView batch_layer_view(std::uint32_t layer) const;
-    [[nodiscard]] ops::KvarnPagedBatchLayerView
-    kvarn_batch_layer_view(std::uint32_t layer) const;
+    [[nodiscard]] ops::KvarnPagedBatchLayerView kvarn_batch_layer_view(std::uint32_t layer) const;
     void reset_kvarn_tail_row(std::int32_t table_row, cudaStream_t stream = nullptr) const;
 
 private:
     friend class PagedKVCacheView;
     [[nodiscard]] PagedKVLayerView layer_view(std::uint32_t layer, Tensor block_table) const;
-    [[nodiscard]] ops::KvarnPagedLayerView kvarn_layer_view(std::uint32_t layer,
-                                                            Tensor block_table,
+    [[nodiscard]] ops::KvarnPagedLayerView kvarn_layer_view(std::uint32_t layer, Tensor block_table,
                                                             std::int32_t table_row) const;
 
     DeviceKVPagePool pages_;
