@@ -1261,8 +1261,9 @@ int run_a3_case(const Geometry& geometry, DType dtype, const AttentionCase& test
     Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
     const ops::CausalAttentionExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
                                                          test_case.envelope_max};
-    const std::size_t workspace_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
-        op_geometry(geometry), dtype, envelope, 1, test_case.tokens, test_case.tokens);
+    const std::size_t workspace_bytes =
+        ops::causal_softmax_attention_cached_workspace_capacity_bytes(
+            op_geometry(geometry), dtype, envelope, test_case.tokens, test_case.tokens);
     GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
     WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
 
@@ -1296,6 +1297,7 @@ struct BatchAttentionCase {
     std::vector<std::int32_t> table_rows;
     MappingPattern mapping;
     std::uint32_t seed;
+    bool force_masked = false;
 };
 
 std::vector<float> extract_request_columns(const std::vector<float>& source,
@@ -1435,13 +1437,14 @@ int run_batch_case(const Geometry& geometry, DType dtype, const BatchAttentionCa
     Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.width, batch});
     const ops::CausalAttentionExecutionEnvelope envelope{
         static_cast<std::uint32_t>(maximum_visible), static_cast<std::uint32_t>(maximum_visible)};
+    const bool masked = test_case.force_masked ||
+                        std::any_of(test_case.valid_columns.begin(), test_case.valid_columns.end(),
+                                    [&](std::int32_t valid) { return valid != test_case.width; });
     const std::size_t workspace_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
         op_geometry(geometry), dtype, envelope, batch, test_case.width, test_case.width);
     GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
     WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
 
-    const bool masked = std::any_of(test_case.valid_columns.begin(), test_case.valid_columns.end(),
-                                    [&](std::int32_t valid) { return valid != test_case.width; });
     ops::causal_softmax_attention(tq, tk, tv, tp, masked ? tvalid : Tensor{}, ttable_rows,
                                   op_geometry(geometry), kAttentionScale, cache.view(), envelope,
                                   workspace, tout, nullptr);
@@ -1500,6 +1503,12 @@ int run_batch_cases() {
     failures +=
         run_batch_case(kGeometries[0], DType::FP8_E4M3FN,
                        {6, {61, 127, 511}, {6, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented, 505u});
+    failures += run_batch_case(kGeometries[0], DType::I8,
+                               {7, {509}, {6}, {0}, MappingPattern::Fragmented, 506u});
+    failures += run_batch_case(kGeometries[0], DType::I8,
+                               {8, {8188}, {7}, {0}, MappingPattern::Identity, 507u});
+    failures += run_batch_case(kGeometries[0], DType::I8,
+                               {9, {4090}, {9}, {0}, MappingPattern::Fragmented, 508u, true});
     return failures;
 }
 
@@ -1580,6 +1589,16 @@ int verify_workspace_capacity_contract() {
             std::cerr << "causal_softmax_attention interval capacity has no exact route witness\n";
             ++failures;
         }
+    }
+    constexpr ops::CausalAttentionExecutionEnvelope wide_envelope{257, 257};
+    const ops::AttentionHeadGeometry wide_geometry{kHeadDim, 24, 4};
+    const std::size_t canonical_columns = ops::causal_softmax_attention_workspace_capacity_bytes(
+        wide_geometry, DType::I8, wide_envelope, 1, 7, 9);
+    const std::size_t cached_prompt = ops::causal_softmax_attention_cached_workspace_capacity_bytes(
+        wide_geometry, DType::I8, wide_envelope, 7, 9);
+    if (canonical_columns == 0 || cached_prompt != 0) {
+        std::cerr << "causal_softmax_attention column-small-T route is invalid\n";
+        ++failures;
     }
     try {
         (void)ops::causal_softmax_attention_workspace_capacity_bytes(

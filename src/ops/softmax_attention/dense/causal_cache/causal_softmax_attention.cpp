@@ -323,8 +323,13 @@ void launch_cached_chunked_small_t(const Tensor& q, const Tensor& positions, flo
 namespace detail {
 
 CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::int32_t width,
-                                                    std::int32_t batch_size,
+                                                    std::int32_t batch_size, DType cache_dtype,
+                                                    bool appends_kv,
                                                     CausalAttentionExecutionEnvelope envelope) {
+    if (appends_kv && (cache_dtype == DType::BF16 || cache_dtype == DType::I8) && width >= 2 &&
+        width <= 16) {
+        return CausalAttentionRoute::ColumnSmallT;
+    }
     if (width >= 1 && width <= kSmallTChunkTokens) { return CausalAttentionRoute::SmallT; }
     if (batch_size > 1) { return CausalAttentionRoute::ChunkedSmallT; }
     const std::uint32_t prompt_visible_keys =
@@ -340,6 +345,8 @@ const char* causal_attention_route_name(CausalAttentionRoute route) {
     switch (route) {
     case CausalAttentionRoute::SmallT:
         return "small_t";
+    case CausalAttentionRoute::ColumnSmallT:
+        return "column_small_t";
     case CausalAttentionRoute::ChunkedSmallT:
         return "chunked_small_t";
     case CausalAttentionRoute::Prompt:
@@ -350,9 +357,11 @@ const char* causal_attention_route_name(CausalAttentionRoute route) {
 
 } // namespace detail
 
-std::size_t causal_softmax_attention_workspace_capacity_bytes(
+namespace {
+
+std::size_t causal_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, DType cache_dtype, CausalAttentionExecutionEnvelope envelope,
-    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
+    std::int32_t batch_size, bool appends_kv, std::int32_t min_width, std::int32_t max_width) {
     require_causal_geometry(geometry, "causal_softmax_attention workspace");
     const std::int32_t q_heads = geometry.query_heads;
     bool supported_dtype       = true;
@@ -376,13 +385,11 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
         return layout.peak_bytes(1);
     };
     const auto exact_capacity = [&](std::int32_t width) {
-        const detail::CausalAttentionRoute route =
-            detail::causal_attention_resolve_route(q_heads, width, batch_size, envelope);
+        const detail::CausalAttentionRoute route = detail::causal_attention_resolve_route(
+            q_heads, width, batch_size, cache_dtype, appends_kv, envelope);
         if (route == detail::CausalAttentionRoute::Prompt) { return std::size_t{0}; }
-        if (route == detail::CausalAttentionRoute::SmallT) {
-            return cache_dtype == DType::I8 && width > 1 ? chunk_capacity(1)
-                                                         : chunk_capacity(width);
-        }
+        if (route == detail::CausalAttentionRoute::SmallT) { return chunk_capacity(width); }
+        if (route == detail::CausalAttentionRoute::ColumnSmallT) { return chunk_capacity(1); }
         std::size_t maximum = 0;
         for (std::int32_t begin = 0; begin < width; begin += kSmallTChunkTokens) {
             maximum =
@@ -399,6 +406,22 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
         }
     }
     return maximum;
+}
+
+} // namespace
+
+std::size_t causal_softmax_attention_workspace_capacity_bytes(
+    AttentionHeadGeometry geometry, DType cache_dtype, CausalAttentionExecutionEnvelope envelope,
+    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
+    return causal_attention_workspace_capacity_bytes(geometry, cache_dtype, envelope, batch_size,
+                                                     true, min_width, max_width);
+}
+
+std::size_t causal_softmax_attention_cached_workspace_capacity_bytes(
+    AttentionHeadGeometry geometry, DType cache_dtype, CausalAttentionExecutionEnvelope envelope,
+    std::int32_t min_width, std::int32_t max_width) {
+    return causal_attention_workspace_capacity_bytes(geometry, cache_dtype, envelope, 1, false,
+                                                     min_width, max_width);
 }
 
 void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
@@ -423,11 +446,10 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
 
     auto scope = workspace.scope();
     const detail::CausalAttentionRoute route =
-        detail::causal_attention_resolve_route(q.ne[1], width, batch, envelope);
-    if (cache.dtype == DType::I8 && width > 1 && width <= kSmallTChunkTokens) {
-        // INT8's producer geometry is specialized by compile-time token tile. Publish and attend
-        // one causal column at a time so every committed query uses the exact decode arithmetic;
-        // the shared workspace is reused across columns.
+        detail::causal_attention_resolve_route(q.ne[1], width, batch, cache.dtype, true, envelope);
+    if (route == detail::CausalAttentionRoute::ColumnSmallT) {
+        // Publish and attend one causal column at a time. This preserves global publication order
+        // and exact decode arithmetic; the shared workspace is reused across columns.
         launch_chunked_small_t(q, k, v, positions, valid_columns, kv_table_rows, scale, cache,
                                envelope, workspace, out, 1, stream);
         return;
@@ -461,12 +483,12 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
 
     auto scope = workspace.scope();
     const detail::CausalAttentionRoute route =
-        detail::causal_attention_resolve_route(q.ne[1], q.ne[2], 1, envelope);
+        detail::causal_attention_resolve_route(q.ne[1], q.ne[2], 1, cache.dtype, false, envelope);
     if (route == detail::CausalAttentionRoute::ChunkedSmallT) {
         launch_cached_chunked_small_t(q, positions, scale, cache, envelope, workspace, out, stream);
         return;
     }
-    if (detail::causal_attention_uses_small_t(q.ne[2])) {
+    if (route == detail::CausalAttentionRoute::SmallT) {
         const std::int32_t splits =
             detail::causal_attention_split_capacity(q.ne[1], q.ne[2], cache.dtype, envelope);
         SmallTWorkspace partial =

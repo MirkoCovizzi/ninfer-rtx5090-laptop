@@ -32,8 +32,8 @@ benchmark-report, and external protocol behavior. Repository verification princi
   and incremental tool-call behavior;
 - `test_request_log.cpp` and `test_http_error_handler.cpp` — generation lifecycle records,
   preparation rejections, protocol-shaped payload-limit errors, and application-error preservation;
-- `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v13 reports;
-- `test_bench_matrix.py` — schema-v13 report consumption by the Python matrix summarizer;
+- `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v15 reports;
+- `test_bench_matrix.py` — schema-v15 report consumption by the Python matrix summarizer;
 - `test_serve_corpus.py` — current serving request-log identity at the measurement consumer;
 - device/tensor/arena tests — reusable lower-component behavior; KV tests cover the core physical
   container, family runtime tests cover dimension-driven GDN storage/view mechanics, and Op tests
@@ -115,7 +115,14 @@ runs the real engine:
 ```bash
 NINFER_QWEN3_6_27B_WEIGHTS=$PWD/out/qwen3_6_27b.ninfer \
   ctest --test-dir build -R ninfer_qwen3_6_27b_prefix_real_test --output-on-failure
+
+NINFER_MTP_GREEDY_PARITY_WEIGHTS=$PWD/out/qwen3_6_27b.ninfer \
+  ctest --test-dir build -R ninfer_qwen3_6_27b_mtp_greedy_parity_real_test --output-on-failure
 ```
+
+The greedy MTP parity route checks fixed and adaptive K1 through K8 across the registered 27B KV
+profiles and compact batch sizes. It uses CUDA Graphs by default; set
+`NINFER_MTP_GREEDY_PARITY_EAGER=1` to repeat the same matrix through eager execution.
 
 Run the peer 35B-A3B route independently:
 

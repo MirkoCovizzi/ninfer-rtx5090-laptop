@@ -52,9 +52,9 @@ int bf16_a16_rejections() {
 }
 
 int bf16_a16_conformance() {
-    constexpr std::array<std::int32_t, 3> kRouteStarts{2, 5, 49};
-    constexpr std::array<std::int32_t, 10> kRouteInteriors{
-        4, 8, 16, 32, 48, 127, 128, 129, 1024, 1536,
+    constexpr std::array<std::int32_t, 3> kRouteStarts{2, 5, 73};
+    constexpr std::array<std::int32_t, 11> kRouteInteriors{
+        4, 8, 16, 32, 48, 72, 127, 128, 129, 1024, 1536,
     };
     return ninfer::test::linear_add::run_shape(
                "BF16_A16 LinearAdd", WeightFormat::BF16,

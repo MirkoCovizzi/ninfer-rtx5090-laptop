@@ -4,8 +4,8 @@
 The matrix is intentionally layered instead of fully factorial:
 
 * k=3 is the primary MTP path to evaluate.
-* k=0 and k=5 are baseline/max-window controls.
-* k=0..5 is swept on representative context-decode cases.
+* k=0 and k=8 are baseline/max-window controls.
+* fixed k=0..15 and adaptive maximum k=1..15 are swept on representative context-decode cases.
 * CUDA graph is compared only for decode-bearing tests.
 * Prefill-only tests sweep length and chunk size, but not graph on/off.
 
@@ -38,9 +38,9 @@ PREFILL_CHUNKS = (128, 256, 512, 1024, 2048, 4096)
 PURE_DECODE_GENS = (16, 64, 128, 512, 2048)
 CONTEXT_CORE = ((512, 512), (2048, 512), (8192, 512))
 CONTEXT_FULL_EXTRA = ((32768, 256), (65536, 128))
-PRIMARY_KS = (0, 3, 5)
-SWEEP_KS = (0, 1, 2, 3, 4, 5)
-REPORT_SCHEMA_VERSION = 13
+PRIMARY_KS = (0, 3, 15)
+SWEEP_KS = tuple(range(16))
+REPORT_SCHEMA_VERSION = 15
 REPORT_ARTIFACT_TYPE = "ninfer_bench_report"
 REPORT_TOOL = "ninfer_bench"
 
@@ -63,9 +63,15 @@ def pair_list(values: Iterable[tuple[int, int]]) -> str:
     return ";".join(f"{p},{g}" for p, g in values)
 
 
-def mtp_args(k: int) -> tuple[str, ...]:
+def mtp_args(k: int, *, adaptive: bool = False) -> tuple[str, ...]:
     args = ("--mtp-draft-tokens", str(k))
-    return (*args, "--lm-head-draft") if k > 0 else args
+    if k == 0:
+        if adaptive:
+            raise ValueError("adaptive MTP requires a positive maximum window")
+        return args
+    if adaptive:
+        args = (*args, "--adaptive-mtp")
+    return (*args, "--lm-head-draft")
 
 
 def shell_join(command: Sequence[str]) -> str:
@@ -189,6 +195,18 @@ def build_cases(preset: str) -> list[BenchCase]:
             )
         )
 
+    for k in SWEEP_KS[1:]:
+        cases.append(
+            BenchCase(
+                "adaptive_mtp_sweep",
+                f"adaptive_mtp_sweep_k{k}_graph",
+                ("-pg", pair_list(sweep_pairs), *mtp_args(k, adaptive=True)),
+                3,
+                1,
+                "adaptive MTP maximum-window sweep",
+            )
+        )
+
     for k, prompt in ((3, 8174), (5, 8170)):
         for graph in (True, False):
             graph_suffix = "graph" if graph else "eager"
@@ -291,6 +309,7 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
             "kv_cache": config.get("kv_cache"),
             "mtp_draft_tokens": config.get("mtp_draft_tokens"),
             "proposal_head": config.get("proposal_head"),
+            "mtp_policy": config.get("mtp_policy"),
             "decode_path": config.get("decode_path"),
             "decode_graph_primed": config.get("decode_graph_prime", {}).get("primed"),
             "decode_graph_prime_output_tokens": config.get("decode_graph_prime", {}).get(
@@ -326,12 +345,39 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
             "total_seconds_mean": test.get("total_seconds_mean"),
             "spec_acceptance_rate": speculative.get("acceptance_rate"),
             "spec_acceptance_length": speculative.get("acceptance_length"),
+            "spec_backend": speculative.get("backend"),
             "spec_rounds": speculative.get("rounds"),
             "spec_drafted_tokens": speculative.get("drafted_tokens"),
             "spec_accepted_tokens": speculative.get("accepted_tokens"),
             "spec_fallback_steps": speculative.get("fallback_steps"),
+            "spec_adaptive": speculative.get("adaptive"),
             "spec_accepted_per_position": json.dumps(
                 speculative.get("accepted_per_position", []), separators=(",", ":")
+            ),
+            "spec_drafted_per_position": json.dumps(
+                speculative.get("drafted_per_position", []), separators=(",", ":")
+            ),
+            "spec_rounds_per_window": json.dumps(
+                speculative.get("rounds_per_window", []), separators=(",", ":")
+            ),
+            "spec_fallbacks_per_window": json.dumps(
+                speculative.get("fallbacks_per_window", []), separators=(",", ":")
+            ),
+            "spec_drafted_tokens_per_window": json.dumps(
+                speculative.get("drafted_tokens_per_window", []), separators=(",", ":")
+            ),
+            "spec_accepted_tokens_per_window": json.dumps(
+                speculative.get("accepted_tokens_per_window", []), separators=(",", ":")
+            ),
+            "spec_committed_tokens_per_window": json.dumps(
+                speculative.get("committed_tokens_per_window", []), separators=(",", ":")
+            ),
+            "spec_decode_seconds_per_window": json.dumps(
+                speculative.get("decode_seconds_per_window", []), separators=(",", ":")
+            ),
+            "spec_window_transitions": speculative.get("window_transitions"),
+            "spec_window_transition_counts": json.dumps(
+                speculative.get("window_transition_counts", []), separators=(",", ":")
             ),
             "gpu_name": report.get("environment", {}).get("gpu_name"),
         }

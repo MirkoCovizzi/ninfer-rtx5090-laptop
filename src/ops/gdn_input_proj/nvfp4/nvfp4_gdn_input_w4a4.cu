@@ -45,7 +45,7 @@ void nvfp4_gdn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& 
             workspace.codes, workspace.scales, static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(qkv.data),
             static_cast<__nv_bfloat16*>(z.data), tokens, alpha, stream);
-    } else if (tokens <= 64) {
+    } else if (tokens <= 72) {
         launch_gemm<M32N64>(weight, qkv, z, workspace, tokens, stream);
     } else if (tokens <= 96) {
         launch_gemm<M32N128>(weight, qkv, z, workspace, tokens, stream);

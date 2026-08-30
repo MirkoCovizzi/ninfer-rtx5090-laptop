@@ -46,8 +46,9 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 
 For a request resolved to greedy sampling, MTP preserves the committed token sequence. Holding the
 artifact, prepared prompt, KV-cache dtype, and all other Engine and request settings fixed, MTP-off
-and every MTP draft window from one to five return the same token IDs; the draft window and proposal
-head affect only acceptance and throughput. This is not a bit-identical-logit guarantee and does not
+and every supported fixed MTP draft window or adaptive MTP return the same token IDs; the policy,
+draft window, and proposal head affect only acceptance and throughput. This is not a
+bit-identical-logit guarantee and does not
 compare different artifacts or KV dtypes. Under stochastic sampling, MTP preserves the processed
 target distribution rather than fixed-seed token identity because speculative execution may consume
 random values differently.
@@ -647,6 +648,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
 | `--prefill-chunk N` | text-prefill chunk | `1024` |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
+| `--log-adaptive-mtp-stats` | add detailed per-window adaptive-MTP tuning data to request completion lines | off |
 | `--device N` | CUDA device index | `0` |
 | `--context-cost-presets FILE` | optional runtime context-cost preset registry | generic + compiled defaults |
 | `--max-request-mib N` | body-size limit before JSON parsing | `384` |
@@ -658,7 +660,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8\|fp8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
+| `--draft-tokens N` | MTP `1..15` on 27B and `1..5` on 35B-A3B; DFlash `1..15` | unset |
+| `--adaptive-mtp` | Adapt the physical MTP verification width up to `--draft-tokens` | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
@@ -714,7 +717,7 @@ is also rejected if it resolves to the model artifact.
 Add `--request-log-jsonl profiles/bench/run/server.requests.jsonl` to the startup command to write
 the log at that path.
 
-Every line is one `ninfer_serve_request_log` schema-v18 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v20 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -743,9 +746,13 @@ units; and whether the selected target was the maximal root fallback. Stop reaso
 contract—not a claim that observed TTFT is globally optimal. Aborted planning attempts are not published.
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
-as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
-`drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
-derived downstream from raw token counts and seconds instead of rounded stderr strings.
+as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, policy,
+round and token totals, fallback count, per-position drafted/accepted counts, and adaptive
+transition counts. Per-window vectors report physical rounds, fallback rounds, drafted and accepted
+drafts, committed tokens, and request-observed decode seconds. In a compact batch, every row records
+the full shared round latency; summing latency across concurrent request records double-counts the
+physical batch and is invalid. Rates can be derived downstream from raw token counts and seconds
+instead of rounded stderr strings.
 
 For `server_start.memory`, `workspace.capacity_bytes` is the only physical workspace allocation.
 When Vision is enabled, `vision_workspace` reports the aggregate prompt and maximum-item token
@@ -763,7 +770,10 @@ summed across concurrent requests**.
 
 The JSONL file contains no generated response text and never records an API-key value; `argv`
 replaces that value with `<redacted>`. The existing stderr summaries remain available for operators
-but are rounded and are not the aggregation source. Console lines use local
+but are rounded and are not the aggregation source. With `--log-adaptive-mtp-stats`, an adaptive-MTP
+request completion includes sparse per-window rounds, fallbacks, drafted/accepted drafts, committed
+tokens and average request-observed round latency, plus total transitions and sparse
+`Kfrom->Kto:count` transition edges. Console lines use local
 `[YYYY-MM-DD HH:MM:SS.mmm] [level]` timestamps. OpenAI Responses, OpenAI Chat, and Anthropic
 generation requests receive a request ID when they enter synchronous preparation. Successful
 preparation produces `request_start`; a preparation failure produces `request_rejected` without a

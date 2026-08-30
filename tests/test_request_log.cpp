@@ -49,10 +49,12 @@ int main() {
     options.kv_capacity                    = ninfer::KvCapacityPolicy::explicit_capacity(524288);
     options.prefill_chunk                  = 1024;
     options.log_stats_interval_ms          = 2500;
+    options.log_adaptive_mtp_stats         = true;
     options.kv_cache                       = ninfer::KvCacheStorage::Fp8E4M3Row256;
     options.speculative.backend            = ninfer::SpeculativeBackend::Mtp;
     options.speculative.draft_tokens       = 3;
     options.speculative.proposal_head      = ninfer::ProposalHead::Optimized;
+    options.speculative.mtp_policy         = ninfer::MtpDraftPolicy::Adaptive;
     options.enable_vision                  = false;
     options.allow_prefix_reuse             = true;
     options.preserve_thinking              = true;
@@ -171,6 +173,8 @@ int main() {
                       "KV capacity resolution metadata missing");
     failures +=
         check(server.at("engine").at("log_stats_interval_ms") == 2500, "stats interval missing");
+    failures += check(server.at("engine").at("log_adaptive_mtp_stats") == true,
+                      "adaptive MTP logging state missing");
     failures += check(server.at("server").at("request_log_jsonl") == "requests.jsonl",
                       "request log path missing");
     failures += check(server.at("server").at("default_thinking_budget") == 512,
@@ -179,6 +183,8 @@ int main() {
     failures += check(server.at("engine").at("vision") == false, "Vision state missing");
     failures += check(server.at("engine").at("speculative_backend") == "mtp",
                       "speculative backend missing");
+    failures +=
+        check(server.at("engine").at("mtp_policy") == "adaptive", "MTP draft policy missing");
     failures +=
         check(server.at("engine").at("proposal_head") == "optimized", "proposal head missing");
     failures += check(
@@ -358,29 +364,39 @@ int main() {
                   .decode_rounds                        = 2,
                   .control_units                        = 1,
     };
-    outcome.metrics.speculative_backend               = ninfer::SpeculativeBackend::Mtp;
-    outcome.metrics.speculative_draft_window          = 3;
-    outcome.metrics.speculative_rounds                = 300;
-    outcome.metrics.speculative_draft_tokens          = 900;
-    outcome.metrics.speculative_accepted_tokens       = 720;
-    outcome.metrics.speculative_fallback_steps        = 2;
-    outcome.metrics.speculative_accepted_per_position = {290, 240, 190};
-    outcome.metrics.materialization                   = {
-                          .predicted_now_ns              = 200000,
-                          .predicted_future_loss_ns      = 50000,
-                          .predicted_total_ns            = 250000,
-                          .targets_evaluated             = 7,
-                          .projection_work               = 31,
-                          .planning_elapsed_ns           = 9000,
-                          .search_elapsed_ns             = 6000,
-                          .stop_reason                   = ninfer::MaterializationStopReason::ModelOptimal,
-                          .model_optimal                 = true,
-                          .budget_exhausted              = false,
-                          .best_remaining_lower_bound_ns = 250000,
-                          .absolute_bound_gap_ns         = 0,
-                          .relative_bound_gap            = 0.0,
-                          .selected_degradation_units    = 2,
-                          .selected_maximal_fallback     = false,
+    outcome.metrics.speculative_backend                     = ninfer::SpeculativeBackend::Mtp;
+    outcome.metrics.speculative_draft_window                = 3;
+    outcome.metrics.speculative_rounds                      = 300;
+    outcome.metrics.speculative_draft_tokens                = 900;
+    outcome.metrics.speculative_accepted_tokens             = 720;
+    outcome.metrics.speculative_fallback_steps              = 2;
+    outcome.metrics.speculative_adaptive                    = true;
+    outcome.metrics.speculative_window_transitions          = 4;
+    outcome.metrics.speculative_accepted_per_position       = {290, 240, 190};
+    outcome.metrics.speculative_drafted_per_position        = {300, 280, 220};
+    outcome.metrics.speculative_rounds_per_window           = {3, 0, 297};
+    outcome.metrics.speculative_fallbacks_per_window        = {1, 0, 1};
+    outcome.metrics.speculative_drafted_tokens_per_window   = {6, 0, 894};
+    outcome.metrics.speculative_accepted_tokens_per_window  = {4, 0, 716};
+    outcome.metrics.speculative_committed_tokens_per_window = {7, 0, 1013};
+    outcome.metrics.speculative_decode_seconds_per_window   = {0.06, 0.0, 5.2856789012345};
+    outcome.metrics.speculative_window_transition_counts    = {0, 0, 2, 0, 0, 0, 2, 0, 0};
+    outcome.metrics.materialization                         = {
+                                .predicted_now_ns              = 200000,
+                                .predicted_future_loss_ns      = 50000,
+                                .predicted_total_ns            = 250000,
+                                .targets_evaluated             = 7,
+                                .projection_work               = 31,
+                                .planning_elapsed_ns           = 9000,
+                                .search_elapsed_ns             = 6000,
+                                .stop_reason                   = ninfer::MaterializationStopReason::ModelOptimal,
+                                .model_optimal                 = true,
+                                .budget_exhausted              = false,
+                                .best_remaining_lower_bound_ns = 250000,
+                                .absolute_bound_gap_ns         = 0,
+                                .relative_bound_gap            = 0.0,
+                                .selected_degradation_units    = 2,
+                                .selected_maximal_fallback     = false,
     };
     outcome.thinking = ninfer::ThinkingBudgetStats{.configured_budget     = 256,
                                                    .model_thinking_tokens = 256,
@@ -420,6 +436,20 @@ int main() {
     failures +=
         check(done.at("speculative").at("accepted_per_position") == Json::array({290, 240, 190}),
               "speculative position counts missing");
+    failures += check(
+        done.at("speculative").at("adaptive") == true &&
+            done.at("speculative").at("window_transitions") == 4 &&
+            done.at("speculative").at("drafted_per_position") == Json::array({300, 280, 220}) &&
+            done.at("speculative").at("rounds_per_window") == Json::array({3, 0, 297}) &&
+            done.at("speculative").at("fallbacks_per_window") == Json::array({1, 0, 1}) &&
+            done.at("speculative").at("drafted_tokens_per_window") == Json::array({6, 0, 894}) &&
+            done.at("speculative").at("accepted_tokens_per_window") == Json::array({4, 0, 716}) &&
+            done.at("speculative").at("committed_tokens_per_window") == Json::array({7, 0, 1013}) &&
+            done.at("speculative").at("decode_seconds_per_window") ==
+                Json::array({0.06, 0.0, 5.2856789012345}) &&
+            done.at("speculative").at("window_transition_counts") ==
+                Json::array({0, 0, 2, 0, 0, 0, 2, 0, 0}),
+        "adaptive speculative telemetry missing");
     failures += check(done.at("materialization").at("predicted_total_ns") == 250000 &&
                           done.at("materialization").at("targets_evaluated") == 7 &&
                           done.at("materialization").at("stop_reason") == "model_optimal" &&
@@ -454,6 +484,15 @@ int main() {
                   format_request_done(context, outcome).find("decode-host=5000.0us/round") !=
                       std::string::npos,
               "human request log omits Engine Host exposure");
+    const std::string human_done = format_request_done(context, outcome, true);
+    failures += check(
+        human_done.find("speculative=mtp adaptive Kmax=3") != std::string::npos &&
+            human_done.find("K1{r=3,f=1,d=6,a=4,c=7,ms/r=20.0}") != std::string::npos &&
+            human_done.find("K3{r=297,f=1,d=894,a=716,c=1013,ms/r=17.8}") != std::string::npos &&
+            human_done.find("transitions=4 [K1->K3:2,K3->K1:2]") != std::string::npos,
+        "human request log omits adaptive MTP telemetry");
+    failures += check(format_request_done(context, outcome).find(" windows=") == std::string::npos,
+                      "human request log emitted adaptive telemetry without its flag");
     failures += check(format_request_start(context).find("submitted") != std::string::npos,
                       "human request log mislabels a submitted request");
 

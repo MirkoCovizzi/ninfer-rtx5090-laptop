@@ -302,7 +302,17 @@ Json speculative_json(const GenerationMetrics& metrics) {
                 {"drafted_tokens", metrics.speculative_draft_tokens},
                 {"accepted_tokens", metrics.speculative_accepted_tokens},
                 {"fallback_steps", metrics.speculative_fallback_steps},
-                {"accepted_per_position", metrics.speculative_accepted_per_position}};
+                {"adaptive", metrics.speculative_adaptive},
+                {"window_transitions", metrics.speculative_window_transitions},
+                {"accepted_per_position", metrics.speculative_accepted_per_position},
+                {"drafted_per_position", metrics.speculative_drafted_per_position},
+                {"rounds_per_window", metrics.speculative_rounds_per_window},
+                {"fallbacks_per_window", metrics.speculative_fallbacks_per_window},
+                {"drafted_tokens_per_window", metrics.speculative_drafted_tokens_per_window},
+                {"accepted_tokens_per_window", metrics.speculative_accepted_tokens_per_window},
+                {"committed_tokens_per_window", metrics.speculative_committed_tokens_per_window},
+                {"decode_seconds_per_window", metrics.speculative_decode_seconds_per_window},
+                {"window_transition_counts", metrics.speculative_window_transition_counts}};
 }
 
 Json materialization_json(const ninfer::MaterializationDiagnostics& diagnostics) {
@@ -435,11 +445,15 @@ std::string sampler_str(const ninfer::ResolvedSamplingParameters& sampling) {
     return out.str();
 }
 
-std::string speculative_str(const GenerationMetrics& metrics) {
+std::string speculative_str(const GenerationMetrics& metrics, bool log_adaptive_mtp_stats) {
     if (metrics.speculative_backend == SpeculativeBackend::None) { return "off"; }
     std::ostringstream out;
-    out << product::speculative_backend_name(metrics.speculative_backend) << ' ' << std::fixed
-        << std::setprecision(2);
+    out << product::speculative_backend_name(metrics.speculative_backend);
+    if (metrics.speculative_backend == SpeculativeBackend::Mtp && metrics.speculative_adaptive &&
+        log_adaptive_mtp_stats) {
+        out << " adaptive Kmax=" << metrics.speculative_draft_window;
+    }
+    out << ' ' << std::fixed << std::setprecision(2);
     if (metrics.speculative_rounds > 0) {
         const double per_round = 1.0 + static_cast<double>(metrics.speculative_accepted_tokens) /
                                            static_cast<double>(metrics.speculative_rounds);
@@ -451,6 +465,53 @@ std::string speculative_str(const GenerationMetrics& metrics) {
         const double accept_pct = 100.0 * static_cast<double>(metrics.speculative_accepted_tokens) /
                                   static_cast<double>(metrics.speculative_draft_tokens);
         out << " (" << std::setprecision(1) << accept_pct << "%)";
+    }
+    if (metrics.speculative_backend == SpeculativeBackend::Mtp && metrics.speculative_adaptive &&
+        log_adaptive_mtp_stats) {
+        out << " windows=";
+        bool first                = true;
+        const std::size_t windows = metrics.speculative_rounds_per_window.size();
+        const bool complete       = metrics.speculative_fallbacks_per_window.size() == windows &&
+                              metrics.speculative_drafted_tokens_per_window.size() == windows &&
+                              metrics.speculative_accepted_tokens_per_window.size() == windows &&
+                              metrics.speculative_committed_tokens_per_window.size() == windows &&
+                              metrics.speculative_decode_seconds_per_window.size() == windows;
+        for (std::size_t width = 0; width < metrics.speculative_rounds_per_window.size(); ++width) {
+            const std::uint64_t rounds = metrics.speculative_rounds_per_window[width];
+            if (rounds == 0) { continue; }
+            if (!first) { out << ','; }
+            out << 'K' << width + 1 << "{r=" << rounds;
+            if (complete) {
+                out << ",f=" << metrics.speculative_fallbacks_per_window[width]
+                    << ",d=" << metrics.speculative_drafted_tokens_per_window[width]
+                    << ",a=" << metrics.speculative_accepted_tokens_per_window[width]
+                    << ",c=" << metrics.speculative_committed_tokens_per_window[width]
+                    << ",ms/r=" << std::setprecision(1)
+                    << metrics.speculative_decode_seconds_per_window[width] * 1000.0 /
+                           static_cast<double>(rounds);
+            }
+            out << '}';
+            first = false;
+        }
+        if (first) { out << "none"; }
+
+        out << " transitions=" << metrics.speculative_window_transitions;
+        if (windows != 0 &&
+            metrics.speculative_window_transition_counts.size() == windows * windows) {
+            out << " [";
+            first = true;
+            for (std::size_t from = 0; from < windows; ++from) {
+                for (std::size_t to = 0; to < windows; ++to) {
+                    const std::uint64_t count =
+                        metrics.speculative_window_transition_counts[from * windows + to];
+                    if (count == 0) { continue; }
+                    if (!first) { out << ','; }
+                    out << 'K' << from + 1 << "->K" << to + 1 << ':' << count;
+                    first = false;
+                }
+            }
+            out << ']';
+        }
     }
     return out.str();
 }
@@ -556,8 +617,8 @@ std::string format_request_rejected(const RequestRejectionLogContext& context) {
     return out.str();
 }
 
-std::string format_request_done(const RequestLogContext& context,
-                                const GenerationOutcome& outcome) {
+std::string format_request_done(const RequestLogContext& context, const GenerationOutcome& outcome,
+                                bool log_adaptive_mtp_stats) {
     const GenerationMetrics& metrics = outcome.metrics;
     const double ttft_ms             = metrics.ttft_seconds * 1000.0;
     // Prefill emits the first token; the remaining (gen - 1) come from decode.
@@ -588,7 +649,7 @@ std::string format_request_done(const RequestLogContext& context,
             << metrics.engine_timing.decode_device_wait_exposed_seconds * 1.0e6 / rounds
             << "us/round";
     }
-    out << " speculative=" << speculative_str(metrics);
+    out << " speculative=" << speculative_str(metrics, log_adaptive_mtp_stats);
     if (outcome.thinking.configured_budget) {
         out << " thinking_budget=" << *outcome.thinking.configured_budget
             << " model_thinking=" << outcome.thinking.model_thinking_tokens
@@ -708,6 +769,7 @@ std::string format_server_start_json(
         {"pending_timeout_ms", engine_options.pending_timeout_ms},
         {"prefill_chunk", engine_options.prefill_chunk},
         {"log_stats_interval_ms", options.log_stats_interval_ms},
+        {"log_adaptive_mtp_stats", options.log_adaptive_mtp_stats},
         {"kv_cache", kv_cache_name(engine_options.kv_cache)},
         {"vision", engine_options.enable_vision},
         {"cuda_graph", engine_options.use_cuda_graph},
@@ -715,6 +777,8 @@ std::string format_server_start_json(
         {"speculative_backend",
          product::speculative_backend_name(engine_options.speculative.backend)},
         {"speculative_draft_window", engine_options.speculative.draft_tokens},
+        {"mtp_policy",
+         engine_options.speculative.mtp_policy == MtpDraftPolicy::Adaptive ? "adaptive" : "fixed"},
         {"proposal_head", proposal_head_name(engine_options.speculative.proposal_head)},
         {"context_cost", Json{{"transfer_source", ninfer::context_cost_preset_source_name(
                                                       context_cost.transfer_source)},

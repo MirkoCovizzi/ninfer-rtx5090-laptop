@@ -30,11 +30,11 @@ struct RouteSpec {
 constexpr std::array<RouteSpec, 5> k27Routes{{
     // Decode and compact speculative verification share one reduction profile so observable FP32
     // decay and update controls do not depend on active request count or verification width.
-    {{1, 8 * 6}, Bf16GdnGatingScheduleId::SmallTSplit10},
+    {{1, 8 * 9}, Bf16GdnGatingScheduleId::SmallTSplit10},
     // As token tiles double, halve SplitK. This keeps the cooperative grid near 192 CTAs instead
     // of making T a launch limit. Once the unsplit grid has enough independent work, it also
     // removes the cooperative-residency constraint.
-    {{8 * 6 + 1, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
+    {{8 * 9 + 1, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
     {{1025, 2048}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
     {{2049, 4096}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
     {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
@@ -166,7 +166,7 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule, const Bf16GdnGatingPro
         case Bf16GdnGatingScheduleId::GemvPairedRows:
             return problem.cols == 1;
         case Bf16GdnGatingScheduleId::SmallTSplit10:
-            return problem.cols >= 1 && problem.cols <= 8 * 6;
+            return problem.cols >= 1 && problem.cols <= 8 * 9;
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:

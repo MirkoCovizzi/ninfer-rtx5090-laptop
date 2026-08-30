@@ -9,8 +9,10 @@
 #include "targets/qwen3_6/impl/runtime/rebuild_work.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -113,26 +115,44 @@ void test_decoder_layout() {
 
 void test_round_layout() {
     ninfer::LayoutBuilder builder;
-    q36::RoundStateLayout round = q36::begin_round_state_layout(
-        builder, q36::RoundStateSpec{
-                     .hidden = 32, .output_rows = 128, .draft_window = 5, .enable_mtp = true});
+    q36::RoundStateLayout round =
+        q36::begin_round_state_layout(builder, q36::RoundStateSpec{.hidden         = 32,
+                                                                   .output_rows    = 128,
+                                                                   .batch_capacity = 8,
+                                                                   .draft_window   = 8,
+                                                                   .enable_mtp     = true});
     const ninfer::TensorRegion exact_prefill =
         builder.add_tensor(ninfer::DType::BF16, {32, 16}, 256, "exact prefill hidden");
     q36::complete_round_state_layout(builder, round);
-    (void)builder.finish(256);
+    const std::size_t round_bytes = builder.finish(256);
     expect(round.complete, "round layout completes");
     expect(round.logits.shape[0] == 128 && round.logits.shape[1] == 1, "round logits shape");
-    expect(round.mtp.has_value() && round.mtp->draft_tokens.shape[0] == 5 &&
-               round.mtp->target_input_ids.shape[0] == 6,
+    expect(round.mtp.has_value() && round.mtp->draft_tokens.shape[0] == 8 &&
+               round.mtp->target_input_ids.shape[0] == 9,
            "MTP prefill scratch shapes");
     expect(round.logits.region.offset < exact_prefill.region.offset &&
                exact_prefill.region.offset < round.mtp->draft_tokens.region.offset,
            "exact prefill extension retains established round-region order");
     expect(round.mtp.has_value() && round.mtp->position.shape[0] == 1,
            "MTP prefill scratch is explicit");
-    expect(round.mtp_decode.has_value() && round.mtp_decode->alignment_ids.shape[0] == 6 &&
-               round.mtp_decode->alignment_ids.shape[1] == 1,
+    expect(round.mtp_decode.has_value() && round.mtp_decode->alignment_ids.shape[0] == 9 &&
+               round.mtp_decode->alignment_ids.shape[1] == 8,
            "MTP decode frame is explicit");
+    std::unique_ptr<void, decltype(&std::free)> backing(std::aligned_alloc(256, round_bytes),
+                                                        &std::free);
+    expect(backing != nullptr, "MTP round-state backing allocation");
+    if (backing) {
+        q36::RoundState state({backing.get(), round_bytes}, round);
+        const q36::MtpDecodeState active = state.mtp_decode->active_view(8, 3, 8);
+        expect(active.current_drafts.ne[0] == 3 && active.current_drafts.ne[1] == 8 &&
+                   active.target_hidden.ne[1] == 4 && active.target_hidden.ne[2] == 8 &&
+                   active.ar_positions.ne[0] == 8 && active.ar_positions.ne[1] == 7,
+               "adaptive MTP frame exposes compact verification and full proposal shapes");
+        expect(active.current_drafts.data == state.mtp_decode->current_drafts.data &&
+                   active.target_hidden.data == state.mtp_decode->target_hidden.data &&
+                   active.ar_positions.data == state.mtp_decode->ar_positions.data,
+               "adaptive MTP frame preserves graph-stable addresses");
+    }
 
     ninfer::LayoutBuilder speculative_builder;
     q36::RoundStateLayout dflash = q36::begin_round_state_layout(

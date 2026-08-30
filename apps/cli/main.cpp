@@ -220,6 +220,9 @@ void print_generation_summary(const ninfer::GenerationResult& result,
         const std::string backend =
             speculative.backend == ninfer::SpeculativeBackend::DFlash ? "dflash" : "mtp";
         print_metric(backend + " draft window", std::to_string(speculative.draft_window));
+        if (speculative.backend == ninfer::SpeculativeBackend::Mtp) {
+            print_metric("mtp draft policy", speculative.adaptive ? "adaptive" : "fixed");
+        }
         print_metric(backend + " rounds", std::to_string(speculative.rounds));
         print_metric(backend + " fallback steps", std::to_string(speculative.fallback_steps));
         print_metric(backend + " drafted tokens", std::to_string(speculative.drafted_tokens));
@@ -241,6 +244,30 @@ void print_generation_summary(const ninfer::GenerationResult& result,
                 positions << speculative.accepted_per_position[i];
             }
             print_metric(backend + " accepted by pos", positions.str());
+        }
+        if (speculative.adaptive) {
+            std::ostringstream windows;
+            for (std::size_t i = 0; i < speculative.rounds_per_window.size(); ++i) {
+                if (i != 0) { windows << ','; }
+                windows << speculative.rounds_per_window[i];
+            }
+            print_metric("mtp rounds by window", windows.str());
+            print_metric("mtp window transitions", std::to_string(speculative.window_transitions));
+            if (speculative.window_transition_counts.size() ==
+                speculative.rounds_per_window.size() * speculative.rounds_per_window.size()) {
+                std::ostringstream transitions;
+                for (std::size_t from = 0; from < speculative.rounds_per_window.size(); ++from) {
+                    for (std::size_t to = 0; to < speculative.rounds_per_window.size(); ++to) {
+                        const std::uint64_t count =
+                            speculative.window_transition_counts
+                                [from * speculative.rounds_per_window.size() + to];
+                        if (count == 0) { continue; }
+                        if (transitions.tellp() != std::streampos(0)) { transitions << ','; }
+                        transitions << 'K' << from + 1 << "->K" << to + 1 << ':' << count;
+                    }
+                }
+                print_metric("mtp transition counts", transitions.str());
+            }
         }
     }
 }

@@ -148,9 +148,10 @@ long-decode, and long-context inputs.
 
 ## Speculative decoding
 
-Speculative decoding is disabled by default. Select MTP with one to five draft positions, or the
-35B-A3B text-only DFlash backend with one to fifteen. `--lm-head-draft` selects the optimized
-proposal head and requires a selected backend:
+Speculative decoding is disabled by default. Select MTP with one to eight draft positions on 27B
+targets or one to five on 35B-A3B. The 35B-A3B text-only DFlash backend accepts one to fifteen.
+`--adaptive-mtp` adapts the physical MTP verification width up to `--draft-tokens`;
+`--lm-head-draft` selects the optimized proposal head and requires a selected backend:
 
 ```bash
 ./build/apps/ninfer models/qwen3_6_35b_a3b.ninfer \
@@ -179,8 +180,8 @@ block length eight, while fifteen uses the full native block.
 
 With greedy decoding, MTP preserves the committed token sequence: for the same artifact, prepared
 prompt, KV-cache dtype, and otherwise identical Engine and request configuration, disabling MTP or
-selecting any MTP draft window from one to five produces the same token IDs. The draft window and
-proposal head may change acceptance and throughput, but not the greedy output. This contract does
+selecting any supported fixed MTP draft window, or adaptive MTP, produces the same token IDs. The
+draft policy, window, and proposal head may change acceptance and throughput, but not the greedy output. This contract does
 not require bit-identical logits or intermediates and does not compare different artifacts or KV
 dtypes. With stochastic sampling, speculative acceptance preserves the processed target
 distribution but does not promise the same token IDs for a fixed seed because execution may consume
@@ -199,7 +200,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--device N` | CUDA device index | `0` |
 | `--kv-dtype bf16\|int8\|fp8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
+| `--draft-tokens N` | MTP `1..15` on 27B and `1..5` on 35B-A3B; DFlash `1..15` | unset |
+| `--adaptive-mtp` | Adapt the physical MTP verification width up to `--draft-tokens` | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |

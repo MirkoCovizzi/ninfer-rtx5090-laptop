@@ -432,54 +432,57 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         }
         out.mtp_prefill = finish(mtp_prefill);
 
-        WorkspaceLayoutBuilder mtp_batch;
-        mtp_full_call(mtp_batch, verify, text_envelope, false);
         WorkspaceLayoutBuilder mtp_ar;
         mtp_full_call(mtp_ar, 1, text_envelope, true);
-        WorkspaceLayoutBuilder mtp_align;
-        mtp_full_call(mtp_align, 1, text_envelope, false);
         WorkspaceLayoutBuilder mtp_proposal;
         proposal_scratch(mtp_proposal, 1);
-        const std::size_t accept = ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-            TextConfig::token_domain, drafts, drafts, 1, 1);
-        out.mtp_round = std::max({accept, finish(mtp_batch), finish(mtp_ar), finish(mtp_proposal)});
-        out.ordinary_round = std::max(out.ordinary_round, finish(mtp_align));
+        out.mtp_round = std::max(finish(mtp_ar), finish(mtp_proposal));
 
-        for (std::int32_t batch = 1; batch <= static_cast<std::int32_t>(plan.max_concurrency);
-             ++batch) {
-            const std::int32_t aggregate = batch * verify;
-            WorkspaceLayoutBuilder target;
-            matrix(target, DType::BF16, TextConfig::hidden, aggregate);
-            target_body(target, aggregate, aggregate, qwen3_6::TextPhase::Verify,
-                        GdnWorkspacePath::ReplayRecord, batch, verify, verify, text_envelope);
+        const std::int32_t first_drafts = plan.mtp_policy == MtpDraftPolicy::Adaptive ? 1 : drafts;
+        for (std::int32_t active_drafts = first_drafts; active_drafts <= drafts; ++active_drafts) {
+            const std::int32_t active_verify = active_drafts + 1;
+            WorkspaceLayoutBuilder mtp_batch;
+            mtp_full_call(mtp_batch, active_verify, text_envelope, false);
+            out.mtp_round = std::max(out.mtp_round, finish(mtp_batch));
+            for (std::int32_t batch = 1; batch <= static_cast<std::int32_t>(plan.max_concurrency);
+                 ++batch) {
+                const std::int32_t aggregate = batch * active_verify;
+                WorkspaceLayoutBuilder target;
+                matrix(target, DType::BF16, TextConfig::hidden, aggregate);
+                target_body(target, aggregate, aggregate, qwen3_6::TextPhase::Verify,
+                            GdnWorkspacePath::ReplayRecord, batch, active_verify, active_verify,
+                            text_envelope);
 
-            const auto mtp_decode_core = [&](WorkspaceLayoutBuilder& layout, std::int32_t width) {
-                const std::int32_t tokens = batch * width;
-                auto core                 = layout.scope();
-                mtp_stem(layout, tokens, false);
-                (void)workspace_recipe::mtp_attention_projection<TextConfig>(layout, tokens);
-                scratch(layout,
-                        Variant::mtp_attention_projection_workspace_capacity_bytes(tokens, tokens));
-                (void)workspace_recipe::mtp_attention_results<TextConfig>(layout, tokens);
-                scratch(layout,
-                        ops::causal_softmax_attention_workspace_capacity_bytes(
-                            {TextConfig::head_dim, TextConfig::query_heads, TextConfig::kv_heads},
-                            plan.kv_dtype, text_envelope, batch, width, width));
-                (void)workspace_recipe::mtp_post_attention<TextConfig>(layout, tokens);
-                scratch(layout, Variant::mtp_post_mixer_workspace_capacity_bytes(tokens, tokens));
-            };
+                const auto mtp_decode_core = [&](WorkspaceLayoutBuilder& layout,
+                                                 std::int32_t width) {
+                    const std::int32_t tokens = batch * width;
+                    auto core                 = layout.scope();
+                    mtp_stem(layout, tokens, false);
+                    (void)workspace_recipe::mtp_attention_projection<TextConfig>(layout, tokens);
+                    scratch(layout, Variant::mtp_attention_projection_workspace_capacity_bytes(
+                                        tokens, tokens));
+                    (void)workspace_recipe::mtp_attention_results<TextConfig>(layout, tokens);
+                    scratch(layout, ops::causal_softmax_attention_workspace_capacity_bytes(
+                                        {TextConfig::head_dim, TextConfig::query_heads,
+                                         TextConfig::kv_heads},
+                                        plan.kv_dtype, text_envelope, batch, width, width));
+                    (void)workspace_recipe::mtp_post_attention<TextConfig>(layout, tokens);
+                    scratch(layout,
+                            Variant::mtp_post_mixer_workspace_capacity_bytes(tokens, tokens));
+                };
 
-            WorkspaceLayoutBuilder alignment;
-            mtp_decode_core(alignment, verify);
-            WorkspaceLayoutBuilder ar;
-            mtp_decode_core(ar, 1);
-            WorkspaceLayoutBuilder proposal;
-            proposal_scratch(proposal, batch);
-            const std::size_t batch_accept =
-                ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-                    TextConfig::token_domain, drafts, drafts, batch, batch);
-            out.mtp_round = std::max({out.mtp_round, finish(target), finish(alignment), finish(ar),
-                                      finish(proposal), batch_accept});
+                WorkspaceLayoutBuilder alignment;
+                mtp_decode_core(alignment, active_verify);
+                WorkspaceLayoutBuilder ar;
+                mtp_decode_core(ar, 1);
+                WorkspaceLayoutBuilder proposal;
+                proposal_scratch(proposal, batch);
+                const std::size_t batch_accept =
+                    ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
+                        TextConfig::token_domain, active_drafts, active_drafts, batch, batch);
+                out.mtp_round = std::max({out.mtp_round, finish(target), finish(alignment),
+                                          finish(ar), finish(proposal), batch_accept});
+            }
         }
     }
 
@@ -607,15 +610,16 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
     switch (options.speculative.backend) {
     case SpeculativeBackend::None:
         if (options.speculative.draft_tokens != 0 ||
-            options.speculative.proposal_head != ProposalHead::Full) {
-            throw std::invalid_argument(
-                "disabled speculative decoding requires draft_tokens=0 and the full proposal head");
+            options.speculative.proposal_head != ProposalHead::Full ||
+            options.speculative.mtp_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("disabled speculative decoding requires fixed MTP policy, "
+                                        "draft_tokens=0, and the full proposal head");
         }
         break;
     case SpeculativeBackend::Mtp:
         if (options.speculative.draft_tokens == 0 ||
             options.speculative.draft_tokens > kMaximumMtpDraftTokens) {
-            throw std::invalid_argument("MTP draft window must be in [1,5]");
+            throw std::invalid_argument("MTP draft window exceeds the target domain");
         }
         break;
     case SpeculativeBackend::DFlash:
@@ -628,6 +632,9 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         if (options.enable_vision) {
             throw std::invalid_argument("DFlash and Vision cannot be enabled together");
+        }
+        if (options.speculative.mtp_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("adaptive MTP policy requires the MTP backend");
         }
         break;
     }
@@ -653,6 +660,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->draft_window        = inputs.draft_window;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
+    impl->mtp_policy          = inputs.mtp_policy;
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
     impl->device              = inputs.device;
@@ -669,18 +677,30 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             impl->graph_allowance_bytes = checked_mul(12ULL * kMiB, impl->max_concurrency,
                                                       "ordinary exact-b graph allowance");
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
-            const auto profiles = mtp_graph_profiles(impl->capacity, impl->draft_window);
-            const std::size_t per_batch_allowance = graph_topology_allowance(
-                profiles,
-                [&](GraphExecutionProfile profile) {
-                    const std::uint64_t final_visible = std::min<std::uint64_t>(
-                        impl->capacity,
-                        static_cast<std::uint64_t>(profile.max) + 2ULL * impl->draft_window);
-                    return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
+            std::vector<GraphExecutionProfile> topology_profiles;
+            for (std::uint32_t batch_size = 1; batch_size <= impl->max_concurrency; ++batch_size) {
+                const std::uint32_t first_width =
+                    impl->mtp_policy == MtpDraftPolicy::Adaptive ? 1U : impl->draft_window;
+                for (std::uint32_t width = first_width; width <= impl->draft_window; ++width) {
+                    const auto profiles =
+                        mtp_graph_profiles(impl->capacity, width, impl->draft_window, batch_size);
+                    for (GraphExecutionProfile profile : profiles) {
+                        profile.max = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                            impl->capacity,
+                            static_cast<std::uint64_t>(profile.max) + width + impl->draft_window));
+                        topology_profiles.push_back(profile);
+                    }
+                }
+            }
+            // MTP definitions are mutually exclusive round profiles. Incompatible definitions in
+            // one target residency class replace that class's executable instead of remaining
+            // resident concurrently.
+            impl->graph_allowance_bytes = graph_topology_allowance(
+                topology_profiles,
+                [](GraphExecutionProfile profile) {
+                    return (profile.max <= 4096 ? 12ULL : 82ULL) * kMiB;
                 },
                 "MTP graph allowance");
-            impl->graph_allowance_bytes = checked_mul(per_batch_allowance, impl->max_concurrency,
-                                                      "MTP exact-b graph allowance");
         } else {
             const auto class_allowance = [&](std::uint32_t batch_size) {
                 const auto profiles =
@@ -727,6 +747,7 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .kv_dtype            = kv_profile.dtype,
         .kv_quant_group      = kv_profile.quant_group,
         .proposal_head       = options.speculative.proposal_head,
+        .mtp_policy          = options.speculative.mtp_policy,
         .features            = qwen3_6::startup_features(options),
         .use_cuda_graph      = options.use_cuda_graph,
         .device              = options.device,

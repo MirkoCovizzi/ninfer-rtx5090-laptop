@@ -39,6 +39,8 @@ int main() {
                       "external context-cost presets are unexpectedly configured by default");
     failures += check(defaults.log_stats_interval_ms == 5000,
                       "periodic throughput interval default mismatch");
+    failures += check(!defaults.log_adaptive_mtp_stats,
+                      "adaptive MTP stderr telemetry is unexpectedly enabled by default");
     failures += check(defaults.media_cache_bytes == ninfer::kDefaultMediaCacheBytes &&
                           defaults.media_live_bytes == ninfer::kDefaultMediaLiveBytes &&
                           defaults.media_preprocess_threads == 0,
@@ -107,6 +109,28 @@ int main() {
                       "--draft-tokens did not preserve the DFlash window");
     failures += check(dflash.speculative.proposal_head == ninfer::ProposalHead::Optimized,
                       "--lm-head-draft did not select the optimized proposal head");
+
+    const ServeOptions adaptive =
+        parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "15",
+               "--adaptive-mtp", "--log-adaptive-mtp-stats"});
+    failures += check(adaptive.speculative.draft_tokens == 15 &&
+                          adaptive.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive &&
+                          adaptive.log_adaptive_mtp_stats,
+                      "adaptive MTP options were not preserved");
+
+    bool adaptive_log_without_policy_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--log-adaptive-mtp-stats"});
+    } catch (const std::invalid_argument&) { adaptive_log_without_policy_rejected = true; }
+    failures += check(adaptive_log_without_policy_rejected,
+                      "adaptive MTP telemetry was accepted without adaptive MTP");
+
+    bool adaptive_dflash_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash", "--draft-tokens", "3",
+                     "--adaptive-mtp"});
+    } catch (const std::invalid_argument&) { adaptive_dflash_rejected = true; }
+    failures += check(adaptive_dflash_rejected, "adaptive MTP was accepted with DFlash");
 
     bool dflash_vision_rejected = false;
     try {

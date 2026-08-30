@@ -158,6 +158,11 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
     AttentionHeadGeometry geometry, DType cache_dtype, CausalAttentionExecutionEnvelope envelope,
     std::int32_t batch_size, std::int32_t min_tokens, std::int32_t max_tokens);
 
+/** Return transient capacity for causal_softmax_attention_cached over every inclusive T. */
+[[nodiscard]] std::size_t causal_softmax_attention_cached_workspace_capacity_bytes(
+    AttentionHeadGeometry geometry, DType cache_dtype, CausalAttentionExecutionEnvelope envelope,
+    std::int32_t min_tokens, std::int32_t max_tokens);
+
 /**
  * Non-causal grouped-query attention over persistent context plus one live query block.
  *

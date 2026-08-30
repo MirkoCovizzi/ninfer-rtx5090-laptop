@@ -12,7 +12,7 @@
 
 namespace ninfer::targets::qwen3_6 {
 
-inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 5;
+inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 15;
 inline constexpr std::uint32_t kMtpDecodeMaximumWidth     = kMtpDecodeMaximumDrafts + 1;
 inline constexpr std::uint32_t kDFlashDecodeMaximumDrafts = 15;
 inline constexpr std::uint32_t kDFlashDecodeMaximumWidth  = kDFlashDecodeMaximumDrafts + 1;
@@ -244,6 +244,9 @@ struct MtpDecodeState {
     MtpDecodeState() = default;
     MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& layout,
                    std::uint32_t batch_capacity, std::uint32_t draft_window);
+    [[nodiscard]] MtpDecodeState active_view(std::uint32_t batch_capacity,
+                                             std::uint32_t verification_drafts,
+                                             std::uint32_t proposal_drafts) const;
 };
 
 struct DFlashDecodeState {

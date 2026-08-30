@@ -12,6 +12,7 @@
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
 
 #include "targets/qwen3_6/impl/runtime/layouts.h"
+#include "targets/qwen3_6/impl/runtime/mtp_adaptive.h"
 #include "targets/qwen3_6/impl/runtime/dflash_context.h"
 #include "targets/qwen3_6/impl/runtime/host_kv_extent_store.h"
 #include "targets/qwen3_6/impl/runtime/logical_kv_store.h"
@@ -358,6 +359,8 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    qwen3_6::detail::MtpAdaptiveSignal next_mtp_signal;
+    bool has_next_mtp_signal = false;
 };
 
 enum class Lifecycle : std::uint8_t {
@@ -401,6 +404,7 @@ struct SequenceKVBundle {
 
 struct DecodeGraphProfile {
     std::uint32_t batch_size             = 1;
+    std::uint32_t mtp_draft_window       = 0;
     std::uint32_t min_execution_frontier = 0;
     std::uint32_t max_execution_frontier = 0;
     std::uint32_t topology_class         = 0;
@@ -483,6 +487,7 @@ struct RequestControl {
     ops::SamplingConfig sampling_host;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
+    qwen3_6::detail::MtpAdaptiveSignal mtp_signal;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
@@ -598,6 +603,7 @@ public:
     const DType kv_dtype;
     const std::int32_t kv_quant_group;
     const ProposalHead proposal_head;
+    const MtpDraftPolicy mtp_policy;
     const bool vision_enabled;
     const bool use_cuda_graph;
     const std::size_t kv_payload_bytes;
@@ -621,6 +627,7 @@ public:
     std::unique_ptr<StateImageStore> state_store;
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
+    std::optional<qwen3_6::detail::MtpAdaptiveBatchController> mtp_controller;
     std::optional<DFlashPersistentState> dflash;
     qwen3_6::RoundState io;
     Tensor prefill_hidden;
@@ -689,11 +696,13 @@ private:
         std::uint64_t id = 0;
         std::array<std::uint32_t, kMaximumConcurrency> lanes{};
         std::array<std::uint64_t, kMaximumConcurrency> epochs{};
-        std::size_t size = 0;
+        std::size_t size               = 0;
+        std::uint32_t mtp_draft_window = 0;
     };
 
     std::optional<PendingTransaction> pending_transaction_;
-    std::uint64_t next_transaction_id_ = 1;
+    std::uint32_t staged_mtp_draft_window_ = 0;
+    std::uint64_t next_transaction_id_     = 1;
 
     struct MaterializationTransaction {
         struct KVRestorePage {
