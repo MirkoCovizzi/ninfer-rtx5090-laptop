@@ -677,26 +677,30 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             impl->graph_allowance_bytes = checked_mul(12ULL * kMiB, impl->max_concurrency,
                                                       "ordinary exact-b graph allowance");
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
+            std::vector<GraphExecutionProfile> topology_profiles;
             for (std::uint32_t batch_size = 1; batch_size <= impl->max_concurrency; ++batch_size) {
                 const std::uint32_t first_width =
                     impl->mtp_policy == MtpDraftPolicy::Adaptive ? 1U : impl->draft_window;
                 for (std::uint32_t width = first_width; width <= impl->draft_window; ++width) {
                     const auto profiles =
                         mtp_graph_profiles(impl->capacity, width, impl->draft_window, batch_size);
-                    impl->graph_allowance_bytes = checked_add(
-                        impl->graph_allowance_bytes,
-                        graph_topology_allowance(
-                            profiles,
-                            [&](GraphExecutionProfile profile) {
-                                const std::uint64_t final_visible = std::min<std::uint64_t>(
-                                    impl->capacity, static_cast<std::uint64_t>(profile.max) +
-                                                        width + impl->draft_window);
-                                return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
-                            },
-                            "MTP graph allowance"),
-                        "MTP graph allowance total");
+                    for (GraphExecutionProfile profile : profiles) {
+                        profile.max = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                            impl->capacity,
+                            static_cast<std::uint64_t>(profile.max) + width + impl->draft_window));
+                        topology_profiles.push_back(profile);
+                    }
                 }
             }
+            // MTP definitions are mutually exclusive round profiles. Incompatible definitions in
+            // one target residency class replace that class's executable instead of remaining
+            // resident concurrently.
+            impl->graph_allowance_bytes = graph_topology_allowance(
+                topology_profiles,
+                [](GraphExecutionProfile profile) {
+                    return (profile.max <= 4096 ? 12ULL : 82ULL) * kMiB;
+                },
+                "MTP graph allowance");
         } else {
             const auto class_allowance = [&](std::uint32_t batch_size) {
                 const auto profiles =

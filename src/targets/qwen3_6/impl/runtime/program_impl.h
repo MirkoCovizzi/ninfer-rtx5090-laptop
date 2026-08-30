@@ -644,20 +644,33 @@ DecodeGraphTopology& select_graph_topology(DecodeGraphFamily& family, std::uint3
     return *it;
 }
 
+void set_graph_profile(DecodeGraphFamily& family, DecodeGraphTopology& topology,
+                       std::size_t profile_index, bool replace_shape) {
+    if (topology.installed_profile == profile_index) { return; }
+    DecodeGraphProfile& profile = family.profiles[profile_index];
+    const bool shape_changed =
+        topology.installed_profile &&
+        (family.profiles[*topology.installed_profile].batch_size != profile.batch_size ||
+         family.profiles[*topology.installed_profile].mtp_draft_window != profile.mtp_draft_window);
+    if (replace_shape && shape_changed) {
+        topology.executable.instantiate(profile.definition);
+    } else {
+        topology.executable.update(profile.definition);
+    }
+    topology.installed_profile = profile_index;
+}
+
 DecodeGraphExecutable& install_graph_profile(DecodeGraphFamily& family, DecodeGraphProfile& profile,
-                                             const char* label) {
+                                             const char* label, bool replace_shape = false) {
     DecodeGraphTopology& topology   = select_graph_topology(family, profile.topology_class, label);
     const std::size_t profile_index = static_cast<std::size_t>(&profile - family.profiles.data());
-    if (topology.installed_profile != profile_index) {
-        topology.executable.update(profile.definition);
-        topology.installed_profile = profile_index;
-    }
+    set_graph_profile(family, topology, profile_index, replace_shape);
     return topology.executable;
 }
 
 template <class Prepare>
 void instantiate_graph_family(DecodeGraphFamily& family, const char* label, DeviceContext& device,
-                              Prepare&& prepare) {
+                              Prepare&& prepare, bool replace_shape = false) {
     if (family.profiles.empty()) {
         throw std::logic_error(std::string(label) + " CUDA Graph family has no profiles");
     }
@@ -682,14 +695,42 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
     }
 
     const auto install_and_upload = [&](DecodeGraphTopology& topology, std::size_t profile_index) {
-        DecodeGraphProfile& profile = family.profiles[profile_index];
-        if (topology.installed_profile != profile_index) {
-            topology.executable.update(profile.definition);
-            topology.installed_profile = profile_index;
-        }
+        set_graph_profile(family, topology, profile_index, replace_shape);
         topology.executable.upload(device.stream);
         device.synchronize();
     };
+
+    if (replace_shape) {
+        for (DecodeGraphTopology& topology : family.topologies) {
+            DecodeGraphProfile* startup = nullptr;
+            for (DecodeGraphProfile& profile : family.profiles) {
+                if (profile.topology_class != topology.topology_class) { continue; }
+                const auto distance = [](std::uint32_t width) {
+                    return width > 3U ? width - 3U : 3U - width;
+                };
+                if (startup == nullptr ||
+                    distance(profile.mtp_draft_window) < distance(startup->mtp_draft_window) ||
+                    (distance(profile.mtp_draft_window) == distance(startup->mtp_draft_window) &&
+                     (profile.batch_size < startup->batch_size ||
+                      (profile.batch_size == startup->batch_size &&
+                       profile.min_execution_frontier < startup->min_execution_frontier)))) {
+                    startup = &profile;
+                }
+            }
+            if (startup == nullptr) {
+                throw std::logic_error(std::string(label) +
+                                       " CUDA Graph topology has no startup definition");
+            }
+            const std::size_t profile_index =
+                static_cast<std::size_t>(startup - family.profiles.data());
+            install_and_upload(topology, profile_index);
+            prepare(*startup);
+            device.synchronize();
+            topology.executable.launch(device.stream);
+            device.synchronize();
+        }
+        return;
+    }
 
     for (DecodeGraphTopology& topology : family.topologies) {
         std::optional<std::size_t> first_profile;
@@ -9798,9 +9839,7 @@ void ProgramImplCore::prepare_graphs() {
                     profile.mtp_draft_window       = verification_k;
                     profile.min_execution_frontier = planned.min;
                     profile.max_execution_frontier = planned.max;
-                    profile.topology_class =
-                        (verification_k * 1024U + planned.topology_class) * max_concurrency +
-                        (batch_size - 1U);
+                    profile.topology_class         = planned.topology_class;
                     qwen3_6::MtpDecodeState active_frame =
                         io.mtp_decode->active_view(max_concurrency, verification_k, draft_window);
                     schedule::MtpBatchContext capture_state{
@@ -9876,10 +9915,13 @@ void ProgramImplCore::prepare_graphs() {
             });
     }
     if (speculative_backend == SpeculativeBackend::Mtp) {
-        instantiate_graph_family(mtp_graphs, "MTP", device, [&](const DecodeGraphProfile& profile) {
-            prepare_representative(profile.min_execution_frontier, profile.batch_size,
-                                   profile.mtp_draft_window);
-        });
+        instantiate_graph_family(
+            mtp_graphs, "MTP", device,
+            [&](const DecodeGraphProfile& profile) {
+                prepare_representative(profile.min_execution_frontier, profile.batch_size,
+                                       profile.mtp_draft_window);
+            },
+            true);
     }
     if (speculative_backend == SpeculativeBackend::DFlash) {
         instantiate_graph_family(
@@ -10530,7 +10572,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             DecodeGraphProfile& profile =
                 select_graph_profile(mtp_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "MTP batch", verification_k);
-            executable = &install_graph_profile(mtp_graphs, profile, "MTP batch");
+            executable = &install_graph_profile(mtp_graphs, profile, "MTP batch", true);
             envelopes  = mtp_causal_attention_envelopes(profile.max_execution_frontier,
                                                         verification_k, draft_window, capacity);
         }

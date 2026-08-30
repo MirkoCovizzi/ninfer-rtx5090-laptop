@@ -14,7 +14,8 @@
 
 namespace {
 
-constexpr std::uint32_t kOutputTokens = 128;
+constexpr std::uint32_t kOutputTokens             = 128;
+constexpr std::size_t kSmallContextGraphAllowance = 12ULL * 1024ULL * 1024ULL;
 constexpr std::array<std::uint32_t, 15> kMtpDraftCounts{1, 2,  3,  4,  5,  6,  7, 8,
                                                         9, 10, 11, 12, 13, 14, 15};
 constexpr std::uint32_t kMaximumConcurrency = 8;
@@ -177,6 +178,10 @@ void verify_route(const char* artifact, KvProfile profile, std::uint32_t draft_t
                   ninfer::MtpDraftPolicy mtp_policy = ninfer::MtpDraftPolicy::Fixed) {
     ninfer::Engine engine(engine_options(artifact, profile.storage, draft_tokens, use_cuda_graph,
                                          maximum_concurrency, mtp_policy));
+    if (use_cuda_graph && draft_tokens != 0 &&
+        engine.memory_summary().cuda_graph_allowance_bytes != kSmallContextGraphAllowance) {
+        throw std::runtime_error("MTP retained more than one CUDA Graph executable allowance");
+    }
     for (std::uint32_t concurrency = 1; concurrency <= maximum_concurrency; ++concurrency) {
         verify_batch(engine, profile, draft_tokens, concurrency, 0, expected, use_cuda_graph,
                      mtp_policy);

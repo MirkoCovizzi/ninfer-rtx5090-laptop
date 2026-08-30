@@ -443,7 +443,9 @@ ResourceManager 与完成所有 request response。内部不变量错误不能�
 - Program 在启动时建立固定数量的 control/state/table resources；
 - growing KV 由共享 paged pools 支持，active request 持有完整增长 reservation；
 - 一个 GPU execution unit 内 State/KV mapping 保持稳定；
-- CUDA Graph 按合法 exact-`B` topology 建立，request identity 和 page IDs 是稳定输入数据，不是 graph key；
+- 每次 CUDA Graph replay 使用合法的 exact-`B` definition，request identity 和 page IDs 是稳定输入数据，
+  不是 graph key；MTP 的互斥 `K`/`B` definitions 共享 target-declared residency class，同 topology 时
+  update，incompatible topology 在 round boundary 替换 executable，不为每个 profile 永久保留 executable；
 - ordinary decode 不运行 catalog scan、pressure search 或后台 replica scan；
 - workspace 是 Program 启动时统一规划的 backing，Vision、Text 和 speculative schedule 按互斥 lifetime
   使用其内部区域。

@@ -448,7 +448,9 @@ is complete. Text prefill allocations use `min(prefill_chunk,max_context)`.
 A zero MTP draft window has no MTP weight view, MTP KV cache, or optimized proposal head. With
 Vision disabled, the Program has no Vision weight view or Vision-specific workspace extent; media
 is rejected by the matching Frontend. CUDA Graph driver allowance is budgeted separately from the
-workspace. `MemorySummary.vision_workspace` describes logical regions inside
+workspace. Mutually exclusive fixed/adaptive MTP widths and compact batch sizes retain one
+executable per target-declared residency class; an incompatible definition replaces the resident
+executable at a settled round boundary. `MemorySummary.vision_workspace` describes logical regions inside
 `MemorySummary.workspace` and is not an additional allocation. The complete artifact inventory is
 still validated before these resident views are published.
 
