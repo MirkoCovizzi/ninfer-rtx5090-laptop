@@ -110,6 +110,7 @@ int main(int argc, char** argv) {
                         timing.median_us, timing.min_us, timing.p95_us);
         };
         measure_append(1);
+        measure_append(4);
         measure_append(6);
 
         DeviceBuffer query = bench::make_bf16(static_cast<std::size_t>(kD) * kQueryHeads);
@@ -133,6 +134,47 @@ int main(int argc, char** argv) {
             nullptr, 5, 30);
         std::printf("context=%d median_us=%.3f min_us=%.3f p95_us=%.3f\n", context,
                     timing.median_us, timing.min_us, timing.p95_us);
+
+        const auto measure_mtp = [&](int width) {
+            DeviceBuffer mtp_query =
+                bench::make_bf16(static_cast<std::size_t>(kD) * kQueryHeads * width);
+            DeviceBuffer mtp_key =
+                bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
+            DeviceBuffer mtp_value =
+                bench::make_bf16(static_cast<std::size_t>(kD) * kKvHeads * width);
+            DeviceBuffer mtp_output(static_cast<std::size_t>(kD) * kQueryHeads * width * 2);
+            std::vector<std::int32_t> mtp_positions(width);
+            for (int column = 0; column < width; ++column) {
+                mtp_positions[column] = context - width + column;
+            }
+            DeviceBuffer mtp_position(mtp_positions.size() * sizeof(std::int32_t));
+            mtp_position.copy_from_host(mtp_positions.data(), mtp_position.bytes);
+            DeviceBuffer mtp_valid(sizeof(std::int32_t));
+            mtp_valid.copy_from_host(&width, sizeof(width));
+            Tensor mq(mtp_query.p, DType::BF16, {kD, kQueryHeads, width, 1});
+            Tensor mk(mtp_key.p, DType::BF16, {kD, kKvHeads, width, 1});
+            Tensor mv(mtp_value.p, DType::BF16, {kD, kKvHeads, width, 1});
+            Tensor mo(mtp_output.p, DType::BF16, {kD, kQueryHeads, width, 1});
+            Tensor mp(mtp_position.p, DType::I32, {width, 1});
+            Tensor mc(mtp_valid.p, DType::I32, {1});
+            WorkspaceArena mtp_workspace(ops::kvarn_attention_workspace_capacity_bytes(
+                kQueryHeads,
+                {static_cast<std::uint32_t>(context), static_cast<std::uint32_t>(context)}, 1,
+                width, width));
+            const auto mtp_timing = bench::measure_launch(
+                [&](cudaStream_t stream) {
+                    ops::kvarn_attention(
+                        mq, mk, mv, mp, mc, row_tensor, 0.0625F, cache, true,
+                        {static_cast<std::uint32_t>(context), static_cast<std::uint32_t>(context)},
+                        mtp_workspace, mo, stream);
+                },
+                nullptr, 5, 30);
+            std::printf("mtp%d_context=%d width=%d median_us=%.3f min_us=%.3f p95_us=%.3f\n",
+                        width - 1, context, width, mtp_timing.median_us, mtp_timing.min_us,
+                        mtp_timing.p95_us);
+        };
+        measure_mtp(4);
+        measure_mtp(6);
 
         const int prefill = std::min(context, 1024);
         DeviceBuffer prefill_query =

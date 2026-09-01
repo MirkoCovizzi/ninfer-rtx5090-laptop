@@ -145,6 +145,8 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
             add_shifted(visible_end, draft_window + 1);
         }
     }
+    // Keep the profile below the high-depth KVarN paired-column crossover on the scalar kernel.
+    add_shifted(122880U, draft_window + 1);
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
     return graph_profiles_through(capacity - 1, ends);

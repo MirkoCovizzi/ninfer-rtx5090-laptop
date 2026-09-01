@@ -82,15 +82,15 @@ void launch_prefill(const Tensor& query, const Tensor& positions, const Tensor& 
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename Geometry, bool MultiBatch, bool Masked>
+template <typename Geometry, bool MultiBatch, bool Masked, int ColumnsPerBlock>
 void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& valid_columns,
                     const Tensor& table_rows, float scale, KvarnPagedBatchLayerView cache,
                     CausalAttentionExecutionEnvelope envelope, int column_begin, int width,
                     int splits, Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
                     Tensor& output, cudaStream_t stream) {
-    const dim3 grid(Geometry::KVHeads, splits, query.ne[3] * width);
-    detail::attention_decode_kernel<Geometry, MultiBatch, Masked>
-        <<<grid, detail::kDecodeWarps * 32, 0, stream>>>(
+    const dim3 grid(Geometry::KVHeads, splits, query.ne[3] * div_up(width, ColumnsPerBlock));
+    detail::attention_decode_kernel<Geometry, MultiBatch, Masked, ColumnsPerBlock>
+        <<<grid, detail::kDecodeWarps * ColumnsPerBlock * 32, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(query.data),
             static_cast<const std::uint8_t*>(cache.records.data),
             static_cast<const __nv_bfloat16*>(cache.tail_k.data),
@@ -107,15 +107,14 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
 
     const dim3 reduce_grid(Geometry::QHeads, 1, width * query.ne[3]);
     const auto reduce = [&]<bool PerTokenSplits>() {
-        detail::reduce_output_hadamard_kernel<Geometry, MultiBatch, Masked, PerTokenSplits>
-            <<<reduce_grid, D, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(partial_acc.data),
-                static_cast<const float*>(partial_m.data),
-                static_cast<const float*>(partial_l.data),
-                static_cast<const std::int32_t*>(positions.data),
-                Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr, width,
-                query.ne[2], column_begin, query.ne[3], splits,
-                static_cast<__nv_bfloat16*>(output.data));
+        detail::reduce_output_hadamard_kernel<Geometry, MultiBatch, Masked, PerTokenSplits,
+                                              ColumnsPerBlock == 2><<<reduce_grid, D, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(partial_acc.data),
+            static_cast<const float*>(partial_m.data), static_cast<const float*>(partial_l.data),
+            static_cast<const std::int32_t*>(positions.data),
+            Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr, width,
+            query.ne[2], column_begin, query.ne[3], splits,
+            static_cast<__nv_bfloat16*>(output.data));
     };
     // Preserve the measured W=1 reducer code while wider chunks select splits per query column.
     if (width == 1) {
@@ -177,24 +176,29 @@ void decode_attention(const Tensor& query, const Tensor& positions, const Tensor
         const bool multi    = query.ne[3] > 1;
         const bool masked   = valid_columns.data != nullptr;
         const auto dispatch = [&]<typename Geometry>() {
+            const bool pair_columns = Geometry::QHeads == CausalD256H24Kv4::QHeads && width > 1 &&
+                                      envelope.max_visible_keys > DecodeMidWindow;
+            const auto launch = [&]<bool MultiBatch, bool Masked>() {
+                if (pair_columns) {
+                    launch_partial<Geometry, MultiBatch, Masked, 2>(
+                        query, positions, valid_columns, table_rows, scale, cache, envelope, begin,
+                        width, splits, acc, m, l, output, stream);
+                } else {
+                    launch_partial<Geometry, MultiBatch, Masked, 1>(
+                        query, positions, valid_columns, table_rows, scale, cache, envelope, begin,
+                        width, splits, acc, m, l, output, stream);
+                }
+            };
             if (multi) {
                 if (masked) {
-                    launch_partial<Geometry, true, true>(query, positions, valid_columns,
-                                                         table_rows, scale, cache, envelope, begin,
-                                                         width, splits, acc, m, l, output, stream);
+                    launch.template operator()<true, true>();
                 } else {
-                    launch_partial<Geometry, true, false>(query, positions, valid_columns,
-                                                          table_rows, scale, cache, envelope, begin,
-                                                          width, splits, acc, m, l, output, stream);
+                    launch.template operator()<true, false>();
                 }
             } else if (masked) {
-                launch_partial<Geometry, false, true>(query, positions, valid_columns, table_rows,
-                                                      scale, cache, envelope, begin, width, splits,
-                                                      acc, m, l, output, stream);
+                launch.template operator()<false, true>();
             } else {
-                launch_partial<Geometry, false, false>(query, positions, valid_columns, table_rows,
-                                                       scale, cache, envelope, begin, width, splits,
-                                                       acc, m, l, output, stream);
+                launch.template operator()<false, false>();
             }
         };
         if (query.ne[1] == CausalD256H24Kv4::QHeads) {

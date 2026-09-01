@@ -214,8 +214,8 @@ stage_decode_value(__nv_bfloat16* destination, const std::uint8_t* packed_v,
     }
 }
 
-template <typename Geometry, bool MultiBatch, bool Masked>
-__launch_bounds__(kDecodeWarps * 32, 2) __global__
+template <typename Geometry, bool MultiBatch, bool Masked, int ColumnsPerBlock = 1>
+__launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __global__
     void attention_decode_kernel(const __nv_bfloat16* q, const std::uint8_t* records,
                                  const __nv_bfloat16* tail_k, const __nv_bfloat16* tail_v,
                                  const std::int32_t* markers, const std::int32_t* positions,
@@ -225,26 +225,28 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
                                  std::int32_t full_width, std::int32_t column_begin,
                                  std::int32_t logical_capacity, std::int32_t heads, float scale,
                                  __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
-    constexpr int Wc            = kDecodeWarps;
-    constexpr int ProducerWarps = 1;
-    constexpr int Br            = 16;
-    constexpr int Bc            = kDecodeBc;
-    constexpr int Threads       = Wc * 32;
-    constexpr int QKNt          = Bc / 8;
-    constexpr int QKKs          = D / 16;
-    constexpr int PVNt          = D / 8;
-    constexpr int ConsumerWarps = Wc - ProducerWarps;
-    constexpr int PVNtPerWarp   = div_up(PVNt, ConsumerWarps);
-    constexpr int PVKs          = Bc / 16;
-    constexpr int PageIds       = 64;
-    constexpr float Log2E       = 1.4426950408889634074f;
-    constexpr unsigned FullMask = 0xffffffffu;
+    static_assert(ColumnsPerBlock == 1 || ColumnsPerBlock == 2);
+    constexpr int WarpsPerColumn         = kDecodeWarps;
+    constexpr int Wc                     = WarpsPerColumn * ColumnsPerBlock;
+    constexpr int Br                     = 16;
+    constexpr int Bc                     = kDecodeBc;
+    constexpr int Threads                = Wc * 32;
+    constexpr int QKNt                   = Bc / 8;
+    constexpr int QKKs                   = D / 16;
+    constexpr int PVNt                   = D / 8;
+    constexpr int ConsumerWarpsPerColumn = WarpsPerColumn - 1;
+    constexpr int ConsumerWarps          = ConsumerWarpsPerColumn * ColumnsPerBlock;
+    constexpr int PVNtPerWarp            = div_up(PVNt, ConsumerWarpsPerColumn);
+    constexpr int PVKs                   = Bc / 16;
+    constexpr int PageIds                = 64;
+    constexpr float Log2E                = 1.4426950408889634074f;
+    constexpr unsigned FullMask          = 0xffffffffu;
     static_assert(Group == 2 * Bc);
     static_assert(Geometry::GroupSize <= Br);
 
     __shared__ __align__(16) __nv_bfloat16 qkv_s[2 * Bc * D];
-    __shared__ __align__(16) __nv_bfloat16 p_s[Br * Bc];
-    __shared__ float alpha_s[Br];
+    __shared__ __align__(16) __nv_bfloat16 p_s[ColumnsPerBlock * Br * Bc];
+    __shared__ float alpha_s[ColumnsPerBlock * Br];
     __shared__ __align__(16) unsigned packed_k_s[kPackedKWords];
     __shared__ __align__(16) std::uint8_t packed_v_s[kPackedVBytes];
     __shared__ DecodeRecordMetadata metadata_s;
@@ -254,19 +256,22 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
 
     const int kv_head        = static_cast<int>(blockIdx.x);
     const int split          = static_cast<int>(blockIdx.y);
-    const int flat_column    = static_cast<int>(blockIdx.z);
-    const int batch          = MultiBatch ? flat_column / tokens : 0;
-    const int column         = MultiBatch ? flat_column - batch * tokens : flat_column;
+    const int flat_group     = static_cast<int>(blockIdx.z);
+    const int column_groups  = div_up(tokens, ColumnsPerBlock);
+    const int batch          = MultiBatch ? flat_group / column_groups : 0;
+    const int column_group   = MultiBatch ? flat_group - batch * column_groups : flat_group;
     const int split_count    = static_cast<int>(gridDim.y);
     const int tid            = static_cast<int>(threadIdx.x);
     const int warp           = tid >> 5;
     const int lane           = tid & 31;
+    const int group_lane     = warp / WarpsPerColumn;
+    const int local_warp     = warp - group_lane * WarpsPerColumn;
+    const int local_tid      = local_warp * 32 + lane;
+    const int column         = column_group * ColumnsPerBlock + group_lane;
     const int row_count      = Geometry::GroupSize;
     const int current_column = column_begin + column;
     const std::int64_t column_base =
         current_column + (MultiBatch ? static_cast<std::int64_t>(batch) * full_width : 0);
-    q += static_cast<std::int64_t>(D) * Geometry::QHeads * column_base;
-    positions += column_base;
     const int table_row = table_rows == nullptr ? 0 : table_rows[batch];
     const std::int32_t* block_table =
         block_tables + static_cast<std::int64_t>(table_row) * table_stride;
@@ -278,13 +283,13 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
     }
 
     auto write_neutral = [&]() {
-        for (int row = tid; row < row_count; row += Threads) {
+        for (int row = local_tid; row < row_count; row += WarpsPerColumn * 32) {
             const int q_head = kv_head * Geometry::GroupSize + row;
             partial_m[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] =
                 -CUDART_INF_F;
             partial_l[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = 0.0f;
         }
-        for (int index = tid; index < row_count * D; index += Threads) {
+        for (int index = local_tid; index < row_count * D; index += WarpsPerColumn * 32) {
             const int row    = index / D;
             const int d      = index % D;
             const int q_head = kv_head * Geometry::GroupSize + row;
@@ -293,17 +298,24 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
         }
     };
 
-    const bool valid = !Masked || current_column < valid_columns[batch];
-    if (!valid || kv_head >= Geometry::KVHeads || column >= tokens || split_count <= 0) {
+    const int valid_tokens = Masked ? min(tokens, valid_columns[batch] - column_begin) : tokens;
+    const bool valid       = column < tokens && column < valid_tokens;
+    if (kv_head >= Geometry::KVHeads || column_group * ColumnsPerBlock >= valid_tokens ||
+        split_count <= 0) {
         if (kv_head < Geometry::KVHeads && column < tokens) { write_neutral(); }
         return;
     }
-    const int query_position = positions[0];
-    if (query_position < 0 || query_position >= logical_capacity) {
-        write_neutral();
+    const int anchor_column =
+        min(column_group * ColumnsPerBlock + ColumnsPerBlock - 1, min(tokens, valid_tokens) - 1);
+    const std::int64_t batch_column_base =
+        MultiBatch ? static_cast<std::int64_t>(batch) * full_width : 0;
+    const int query_position  = valid ? positions[batch_column_base + current_column] : -1;
+    const int anchor_position = positions[batch_column_base + column_begin + anchor_column];
+    if (anchor_position < 0 || anchor_position >= logical_capacity) {
+        if (column < tokens) { write_neutral(); }
         return;
     }
-    const int window        = query_position + 1;
+    const int window        = anchor_position + 1;
     const int active_splits = kvarn_decode_active_splits<Geometry>(window, split_count, tokens);
     if (split >= active_splits) { return; }
     const int logical_tiles = div_up(window, Bc);
@@ -323,12 +335,15 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
     for (int page = tid; page < page_count; page += Threads) {
         physical_pages_s[page] = block_table[first_page + page];
     }
-    for (int index = tid; index < Br * D; index += Threads) {
+    for (int index = local_tid; index < Br * D; index += WarpsPerColumn * 32) {
         const int row    = index / D;
         const int d      = index % D;
         const int q_head = kv_head * Geometry::GroupSize + row;
-        qkv_s[row * D + causal_small_t_tc_swz(row, d)] =
-            row < row_count ? q[causal_q_index<Geometry>(q_head, d)] : __float2bfloat16(0.0f);
+        qkv_s[(group_lane * Br + row) * D + causal_small_t_tc_swz(row, d)] =
+            valid && row < row_count
+                ? q[static_cast<std::int64_t>(D) * Geometry::QHeads * column_base +
+                    causal_q_index<Geometry>(q_head, d)]
+                : __float2bfloat16(0.0f);
     }
     __syncthreads();
 
@@ -348,20 +363,20 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
         float accumulator[PVNtPerWarp][4];
     } warp_state;
 
-    if (warp == 0) {
+    if (local_warp == 0) {
 #pragma unroll
         for (int k = 0; k < QKKs; ++k) {
             const int query_col = k * 16 + a_coloff;
-            ldmatrix_x4(
-                warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
-                warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
-                smem_addr(&qkv_s[a_rowoff * D + causal_small_t_tc_swz(a_rowoff, query_col)]));
+            ldmatrix_x4(warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
+                        warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
+                        smem_addr(&qkv_s[(group_lane * Br + a_rowoff) * D +
+                                         causal_small_t_tc_swz(a_rowoff, query_col)]));
         }
     }
     __syncthreads();
 
     int physical_page = physical_pages_s[0];
-    if (warp >= ProducerWarps) {
+    if (local_warp != 0) {
 #pragma unroll
         for (int n = 0; n < PVNtPerWarp; ++n) {
 #pragma unroll
@@ -385,7 +400,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
                          k0, max(k0, split_start), min(k0 + Bc, split_end), tid, Threads);
         __syncthreads();
 
-        if (warp == 0) {
+        if (local_warp == 0) {
             float score[QKNt][4];
 #pragma unroll
             for (int tile = 0; tile < QKNt; ++tile) {
@@ -459,11 +474,14 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
                                       : 0.0f;
                 block_l0 += p00 + p01;
                 block_l1 += p10 + p11;
-                p_s[gid * Bc + causal_small_t_tc_swz32(gid, col0)] = __float2bfloat16(p00);
-                p_s[gid * Bc + causal_small_t_tc_swz32(gid, col1)] = __float2bfloat16(p01);
-                p_s[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col0)] =
+                const int probability_base = group_lane * Br * Bc;
+                p_s[probability_base + gid * Bc + causal_small_t_tc_swz32(gid, col0)] =
+                    __float2bfloat16(p00);
+                p_s[probability_base + gid * Bc + causal_small_t_tc_swz32(gid, col1)] =
+                    __float2bfloat16(p01);
+                p_s[probability_base + (gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col0)] =
                     __float2bfloat16(p10);
-                p_s[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col1)] =
+                p_s[probability_base + (gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col1)] =
                     __float2bfloat16(p11);
             }
             block_l0 = warp_sum<4>(block_l0, FullMask);
@@ -473,22 +491,23 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
             m0       = next_m0;
             m1       = next_m1;
             if (lid == 0) {
-                alpha_s[row0] = alpha0;
-                alpha_s[row1] = alpha1;
+                alpha_s[group_lane * Br + row0] = alpha0;
+                alpha_s[group_lane * Br + row1] = alpha1;
             }
         } else {
-            const int worker_tid = tid - ProducerWarps * 32;
+            const int worker_warp = warp - group_lane - 1;
+            const int worker_tid  = worker_warp * 32 + lane;
             stage_decode_value(v_s, packed_v_s, &metadata_s, tail_v, table_row, tail_slot, heads,
                                kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end),
                                worker_tid, ConsumerWarps * 32);
         }
         __syncthreads();
 
-        if (warp >= ProducerWarps) {
-            const int consumer_warp = warp - ProducerWarps;
+        if (local_warp != 0) {
+            const int consumer_warp = local_warp - 1;
             const int output_tile   = consumer_warp * PVNtPerWarp;
-            const float alpha0      = alpha_s[gid];
-            const float alpha1      = alpha_s[gid + 8];
+            const float alpha0      = alpha_s[group_lane * Br + gid];
+            const float alpha1      = alpha_s[group_lane * Br + gid + 8];
 #pragma unroll
             for (int n = 0; n < PVNtPerWarp; ++n) {
                 warp_state.accumulator[n][0] *= alpha0;
@@ -504,10 +523,11 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
                 for (int k = 0; k < PVKs; ++k) {
                     unsigned probability_fragment[4];
                     const int probability_col = k * 16 + a_coloff;
-                    ldmatrix_x4(probability_fragment[0], probability_fragment[1],
-                                probability_fragment[2], probability_fragment[3],
-                                smem_addr(&p_s[a_rowoff * Bc + causal_small_t_tc_swz32(
-                                                                   a_rowoff, probability_col)]));
+                    ldmatrix_x4(
+                        probability_fragment[0], probability_fragment[1], probability_fragment[2],
+                        probability_fragment[3],
+                        smem_addr(&p_s[group_lane * Br * Bc + a_rowoff * Bc +
+                                       causal_small_t_tc_swz32(a_rowoff, probability_col)]));
                     unsigned value_fragment[2];
                     const int value_row = k * 16 + b_koff + b_rin;
                     const int value_col = global_n * 8;
@@ -526,7 +546,7 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
         __syncthreads();
     }
 
-    if (warp == 0 && lid == 0) {
+    if (local_warp == 0 && lid == 0 && column < tokens) {
         const int row0 = gid;
         const int row1 = row0 + 8;
         if (row0 < row_count) {
@@ -540,8 +560,8 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
             partial_l[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = l1;
         }
     }
-    if (warp >= ProducerWarps) {
-        const int consumer_warp = warp - ProducerWarps;
+    if (local_warp != 0) {
+        const int consumer_warp = local_warp - 1;
 #pragma unroll
         for (int n = 0; n < PVNtPerWarp; ++n) {
             const int global_n = consumer_warp * PVNtPerWarp + n;
@@ -551,27 +571,33 @@ __launch_bounds__(kDecodeWarps * 32, 2) __global__
             const int row0 = gid;
             const int row1 = row0 + 8;
             if (row0 < row_count) {
-                qkv_s[row0 * D + d0] = __float2bfloat16(warp_state.accumulator[n][0]);
-                qkv_s[row0 * D + d1] = __float2bfloat16(warp_state.accumulator[n][1]);
+                qkv_s[(group_lane * Br + row0) * D + d0] =
+                    __float2bfloat16(warp_state.accumulator[n][0]);
+                qkv_s[(group_lane * Br + row0) * D + d1] =
+                    __float2bfloat16(warp_state.accumulator[n][1]);
             }
             if (row1 < row_count) {
-                qkv_s[row1 * D + d0] = __float2bfloat16(warp_state.accumulator[n][2]);
-                qkv_s[row1 * D + d1] = __float2bfloat16(warp_state.accumulator[n][3]);
+                qkv_s[(group_lane * Br + row1) * D + d0] =
+                    __float2bfloat16(warp_state.accumulator[n][2]);
+                qkv_s[(group_lane * Br + row1) * D + d1] =
+                    __float2bfloat16(warp_state.accumulator[n][3]);
             }
         }
     }
     __syncthreads();
-    for (int chunk = tid; chunk < row_count * (D / 8); chunk += Threads) {
+    if (column >= tokens) { return; }
+    for (int chunk = local_tid; chunk < row_count * (D / 8); chunk += WarpsPerColumn * 32) {
         const int row    = chunk / (D / 8);
         const int d      = (chunk % (D / 8)) * 8;
         const int q_head = kv_head * Geometry::GroupSize + row;
         const std::int64_t destination =
             causal_partial_acc_index<Geometry>(q_head, d, column, split, tokens);
-        store_vec(partial_acc + destination, load_vec<int4>(qkv_s + row * D + d));
+        store_vec(partial_acc + destination,
+                  load_vec<int4>(qkv_s + (group_lane * Br + row) * D + d));
     }
 }
 
-template <typename Geometry, bool MultiBatch, bool Masked, bool PerTokenSplits>
+template <typename Geometry, bool MultiBatch, bool Masked, bool PerTokenSplits, bool PairedSplits>
 __launch_bounds__(D) __global__
     void reduce_output_hadamard_kernel(const __nv_bfloat16* partial_acc, const float* partial_m,
                                        const float* partial_l, const std::int32_t* positions,
@@ -595,7 +621,15 @@ __launch_bounds__(D) __global__
 
     positions += column_begin;
     if constexpr (MultiBatch) { positions += batch * full_width; }
-    const int query_position = positions[PerTokenSplits ? token : tokens - 1];
+    int split_token = PerTokenSplits ? token : tokens - 1;
+    if constexpr (PairedSplits) {
+        const int valid_tokens = Masked ? min(tokens, valid_columns[batch] - column_begin) : tokens;
+        const int group_begin  = (token / 2) * 2;
+        if (group_begin < valid_tokens) {
+            split_token = min(group_begin + 1, min(tokens, valid_tokens) - 1);
+        }
+    }
+    const int query_position = positions[split_token];
     int output_column        = column_begin + token;
     if constexpr (MultiBatch) { output_column += batch * full_width; }
 
