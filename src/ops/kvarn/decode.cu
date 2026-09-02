@@ -181,8 +181,10 @@ void decode_attention(const Tensor& query, const Tensor& positions, const Tensor
         const bool multi    = query.ne[3] > 1;
         const bool masked   = valid_columns.data != nullptr;
         const auto dispatch = [&]<typename Geometry>() {
-            const bool pair_columns = Geometry::QHeads == CausalD256H24Kv4::QHeads && width > 1 &&
-                                      envelope.max_visible_keys > DecodeMidWindow;
+            const bool pair_columns =
+                Geometry::QHeads == CausalD256H24Kv4::QHeads && width > 1 &&
+                ((width == 4 && envelope.max_visible_keys > Mtp3PackedWindow) ||
+                 envelope.max_visible_keys > DecodeMidWindow);
             const auto launch = [&]<bool MultiBatch, bool Masked>() {
                 if (pair_columns) {
                     if (width == 4) {

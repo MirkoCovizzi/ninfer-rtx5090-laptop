@@ -1067,13 +1067,12 @@ int run_27b_attention_case() {
     return failures;
 }
 
-template <int Width, int Valid = Width>
+template <int Width, int Valid = Width, int Context = 122944>
 int run_27b_grouped_decode_case() {
     static_assert(Width >= 2 && Width <= 6);
     static_assert(Valid > 0 && Valid <= Width);
     constexpr int Heads        = 4;
     constexpr int QueryHeads   = 24;
-    constexpr int Context      = 122944;
     constexpr int LogicalPages = Context / kGroup;
 
     std::vector<std::uint8_t> host_records(static_cast<std::size_t>(ops::kKvarnRecordBytes) * Heads,
@@ -1152,7 +1151,7 @@ int run_27b_grouped_decode_case() {
             }
         }
     }
-    const std::string label = "KVarN H24/KV4 grouped high-depth width=" + std::to_string(Width) +
+    const std::string label = "KVarN H24/KV4 grouped decode width=" + std::to_string(Width) +
                               " valid=" + std::to_string(Valid);
     const auto compare = [&] {
         return compare_profile(label.c_str(), from_device_bf16(output, query.size()), expected,
@@ -1205,6 +1204,7 @@ int main() {
     failures += run_27b_grouped_decode_case<3>();
     failures += run_27b_grouped_decode_case<4>();
     failures += run_27b_grouped_decode_case<4, 3>();
+    failures += run_27b_grouped_decode_case<4, 4, 4096>();
     failures += run_27b_grouped_decode_case<5>();
     failures += run_27b_grouped_decode_case<6>();
     failures += run_35b_attention_case();
