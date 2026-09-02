@@ -2,6 +2,7 @@
 #include "ninfer/ops/kvarn_attention.h"
 #include "ops/op_tester.h"
 #include "ops/kvarn/config.cuh"
+#include "ops/kvarn/decode.cuh"
 
 #include <algorithm>
 #include <cmath>
@@ -1066,10 +1067,12 @@ int run_27b_attention_case() {
     return failures;
 }
 
-int run_27b_paired_decode_case() {
+template <int Width, int Valid = Width>
+int run_27b_grouped_decode_case() {
+    static_assert(Width >= 2 && Width <= 6);
+    static_assert(Valid > 0 && Valid <= Width);
     constexpr int Heads        = 4;
     constexpr int QueryHeads   = 24;
-    constexpr int Width        = 2;
     constexpr int Context      = 122944;
     constexpr int LogicalPages = Context / kGroup;
 
@@ -1088,9 +1091,23 @@ int run_27b_paired_decode_case() {
     }
 
     DeviceBuffer records = to_device(host_records);
-    DeviceBuffer tail_k(static_cast<std::size_t>(kD) * kGroup * Heads * ops::kKvarnTailSlots * 2);
-    DeviceBuffer tail_v(static_cast<std::size_t>(kD) * kGroup * Heads * ops::kKvarnTailSlots * 2);
-    DeviceBuffer markers = to_device(std::vector<std::int32_t>(ops::kKvarnTailSlots, -1));
+    const std::size_t tail_values =
+        static_cast<std::size_t>(kD) * kGroup * Heads * ops::kKvarnTailSlots;
+    std::vector<float> host_tail_k(tail_values, 0.0F);
+    std::vector<float> host_tail_v(tail_values, 0.0F);
+    for (int head = 0; head < Heads; ++head) {
+        for (int column = 0; column < Width; ++column) {
+            const int token         = kGroup - Width + column;
+            const std::size_t index = static_cast<std::size_t>(kD) * (token + kGroup * head);
+            host_tail_k[index]      = 64.0F;
+            host_tail_v[index]      = static_cast<float>((column + 1) * (head + 1));
+        }
+    }
+    DeviceBuffer tail_k = to_device_bf16(host_tail_k);
+    DeviceBuffer tail_v = to_device_bf16(host_tail_v);
+    std::vector<std::int32_t> host_markers(ops::kKvarnTailSlots, -1);
+    host_markers[0]      = LogicalPages - 1;
+    DeviceBuffer markers = to_device(host_markers);
     DeviceBuffer tables  = to_device(std::vector<std::int32_t>(LogicalPages, 0));
     const ops::KvarnPagedBatchLayerView cache{
         .records =
@@ -1102,50 +1119,62 @@ int run_27b_paired_decode_case() {
         .num_kv_heads       = Heads,
     };
 
-    const std::vector<float> query = make_cache_values(QueryHeads * Width, 0x5201U);
-    DeviceBuffer device_query      = to_device_bf16(query);
-    DeviceBuffer original_query    = to_device_bf16(query);
+    const std::vector<float> query(static_cast<std::size_t>(kD) * QueryHeads * Width, 1.0F);
+    DeviceBuffer device_query   = to_device_bf16(query);
+    DeviceBuffer original_query = to_device_bf16(query);
     DeviceBuffer output(query.size() * sizeof(std::uint16_t));
-    DeviceBuffer positions = to_device(std::vector<std::int32_t>{Context - 2, Context - 1});
+    std::vector<std::int32_t> host_positions(Width);
+    std::iota(host_positions.begin(), host_positions.end(), Context - Width);
+    DeviceBuffer positions = to_device(host_positions);
     DeviceBuffer rows      = to_device(std::vector<std::int32_t>{0});
+    DeviceBuffer valid     = to_device(std::vector<std::int32_t>{Valid});
     Tensor query_tensor(device_query.p, DType::BF16, {kD, QueryHeads, Width, 1});
     Tensor output_tensor(output.p, DType::BF16, {kD, QueryHeads, Width, 1});
     Tensor position_tensor(positions.p, DType::I32, {Width, 1});
     Tensor rows_tensor(rows.p, DType::I32, {1});
-    const ops::CausalAttentionExecutionEnvelope envelope{Context - 1, Context};
+    Tensor valid_tensor(valid.p, DType::I32, {1});
+    const ops::CausalAttentionExecutionEnvelope envelope{Context - Width + 1, Context};
     WorkspaceArena workspace(
         ops::kvarn_attention_workspace_capacity_bytes(QueryHeads, envelope, 1, Width, Width));
-    ops::kvarn_attention_cached(query_tensor, position_tensor, rows_tensor, 0.0625F, cache,
-                                envelope, workspace, output_tensor, nullptr);
+    ops::kvarn::decode_attention(query_tensor, position_tensor, valid_tensor, rows_tensor, 0.0625F,
+                                 cache, envelope, workspace, output_tensor, nullptr);
     cuda_synchronize();
 
     std::vector<double> expected(query.size(), 0.0);
-    for (int column = 0; column < Width; ++column) {
+    for (int column = 0; column < Valid; ++column) {
         for (int head = 0; head < QueryHeads; ++head) {
-            expected[static_cast<std::size_t>(kD) * (head + QueryHeads * column)] = 16.0;
+            const float average =
+                static_cast<float>(column + 2) * 0.5F * static_cast<float>(head / 6 + 1);
+            const double value = bf16_to_f32(f32_to_bf16(average * 0.0625F));
+            for (int d = 0; d < kD; ++d) {
+                expected[static_cast<std::size_t>(d) +
+                         static_cast<std::size_t>(kD) * (head + QueryHeads * column)] = value;
+            }
         }
     }
+    const std::string label = "KVarN H24/KV4 grouped high-depth width=" + std::to_string(Width) +
+                              " valid=" + std::to_string(Valid);
     const auto compare = [&] {
-        return compare_profile("KVarN H24/KV4 paired high-depth decode",
-                               from_device_bf16(output, query.size()), expected, 1.0e-7);
+        return compare_profile(label.c_str(), from_device_bf16(output, query.size()), expected,
+                               1.0e-7);
     };
     int failures = compare();
 
     cudaStream_t stream        = nullptr;
     cudaGraph_t graph          = nullptr;
     cudaGraphExec_t executable = nullptr;
-    cuda_check(cudaStreamCreate(&stream), "create paired KVarN graph stream");
+    cuda_check(cudaStreamCreate(&stream), "create grouped KVarN graph stream");
     cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
-               "begin paired KVarN graph capture");
-    ops::kvarn_attention_cached(query_tensor, position_tensor, rows_tensor, 0.0625F, cache,
-                                envelope, workspace, output_tensor, stream);
-    cuda_check(cudaStreamEndCapture(stream, &graph), "end paired KVarN graph capture");
+               "begin grouped KVarN graph capture");
+    ops::kvarn::decode_attention(query_tensor, position_tensor, valid_tensor, rows_tensor, 0.0625F,
+                                 cache, envelope, workspace, output_tensor, stream);
+    cuda_check(cudaStreamEndCapture(stream, &graph), "end grouped KVarN graph capture");
     cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
-               "instantiate paired KVarN graph");
+               "instantiate grouped KVarN graph");
     cuda_check(cudaMemcpyAsync(device_query.p, original_query.p, original_query.bytes,
                                cudaMemcpyDeviceToDevice, stream),
-               "restore paired KVarN graph query");
-    cuda_check(cudaGraphLaunch(executable, stream), "launch paired KVarN graph");
+               "restore grouped KVarN graph query");
+    cuda_check(cudaGraphLaunch(executable, stream), "launch grouped KVarN graph");
     cuda_synchronize(stream);
     failures += compare();
     cudaGraphExecDestroy(executable);
@@ -1172,7 +1201,12 @@ int main() {
     failures += run_hadamard_case();
     failures += run_cache_lifecycle_case();
     failures += run_27b_attention_case();
-    failures += run_27b_paired_decode_case();
+    failures += run_27b_grouped_decode_case<2>();
+    failures += run_27b_grouped_decode_case<3>();
+    failures += run_27b_grouped_decode_case<4>();
+    failures += run_27b_grouped_decode_case<4, 3>();
+    failures += run_27b_grouped_decode_case<5>();
+    failures += run_27b_grouped_decode_case<6>();
     failures += run_35b_attention_case();
     failures += run_prefill_slab_boundary_case();
     failures += run_batched_attention_case<4>(24, "KVarN H24/KV4 B=2 attention");

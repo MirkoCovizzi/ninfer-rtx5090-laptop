@@ -173,8 +173,7 @@ int main(int argc, char** argv) {
                         width - 1, context, width, mtp_timing.median_us, mtp_timing.min_us,
                         mtp_timing.p95_us);
         };
-        measure_mtp(4);
-        measure_mtp(6);
+        for (int width = 2; width <= 6; ++width) { measure_mtp(width); }
 
         const int prefill = std::min(context, 1024);
         DeviceBuffer prefill_query =

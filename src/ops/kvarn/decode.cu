@@ -89,8 +89,13 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
                     int splits, Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
                     Tensor& output, cudaStream_t stream) {
     const dim3 grid(Geometry::KVHeads, splits, query.ne[3] * div_up(width, ColumnsPerBlock));
+    constexpr int query_groups = ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock;
+    constexpr std::size_t query_smem =
+        ColumnsPerBlock >= 3
+            ? static_cast<std::size_t>(query_groups) * detail::kDecodeBr * D * sizeof(__nv_bfloat16)
+            : 0;
     detail::attention_decode_kernel<Geometry, MultiBatch, Masked, ColumnsPerBlock>
-        <<<grid, detail::kDecodeWarps * ColumnsPerBlock * 32, 0, stream>>>(
+        <<<grid, detail::kDecodeWarps * query_groups * 32, query_smem, stream>>>(
             static_cast<const __nv_bfloat16*>(query.data),
             static_cast<const std::uint8_t*>(cache.records.data),
             static_cast<const __nv_bfloat16*>(cache.tail_k.data),
@@ -108,7 +113,7 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
     const dim3 reduce_grid(Geometry::QHeads, 1, width * query.ne[3]);
     const auto reduce = [&]<bool PerTokenSplits>() {
         detail::reduce_output_hadamard_kernel<Geometry, MultiBatch, Masked, PerTokenSplits,
-                                              ColumnsPerBlock == 2><<<reduce_grid, D, 0, stream>>>(
+                                              ColumnsPerBlock><<<reduce_grid, D, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(partial_acc.data),
             static_cast<const float*>(partial_m.data), static_cast<const float*>(partial_l.data),
             static_cast<const std::int32_t*>(positions.data),
@@ -180,9 +185,19 @@ void decode_attention(const Tensor& query, const Tensor& positions, const Tensor
                                       envelope.max_visible_keys > DecodeMidWindow;
             const auto launch = [&]<bool MultiBatch, bool Masked>() {
                 if (pair_columns) {
-                    launch_partial<Geometry, MultiBatch, Masked, 2>(
-                        query, positions, valid_columns, table_rows, scale, cache, envelope, begin,
-                        width, splits, acc, m, l, output, stream);
+                    if (width == 4) {
+                        launch_partial<Geometry, MultiBatch, Masked, 4>(
+                            query, positions, valid_columns, table_rows, scale, cache, envelope,
+                            begin, width, splits, acc, m, l, output, stream);
+                    } else if (width == 3 || width >= 5) {
+                        launch_partial<Geometry, MultiBatch, Masked, 3>(
+                            query, positions, valid_columns, table_rows, scale, cache, envelope,
+                            begin, width, splits, acc, m, l, output, stream);
+                    } else {
+                        launch_partial<Geometry, MultiBatch, Masked, 2>(
+                            query, positions, valid_columns, table_rows, scale, cache, envelope,
+                            begin, width, splits, acc, m, l, output, stream);
+                    }
                 } else {
                     launch_partial<Geometry, MultiBatch, Masked, 1>(
                         query, positions, valid_columns, table_rows, scale, cache, envelope, begin,

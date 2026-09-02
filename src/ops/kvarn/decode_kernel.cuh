@@ -15,6 +15,7 @@ namespace ninfer::ops::kvarn {
 namespace detail {
 
 inline constexpr int kDecodeBc            = 32;
+inline constexpr int kDecodeBr            = 16;
 inline constexpr int kDecodeWarps         = 8;
 inline constexpr int kPackedKWordsPerHalf = 4;
 inline constexpr int kPackedKWords        = 2 * kPackedKWordsPerHalf * D;
@@ -95,6 +96,67 @@ __device__ __forceinline__ void stage_decode_record(unsigned* packed_k, std::uin
         }
     }
     __syncthreads();
+}
+
+__device__ __forceinline__ void
+stage_decode_key_quad(__nv_bfloat16* destination, const unsigned* packed_k,
+                      const DecodeRecordMetadata* metadata, const __nv_bfloat16* tail_k,
+                      int table_row, int tail_slot, int heads, int head, int logical_begin,
+                      int valid_begin, int valid_end, int tid) {
+    constexpr int Bc     = kDecodeBc;
+    const int token_base = logical_begin & (Group - 1);
+    if (tail_slot >= 0) {
+        for (int chunk = tid; chunk < Bc * (D / 8); chunk += 2 * D) {
+            const int token       = chunk / (D / 8);
+            const int d           = (chunk % (D / 8)) * 8;
+            __nv_bfloat16* output = destination + token * D + causal_small_t_tc_swz(token, d);
+            const int position    = logical_begin + token;
+            if (position < valid_begin || position >= valid_end) {
+                store_vec(output, make_int4(0, 0, 0, 0));
+                continue;
+            }
+            const std::int64_t source =
+                static_cast<std::int64_t>(d) +
+                static_cast<std::int64_t>(D) *
+                    (token_base + token +
+                     Group * (head + heads * (tail_slot + kKvarnTailSlots * table_row)));
+            store_vec(output, load_vec<int4>(tail_k + source));
+        }
+        return;
+    }
+
+    const int record_half = token_base / Bc;
+    const int segment     = tid / D;
+    const int dim         = tid & (D - 1);
+    const int word_base   = record_half * kPackedKWordsPerHalf;
+    const int4 packed     = make_int4(static_cast<int>(packed_k[(word_base + 0) * D + dim]),
+                                      static_cast<int>(packed_k[(word_base + 1) * D + dim]),
+                                      static_cast<int>(packed_k[(word_base + 2) * D + dim]),
+                                      static_cast<int>(packed_k[(word_base + 3) * D + dim]));
+    const float scale     = __half2float(metadata->k_scale[dim]);
+    const float zero      = __half2float(metadata->k_zero[dim]);
+#pragma unroll
+    for (int pair = segment; pair < Bc / 2; pair += 2) {
+        const int token      = 2 * pair;
+        const int word_index = pair >> 2;
+        const unsigned word  = word_index == 0   ? static_cast<unsigned>(packed.x)
+                               : word_index == 1 ? static_cast<unsigned>(packed.y)
+                               : word_index == 2 ? static_cast<unsigned>(packed.z)
+                                                 : static_cast<unsigned>(packed.w);
+        const unsigned codes = (word >> (8 * (pair & 3))) & 0xffU;
+        const auto token_scales =
+            *reinterpret_cast<const float2*>(metadata->k_token_scale + token_base + token);
+        const float decoded0 = fmaf(static_cast<float>(codes & 15U), scale, zero) * token_scales.x;
+        const float decoded1 = fmaf(static_cast<float>(codes >> 4), scale, zero) * token_scales.y;
+        const int position0  = logical_begin + token;
+        const int position1  = position0 + 1;
+        destination[token * D + causal_small_t_tc_swz(token, dim)] =
+            position0 >= valid_begin && position0 < valid_end ? __float2bfloat16_rn(decoded0)
+                                                              : __float2bfloat16_rn(0.0F);
+        destination[(token + 1) * D + causal_small_t_tc_swz(token + 1, dim)] =
+            position1 >= valid_begin && position1 < valid_end ? __float2bfloat16_rn(decoded1)
+                                                              : __float2bfloat16_rn(0.0F);
+    }
 }
 
 __device__ __forceinline__ void
@@ -215,7 +277,8 @@ stage_decode_value(__nv_bfloat16* destination, const std::uint8_t* packed_v,
 }
 
 template <typename Geometry, bool MultiBatch, bool Masked, int ColumnsPerBlock = 1>
-__launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __global__
+__launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32,
+                  ColumnsPerBlock == 1 ? 2 : 1) __global__
     void attention_decode_kernel(const __nv_bfloat16* q, const std::uint8_t* records,
                                  const __nv_bfloat16* tail_k, const __nv_bfloat16* tail_v,
                                  const std::int32_t* markers, const std::int32_t* positions,
@@ -225,17 +288,19 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
                                  std::int32_t full_width, std::int32_t column_begin,
                                  std::int32_t logical_capacity, std::int32_t heads, float scale,
                                  __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
-    static_assert(ColumnsPerBlock == 1 || ColumnsPerBlock == 2);
+    static_assert(ColumnsPerBlock >= 1 && ColumnsPerBlock <= 4);
+    constexpr int ColumnsPerMma          = ColumnsPerBlock == 4 ? 2 : 1;
+    constexpr int WarpGroups             = ColumnsPerBlock / ColumnsPerMma;
     constexpr int WarpsPerColumn         = kDecodeWarps;
-    constexpr int Wc                     = WarpsPerColumn * ColumnsPerBlock;
-    constexpr int Br                     = 16;
+    constexpr int Wc                     = WarpsPerColumn * WarpGroups;
+    constexpr int Br                     = kDecodeBr;
     constexpr int Bc                     = kDecodeBc;
     constexpr int Threads                = Wc * 32;
     constexpr int QKNt                   = Bc / 8;
     constexpr int QKKs                   = D / 16;
     constexpr int PVNt                   = D / 8;
     constexpr int ConsumerWarpsPerColumn = WarpsPerColumn - 1;
-    constexpr int ConsumerWarps          = ConsumerWarpsPerColumn * ColumnsPerBlock;
+    constexpr int ConsumerWarps          = ConsumerWarpsPerColumn * WarpGroups;
     constexpr int PVNtPerWarp            = div_up(PVNt, ConsumerWarpsPerColumn);
     constexpr int PVKs                   = Bc / 16;
     constexpr int PageIds                = 64;
@@ -245,12 +310,13 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
     static_assert(Geometry::GroupSize <= Br);
 
     __shared__ __align__(16) __nv_bfloat16 qkv_s[2 * Bc * D];
-    __shared__ __align__(16) __nv_bfloat16 p_s[ColumnsPerBlock * Br * Bc];
-    __shared__ float alpha_s[ColumnsPerBlock * Br];
+    __shared__ __align__(16) __nv_bfloat16 p_s[WarpGroups * Br * Bc];
+    __shared__ float alpha_s[WarpGroups * Br];
     __shared__ __align__(16) unsigned packed_k_s[kPackedKWords];
     __shared__ __align__(16) std::uint8_t packed_v_s[kPackedVBytes];
     __shared__ DecodeRecordMetadata metadata_s;
     __shared__ std::int32_t physical_pages_s[PageIds];
+    extern __shared__ __align__(16) __nv_bfloat16 query_s[];
     __nv_bfloat16* k_s = qkv_s;
     __nv_bfloat16* v_s = qkv_s + Bc * D;
 
@@ -267,7 +333,7 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
     const int group_lane     = warp / WarpsPerColumn;
     const int local_warp     = warp - group_lane * WarpsPerColumn;
     const int local_tid      = local_warp * 32 + lane;
-    const int column         = column_group * ColumnsPerBlock + group_lane;
+    const int column         = column_group * ColumnsPerBlock + group_lane * ColumnsPerMma;
     const int row_count      = Geometry::GroupSize;
     const int current_column = column_begin + column;
     const std::int64_t column_base =
@@ -283,23 +349,29 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
     }
 
     auto write_neutral = [&]() {
-        for (int row = local_tid; row < row_count; row += WarpsPerColumn * 32) {
-            const int q_head = kv_head * Geometry::GroupSize + row;
-            partial_m[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] =
-                -CUDART_INF_F;
-            partial_l[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = 0.0f;
-        }
-        for (int index = local_tid; index < row_count * D; index += WarpsPerColumn * 32) {
-            const int row    = index / D;
-            const int d      = index % D;
-            const int q_head = kv_head * Geometry::GroupSize + row;
-            partial_acc[causal_partial_acc_index<Geometry>(q_head, d, column, split, tokens)] =
-                __float2bfloat16(0.0f);
+        for (int packed_column = 0; packed_column < ColumnsPerMma; ++packed_column) {
+            const int output_column = column + packed_column;
+            if (output_column >= tokens) { continue; }
+            for (int row = local_tid; row < row_count; row += WarpsPerColumn * 32) {
+                const int q_head = kv_head * Geometry::GroupSize + row;
+                partial_m[causal_partial_stat_index<Geometry>(q_head, output_column, split,
+                                                              tokens)] = -CUDART_INF_F;
+                partial_l[causal_partial_stat_index<Geometry>(q_head, output_column, split,
+                                                              tokens)] = 0.0f;
+            }
+            for (int index = local_tid; index < row_count * D; index += WarpsPerColumn * 32) {
+                const int row    = index / D;
+                const int d      = index % D;
+                const int q_head = kv_head * Geometry::GroupSize + row;
+                partial_acc[causal_partial_acc_index<Geometry>(q_head, d, output_column, split,
+                                                               tokens)] = __float2bfloat16(0.0f);
+            }
         }
     };
 
     const int valid_tokens = Masked ? min(tokens, valid_columns[batch] - column_begin) : tokens;
-    const bool valid       = column < tokens && column < valid_tokens;
+    const bool valid0      = column < tokens && column < valid_tokens;
+    const bool valid1      = ColumnsPerMma == 2 && column + 1 < tokens && column + 1 < valid_tokens;
     if (kv_head >= Geometry::KVHeads || column_group * ColumnsPerBlock >= valid_tokens ||
         split_count <= 0) {
         if (kv_head < Geometry::KVHeads && column < tokens) { write_neutral(); }
@@ -309,7 +381,8 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
         min(column_group * ColumnsPerBlock + ColumnsPerBlock - 1, min(tokens, valid_tokens) - 1);
     const std::int64_t batch_column_base =
         MultiBatch ? static_cast<std::int64_t>(batch) * full_width : 0;
-    const int query_position  = valid ? positions[batch_column_base + current_column] : -1;
+    const int query_position0 = valid0 ? positions[batch_column_base + current_column] : -1;
+    const int query_position1 = valid1 ? positions[batch_column_base + current_column + 1] : -1;
     const int anchor_position = positions[batch_column_base + column_begin + anchor_column];
     if (anchor_position < 0 || anchor_position >= logical_capacity) {
         if (column < tokens) { write_neutral(); }
@@ -336,12 +409,17 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
         physical_pages_s[page] = block_table[first_page + page];
     }
     for (int index = local_tid; index < Br * D; index += WarpsPerColumn * 32) {
-        const int row    = index / D;
-        const int d      = index % D;
-        const int q_head = kv_head * Geometry::GroupSize + row;
-        qkv_s[(group_lane * Br + row) * D + causal_small_t_tc_swz(row, d)] =
+        const int stage_row              = index / D;
+        const int d                      = index % D;
+        const int packed_column          = ColumnsPerMma == 2 ? stage_row >> 3 : 0;
+        const int row                    = ColumnsPerMma == 2 ? stage_row & 7 : stage_row;
+        const bool valid                 = packed_column == 0 ? valid0 : valid1;
+        const int q_head                 = kv_head * Geometry::GroupSize + row;
+        const std::int64_t source_column = column_base + packed_column;
+        __nv_bfloat16* query_stage       = ColumnsPerBlock >= 3 ? query_s : qkv_s;
+        query_stage[(group_lane * Br + stage_row) * D + causal_small_t_tc_swz(stage_row, d)] =
             valid && row < row_count
-                ? q[static_cast<std::int64_t>(D) * Geometry::QHeads * column_base +
+                ? q[static_cast<std::int64_t>(D) * Geometry::QHeads * source_column +
                     causal_q_index<Geometry>(q_head, d)]
                 : __float2bfloat16(0.0f);
     }
@@ -356,21 +434,23 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
     const int b_rin    = lane & 7;
     const int b_koff   = ((lane >> 3) & 1) << 3;
 
-    // Both admitted GQA groups fit one MMA row tile. The producer retains Q fragments while the
-    // other seven warps partition the valid PV tile, keeping two CTAs resident without spills.
+    // Each warp group uses one QK producer and seven PV consumers. The four-column route packs two
+    // six-head columns into the MMA row halves; other routes assign one column per warp group.
     union {
-        unsigned query_fragment[QKKs][4];
+        unsigned query_fragment[ColumnsPerBlock >= 3 ? 1 : QKKs][4];
         float accumulator[PVNtPerWarp][4];
     } warp_state;
 
-    if (local_warp == 0) {
+    if constexpr (ColumnsPerBlock < 3) {
+        if (local_warp == 0) {
 #pragma unroll
-        for (int k = 0; k < QKKs; ++k) {
-            const int query_col = k * 16 + a_coloff;
-            ldmatrix_x4(warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
-                        warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
-                        smem_addr(&qkv_s[(group_lane * Br + a_rowoff) * D +
-                                         causal_small_t_tc_swz(a_rowoff, query_col)]));
+            for (int k = 0; k < QKKs; ++k) {
+                const int query_col = k * 16 + a_coloff;
+                ldmatrix_x4(warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
+                            warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
+                            smem_addr(&qkv_s[(group_lane * Br + a_rowoff) * D +
+                                             causal_small_t_tc_swz(a_rowoff, query_col)]));
+            }
         }
     }
     __syncthreads();
@@ -396,8 +476,14 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
         if (tail_slot < 0 && (block == 0 || (k0 & (Group - 1)) == 0)) {
             stage_decode_record(packed_k_s, packed_v_s, &metadata_s, record, tid, Threads);
         }
-        stage_decode_key(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot, heads, kv_head,
-                         k0, max(k0, split_start), min(k0 + Bc, split_end), tid, Threads);
+        if constexpr (ColumnsPerBlock == 4) {
+            stage_decode_key_quad(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot, heads,
+                                  kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end), tid);
+        } else {
+            stage_decode_key(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot, heads,
+                             kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end), tid,
+                             Threads);
+        }
         __syncthreads();
 
         if (local_warp == 0) {
@@ -415,14 +501,29 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
                     const int col = k * 16 + b_koff;
                     ldmatrix_x2(key_fragment[0], key_fragment[1],
                                 smem_addr(&k_s[row * D + causal_small_t_tc_swz(row, col)]));
-                    mma_bf16(score[tile][0], score[tile][1], score[tile][2], score[tile][3],
-                             warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
-                             warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
-                             key_fragment[0], key_fragment[1]);
+                    if constexpr (ColumnsPerBlock >= 3) {
+                        unsigned query_fragment[4];
+                        const int query_col = k * 16 + a_coloff;
+                        ldmatrix_x4(
+                            query_fragment[0], query_fragment[1], query_fragment[2],
+                            query_fragment[3],
+                            smem_addr(&query_s[(group_lane * Br + a_rowoff) * D +
+                                               causal_small_t_tc_swz(a_rowoff, query_col)]));
+                        mma_bf16(score[tile][0], score[tile][1], score[tile][2], score[tile][3],
+                                 query_fragment[0], query_fragment[1], query_fragment[2],
+                                 query_fragment[3], key_fragment[0], key_fragment[1]);
+                    } else {
+                        mma_bf16(score[tile][0], score[tile][1], score[tile][2], score[tile][3],
+                                 warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
+                                 warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
+                                 key_fragment[0], key_fragment[1]);
+                    }
                 }
             }
-            const int row0 = gid;
-            const int row1 = row0 + 8;
+            const int row0          = gid;
+            const int row1          = row0 + 8;
+            const bool row1_valid   = ColumnsPerMma == 2 ? row0 < row_count : row1 < row_count;
+            const int row1_position = ColumnsPerMma == 2 ? query_position1 : query_position0;
             float block_m0 = -CUDART_INF_F, block_m1 = -CUDART_INF_F;
 #pragma unroll
             for (int tile = 0; tile < QKNt; ++tile) {
@@ -431,23 +532,23 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
                 const int key0 = k0 + col0;
                 const int key1 = k0 + col1;
                 score[tile][0] = row0 < row_count && key0 >= split_start && key0 < split_end &&
-                                         key0 <= query_position
+                                         key0 <= query_position0
                                      ? score[tile][0] * scale
                                      : -CUDART_INF_F;
                 score[tile][1] = row0 < row_count && key1 >= split_start && key1 < split_end &&
-                                         key1 <= query_position
+                                         key1 <= query_position0
                                      ? score[tile][1] * scale
                                      : -CUDART_INF_F;
-                score[tile][2] = row1 < row_count && key0 >= split_start && key0 < split_end &&
-                                         key0 <= query_position
-                                     ? score[tile][2] * scale
-                                     : -CUDART_INF_F;
-                score[tile][3] = row1 < row_count && key1 >= split_start && key1 < split_end &&
-                                         key1 <= query_position
-                                     ? score[tile][3] * scale
-                                     : -CUDART_INF_F;
-                block_m0       = fmaxf(block_m0, fmaxf(score[tile][0], score[tile][1]));
-                block_m1       = fmaxf(block_m1, fmaxf(score[tile][2], score[tile][3]));
+                score[tile][2] =
+                    row1_valid && key0 >= split_start && key0 < split_end && key0 <= row1_position
+                        ? score[tile][2] * scale
+                        : -CUDART_INF_F;
+                score[tile][3] =
+                    row1_valid && key1 >= split_start && key1 < split_end && key1 <= row1_position
+                        ? score[tile][3] * scale
+                        : -CUDART_INF_F;
+                block_m0 = fmaxf(block_m0, fmaxf(score[tile][0], score[tile][1]));
+                block_m1 = fmaxf(block_m1, fmaxf(score[tile][2], score[tile][3]));
             }
             block_m0            = warp_max<4>(block_m0, FullMask);
             block_m1            = warp_max<4>(block_m1, FullMask);
@@ -554,10 +655,12 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
             partial_m[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = m0;
             partial_l[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = l0;
         }
-        if (row1 < row_count) {
-            const int q_head = kv_head * Geometry::GroupSize + row1;
-            partial_m[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = m1;
-            partial_l[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = l1;
+        const int row1_head = ColumnsPerMma == 2 ? row0 : row1;
+        const int column1   = ColumnsPerMma == 2 ? column + 1 : column;
+        if (row1_head < row_count && column1 < tokens) {
+            const int q_head = kv_head * Geometry::GroupSize + row1_head;
+            partial_m[causal_partial_stat_index<Geometry>(q_head, column1, split, tokens)] = m1;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, column1, split, tokens)] = l1;
         }
     }
     if (local_warp != 0) {
@@ -576,7 +679,8 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
                 qkv_s[(group_lane * Br + row0) * D + d1] =
                     __float2bfloat16(warp_state.accumulator[n][1]);
             }
-            if (row1 < row_count) {
+            const int row1_head = ColumnsPerMma == 2 ? row0 : row1;
+            if (row1_head < row_count) {
                 qkv_s[(group_lane * Br + row1) * D + d0] =
                     __float2bfloat16(warp_state.accumulator[n][2]);
                 qkv_s[(group_lane * Br + row1) * D + d1] =
@@ -586,18 +690,24 @@ __launch_bounds__(kDecodeWarps* ColumnsPerBlock * 32, 2 / ColumnsPerBlock) __glo
     }
     __syncthreads();
     if (column >= tokens) { return; }
-    for (int chunk = local_tid; chunk < row_count * (D / 8); chunk += WarpsPerColumn * 32) {
-        const int row    = chunk / (D / 8);
-        const int d      = (chunk % (D / 8)) * 8;
-        const int q_head = kv_head * Geometry::GroupSize + row;
+    for (int chunk = local_tid; chunk < ColumnsPerMma * row_count * (D / 8);
+         chunk += WarpsPerColumn * 32) {
+        const int packed_column = chunk / (row_count * (D / 8));
+        const int local_chunk   = chunk - packed_column * row_count * (D / 8);
+        const int row           = local_chunk / (D / 8);
+        const int d             = (local_chunk % (D / 8)) * 8;
+        const int output_column = column + packed_column;
+        if (output_column >= tokens) { continue; }
+        const int source_row = row + (ColumnsPerMma == 2 ? packed_column * 8 : 0);
+        const int q_head     = kv_head * Geometry::GroupSize + row;
         const std::int64_t destination =
-            causal_partial_acc_index<Geometry>(q_head, d, column, split, tokens);
+            causal_partial_acc_index<Geometry>(q_head, d, output_column, split, tokens);
         store_vec(partial_acc + destination,
-                  load_vec<int4>(qkv_s + (group_lane * Br + row) * D + d));
+                  load_vec<int4>(qkv_s + (group_lane * Br + source_row) * D + d));
     }
 }
 
-template <typename Geometry, bool MultiBatch, bool Masked, bool PerTokenSplits, bool PairedSplits>
+template <typename Geometry, bool MultiBatch, bool Masked, bool PerTokenSplits, int ColumnsPerBlock>
 __launch_bounds__(D) __global__
     void reduce_output_hadamard_kernel(const __nv_bfloat16* partial_acc, const float* partial_m,
                                        const float* partial_l, const std::int32_t* positions,
@@ -622,11 +732,11 @@ __launch_bounds__(D) __global__
     positions += column_begin;
     if constexpr (MultiBatch) { positions += batch * full_width; }
     int split_token = PerTokenSplits ? token : tokens - 1;
-    if constexpr (PairedSplits) {
+    if constexpr (ColumnsPerBlock > 1) {
         const int valid_tokens = Masked ? min(tokens, valid_columns[batch] - column_begin) : tokens;
-        const int group_begin  = (token / 2) * 2;
+        const int group_begin  = (token / ColumnsPerBlock) * ColumnsPerBlock;
         if (group_begin < valid_tokens) {
-            split_token = min(group_begin + 1, min(tokens, valid_tokens) - 1);
+            split_token = min(group_begin + ColumnsPerBlock - 1, min(tokens, valid_tokens) - 1);
         }
     }
     const int query_position = positions[split_token];
