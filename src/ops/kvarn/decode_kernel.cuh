@@ -251,28 +251,33 @@ stage_decode_value(__nv_bfloat16* destination, const std::uint8_t* packed_v,
         return;
     }
 
-    for (int item = tid; item < Bc * (D / 4); item += threads) {
-        const int token           = item / (D / 4);
-        const int packed_dim      = item - token * (D / 4);
-        const int record_token    = token_base + token;
-        const int position        = logical_begin + token;
-        const std::uint8_t packed = packed_v[record_token * (D / 4) + packed_dim];
-        unsigned values[4];
+    for (int item = tid; item < Bc * (D / 8); item += threads) {
+        const int token        = item / (D / 8);
+        const int packed_pair  = item - token * (D / 8);
+        const int record_token = token_base + token;
+        const int position     = logical_begin + token;
+        const auto packed = *reinterpret_cast<const std::uint16_t*>(
+            packed_v + record_token * (D / 4) + 2 * packed_pair);
+        unsigned values[8];
 #pragma unroll
-        for (int item = 0; item < 4; ++item) {
-            const int code = (packed >> (2 * item)) & 3;
+        for (int value_index = 0; value_index < 8; ++value_index) {
+            const int packed_dim = 2 * packed_pair + (value_index >> 2);
+            const int plane      = value_index & 3;
+            const int code       = (packed >> (2 * value_index)) & 3;
             const float decoded =
-                metadata->v_base[record_token][code] * metadata->v_channel_scale[item][packed_dim];
+                metadata->v_base[record_token][code] * metadata->v_channel_scale[plane][packed_dim];
             const __nv_bfloat16 value = position >= valid_begin && position < valid_end
-                                            ? __float2bfloat16_rn(decoded)
-                                            : __float2bfloat16_rn(0.0F);
-            values[item]              = __bfloat16_as_ushort(value);
+                                             ? __float2bfloat16_rn(decoded)
+                                             : __float2bfloat16_rn(0.0F);
+            values[value_index]       = __bfloat16_as_ushort(value);
         }
-        const uint2 packed_values =
-            make_uint2(values[0] | (values[1] << 16), values[2] | (values[3] << 16));
-        auto* output = reinterpret_cast<uint2*>(destination + token * D +
-                                                causal_small_t_tc_swz(token, 4 * packed_dim));
-        *output      = packed_values;
+        const int4 packed_values =
+            make_int4(static_cast<int>(values[0] | (values[1] << 16)),
+                      static_cast<int>(values[2] | (values[3] << 16)),
+                      static_cast<int>(values[4] | (values[5] << 16)),
+                      static_cast<int>(values[6] | (values[7] << 16)));
+        auto* output = destination + token * D + causal_small_t_tc_swz(token, 8 * packed_pair);
+        store_vec(output, packed_values);
     }
 }
 
@@ -473,6 +478,7 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
         }
     }
     float m0 = -CUDART_INF_F, m1 = -CUDART_INF_F, l0 = 0.0f, l1 = 0.0f;
+    bool key_ready = false;
     for (int block = 0; block < key_blocks; ++block) {
         const int k0 = first_tile + block * Bc;
         if (block != 0 && (k0 & kPagedKVPageMask) == 0) {
@@ -486,14 +492,19 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
             stage_decode_record(packed_k_s, packed_v_s, &metadata_s, record, tid, Threads);
         }
         if constexpr (ColumnsPerBlock == 4) {
-            stage_decode_key_quad(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot, heads,
-                                  kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end), tid);
+            if (!key_ready) {
+                stage_decode_key_quad(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot,
+                                      heads, kv_head, k0, max(k0, split_start),
+                                      min(k0 + Bc, split_end), tid);
+                __syncthreads();
+            }
+            key_ready = false;
         } else {
             stage_decode_key(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot, heads,
                              kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end), tid,
                              Threads);
+            __syncthreads();
         }
-        __syncthreads();
 
         if (local_warp < ProducerWarpsPerColumn) {
             float score[QKNtPerWarp][4];
@@ -725,6 +736,15 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
                              probability_fragment[2], probability_fragment[3], value_fragment[0],
                              value_fragment[1]);
                 }
+            }
+        }
+        if constexpr (ColumnsPerBlock == 4) {
+            const int next_k0 = k0 + Bc;
+            if (block + 1 < key_blocks && (next_k0 & (Group - 1)) != 0) {
+                stage_decode_key_quad(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot,
+                                      heads, kv_head, next_k0, max(next_k0, split_start),
+                                      min(next_k0 + Bc, split_end), tid);
+                key_ready = true;
             }
         }
         __syncthreads();
