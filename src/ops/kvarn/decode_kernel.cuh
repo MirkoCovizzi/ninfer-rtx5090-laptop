@@ -299,19 +299,25 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
     constexpr int QKNt                   = Bc / 8;
     constexpr int QKKs                   = D / 16;
     constexpr int PVNt                   = D / 8;
-    constexpr int ConsumerWarpsPerColumn = WarpsPerColumn - 1;
+    constexpr int ProducerWarpsPerColumn = ColumnsPerBlock == 4 ? 2 : 1;
+    constexpr int ConsumerWarpsPerColumn = WarpsPerColumn - ProducerWarpsPerColumn;
     constexpr int ConsumerWarps          = ConsumerWarpsPerColumn * WarpGroups;
     constexpr int PVNtPerWarp            = div_up(PVNt, ConsumerWarpsPerColumn);
+    constexpr int QKNtPerWarp             = QKNt / ProducerWarpsPerColumn;
     constexpr int PVKs                   = Bc / 16;
     constexpr int PageIds                = 64;
     constexpr float Log2E                = 1.4426950408889634074f;
     constexpr unsigned FullMask          = 0xffffffffu;
     static_assert(Group == 2 * Bc);
+    static_assert(QKNt % ProducerWarpsPerColumn == 0);
     static_assert(Geometry::GroupSize <= Br);
 
     __shared__ __align__(16) __nv_bfloat16 qkv_s[2 * Bc * D];
     __shared__ __align__(16) __nv_bfloat16 p_s[WarpGroups * Br * Bc];
     __shared__ float alpha_s[WarpGroups * Br];
+    __shared__ float producer_m_s[WarpGroups][ProducerWarpsPerColumn][Br];
+    __shared__ float producer_l_s[WarpGroups][ProducerWarpsPerColumn][Br];
+    __shared__ float running_m_s[WarpGroups][Br];
     __shared__ __align__(16) unsigned packed_k_s[kPackedKWords];
     __shared__ __align__(16) std::uint8_t packed_v_s[kPackedVBytes];
     __shared__ DecodeRecordMetadata metadata_s;
@@ -434,8 +440,8 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
     const int b_rin    = lane & 7;
     const int b_koff   = ((lane >> 3) & 1) << 3;
 
-    // Each warp group uses one QK producer and seven PV consumers. The four-column route packs two
-    // six-head columns into the MMA row halves; other routes assign one column per warp group.
+    // The four-column route splits QK across two producers so its PV consumers do not wait on one
+    // serial score warp. Other routes retain one QK producer and seven PV consumers.
     union {
         unsigned query_fragment[ColumnsPerBlock >= 3 ? 1 : QKKs][4];
         float accumulator[PVNtPerWarp][4];
@@ -456,7 +462,7 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
     __syncthreads();
 
     int physical_page = physical_pages_s[0];
-    if (local_warp != 0) {
+    if (local_warp >= ProducerWarpsPerColumn) {
 #pragma unroll
         for (int n = 0; n < PVNtPerWarp; ++n) {
 #pragma unroll
@@ -486,16 +492,17 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
         }
         __syncthreads();
 
-        if (local_warp == 0) {
-            float score[QKNt][4];
+        if (local_warp < ProducerWarpsPerColumn) {
+            float score[QKNtPerWarp][4];
 #pragma unroll
-            for (int tile = 0; tile < QKNt; ++tile) {
+            for (int tile = 0; tile < QKNtPerWarp; ++tile) {
                 score[tile][0] = score[tile][1] = score[tile][2] = score[tile][3] = 0.0f;
             }
 #pragma unroll
             for (int k = 0; k < QKKs; ++k) {
 #pragma unroll
-                for (int tile = 0; tile < QKNt; ++tile) {
+                for (int local_tile = 0; local_tile < QKNtPerWarp; ++local_tile) {
+                    const int tile = local_warp * QKNtPerWarp + local_tile;
                     unsigned key_fragment[2];
                     const int row = tile * 8 + b_rin;
                     const int col = k * 16 + b_koff;
@@ -509,11 +516,13 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
                             query_fragment[3],
                             smem_addr(&query_s[(group_lane * Br + a_rowoff) * D +
                                                causal_small_t_tc_swz(a_rowoff, query_col)]));
-                        mma_bf16(score[tile][0], score[tile][1], score[tile][2], score[tile][3],
-                                 query_fragment[0], query_fragment[1], query_fragment[2],
-                                 query_fragment[3], key_fragment[0], key_fragment[1]);
+                        mma_bf16(score[local_tile][0], score[local_tile][1],
+                                 score[local_tile][2], score[local_tile][3], query_fragment[0],
+                                 query_fragment[1], query_fragment[2], query_fragment[3],
+                                 key_fragment[0], key_fragment[1]);
                     } else {
-                        mma_bf16(score[tile][0], score[tile][1], score[tile][2], score[tile][3],
+                        mma_bf16(score[local_tile][0], score[local_tile][1],
+                                 score[local_tile][2], score[local_tile][3],
                                  warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
                                  warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
                                  key_fragment[0], key_fragment[1]);
@@ -526,52 +535,95 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
             const int row1_position = ColumnsPerMma == 2 ? query_position1 : query_position0;
             float block_m0 = -CUDART_INF_F, block_m1 = -CUDART_INF_F;
 #pragma unroll
-            for (int tile = 0; tile < QKNt; ++tile) {
+            for (int local_tile = 0; local_tile < QKNtPerWarp; ++local_tile) {
+                const int tile = local_warp * QKNtPerWarp + local_tile;
                 const int col0 = tile * 8 + 2 * lid;
                 const int col1 = col0 + 1;
                 const int key0 = k0 + col0;
                 const int key1 = k0 + col1;
-                score[tile][0] = row0 < row_count && key0 >= split_start && key0 < split_end &&
-                                         key0 <= query_position0
-                                     ? score[tile][0] * scale
-                                     : -CUDART_INF_F;
-                score[tile][1] = row0 < row_count && key1 >= split_start && key1 < split_end &&
-                                         key1 <= query_position0
-                                     ? score[tile][1] * scale
-                                     : -CUDART_INF_F;
-                score[tile][2] =
+                score[local_tile][0] =
+                    row0 < row_count && key0 >= split_start && key0 < split_end &&
+                            key0 <= query_position0
+                        ? score[local_tile][0] * scale
+                        : -CUDART_INF_F;
+                score[local_tile][1] =
+                    row0 < row_count && key1 >= split_start && key1 < split_end &&
+                            key1 <= query_position0
+                        ? score[local_tile][1] * scale
+                        : -CUDART_INF_F;
+                score[local_tile][2] =
                     row1_valid && key0 >= split_start && key0 < split_end && key0 <= row1_position
-                        ? score[tile][2] * scale
+                        ? score[local_tile][2] * scale
                         : -CUDART_INF_F;
-                score[tile][3] =
+                score[local_tile][3] =
                     row1_valid && key1 >= split_start && key1 < split_end && key1 <= row1_position
-                        ? score[tile][3] * scale
+                        ? score[local_tile][3] * scale
                         : -CUDART_INF_F;
-                block_m0 = fmaxf(block_m0, fmaxf(score[tile][0], score[tile][1]));
-                block_m1 = fmaxf(block_m1, fmaxf(score[tile][2], score[tile][3]));
+                block_m0 =
+                    fmaxf(block_m0, fmaxf(score[local_tile][0], score[local_tile][1]));
+                block_m1 =
+                    fmaxf(block_m1, fmaxf(score[local_tile][2], score[local_tile][3]));
             }
             block_m0            = warp_max<4>(block_m0, FullMask);
             block_m1            = warp_max<4>(block_m1, FullMask);
-            const float next_m0 = fmaxf(m0, block_m0);
-            const float next_m1 = fmaxf(m1, block_m1);
-            const float alpha0  = m0 == -CUDART_INF_F ? 0.0f : exp2_approx((m0 - next_m0) * Log2E);
-            const float alpha1  = m1 == -CUDART_INF_F ? 0.0f : exp2_approx((m1 - next_m1) * Log2E);
+            float next_m0;
+            float next_m1;
+            float alpha0;
+            float alpha1;
+            if constexpr (ProducerWarpsPerColumn == 1) {
+                next_m0 = fmaxf(m0, block_m0);
+                next_m1 = fmaxf(m1, block_m1);
+                alpha0 = m0 == -CUDART_INF_F ? 0.0f : exp2_approx((m0 - next_m0) * Log2E);
+                alpha1 = m1 == -CUDART_INF_F ? 0.0f : exp2_approx((m1 - next_m1) * Log2E);
+            } else {
+                if (lid == 0) {
+                    producer_m_s[group_lane][local_warp][row0] = block_m0;
+                    producer_m_s[group_lane][local_warp][row1] = block_m1;
+                    if (local_warp == 0) {
+                        running_m_s[group_lane][row0] = m0;
+                        running_m_s[group_lane][row1] = m1;
+                    }
+                }
+                if (group_lane == 0) {
+                    asm volatile("bar.sync 1, 64;" ::: "memory");
+                } else {
+                    asm volatile("bar.sync 2, 64;" ::: "memory");
+                }
+                block_m0 = producer_m_s[group_lane][0][row0];
+                block_m1 = producer_m_s[group_lane][0][row1];
+#pragma unroll
+                for (int producer = 1; producer < ProducerWarpsPerColumn; ++producer) {
+                    block_m0 = fmaxf(block_m0, producer_m_s[group_lane][producer][row0]);
+                    block_m1 = fmaxf(block_m1, producer_m_s[group_lane][producer][row1]);
+                }
+                const float previous_m0 = running_m_s[group_lane][row0];
+                const float previous_m1 = running_m_s[group_lane][row1];
+                next_m0                  = fmaxf(previous_m0, block_m0);
+                next_m1                  = fmaxf(previous_m1, block_m1);
+                alpha0 = previous_m0 == -CUDART_INF_F
+                             ? 0.0f
+                             : exp2_approx((previous_m0 - next_m0) * Log2E);
+                alpha1 = previous_m1 == -CUDART_INF_F
+                             ? 0.0f
+                             : exp2_approx((previous_m1 - next_m1) * Log2E);
+            }
             float block_l0 = 0.0f, block_l1 = 0.0f;
 #pragma unroll
-            for (int tile = 0; tile < QKNt; ++tile) {
+            for (int local_tile = 0; local_tile < QKNtPerWarp; ++local_tile) {
+                const int tile = local_warp * QKNtPerWarp + local_tile;
                 const int col0  = tile * 8 + 2 * lid;
                 const int col1  = col0 + 1;
-                const float p00 = next_m0 > -CUDART_INF_F && score[tile][0] > -CUDART_INF_F
-                                      ? exp2_approx((score[tile][0] - next_m0) * Log2E)
+                const float p00 = next_m0 > -CUDART_INF_F && score[local_tile][0] > -CUDART_INF_F
+                                      ? exp2_approx((score[local_tile][0] - next_m0) * Log2E)
                                       : 0.0f;
-                const float p01 = next_m0 > -CUDART_INF_F && score[tile][1] > -CUDART_INF_F
-                                      ? exp2_approx((score[tile][1] - next_m0) * Log2E)
+                const float p01 = next_m0 > -CUDART_INF_F && score[local_tile][1] > -CUDART_INF_F
+                                      ? exp2_approx((score[local_tile][1] - next_m0) * Log2E)
                                       : 0.0f;
-                const float p10 = next_m1 > -CUDART_INF_F && score[tile][2] > -CUDART_INF_F
-                                      ? exp2_approx((score[tile][2] - next_m1) * Log2E)
+                const float p10 = next_m1 > -CUDART_INF_F && score[local_tile][2] > -CUDART_INF_F
+                                      ? exp2_approx((score[local_tile][2] - next_m1) * Log2E)
                                       : 0.0f;
-                const float p11 = next_m1 > -CUDART_INF_F && score[tile][3] > -CUDART_INF_F
-                                      ? exp2_approx((score[tile][3] - next_m1) * Log2E)
+                const float p11 = next_m1 > -CUDART_INF_F && score[local_tile][3] > -CUDART_INF_F
+                                      ? exp2_approx((score[local_tile][3] - next_m1) * Log2E)
                                       : 0.0f;
                 block_l0 += p00 + p01;
                 block_l1 += p10 + p11;
@@ -587,16 +639,44 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
             }
             block_l0 = warp_sum<4>(block_l0, FullMask);
             block_l1 = warp_sum<4>(block_l1, FullMask);
-            l0       = l0 * alpha0 + block_l0;
-            l1       = l1 * alpha1 + block_l1;
-            m0       = next_m0;
-            m1       = next_m1;
-            if (lid == 0) {
-                alpha_s[group_lane * Br + row0] = alpha0;
-                alpha_s[group_lane * Br + row1] = alpha1;
+            if constexpr (ProducerWarpsPerColumn == 1) {
+                l0 = l0 * alpha0 + block_l0;
+                l1 = l1 * alpha1 + block_l1;
+                m0 = next_m0;
+                m1 = next_m1;
+                if (lid == 0) {
+                    alpha_s[group_lane * Br + row0] = alpha0;
+                    alpha_s[group_lane * Br + row1] = alpha1;
+                }
+            } else {
+                if (lid == 0) {
+                    producer_l_s[group_lane][local_warp][row0] = block_l0;
+                    producer_l_s[group_lane][local_warp][row1] = block_l1;
+                }
+                if (group_lane == 0) {
+                    asm volatile("bar.sync 1, 64;" ::: "memory");
+                } else {
+                    asm volatile("bar.sync 2, 64;" ::: "memory");
+                }
+                if (local_warp == 0) {
+#pragma unroll
+                    for (int producer = 1; producer < ProducerWarpsPerColumn; ++producer) {
+                        block_l0 += producer_l_s[group_lane][producer][row0];
+                        block_l1 += producer_l_s[group_lane][producer][row1];
+                    }
+                    l0 = l0 * alpha0 + block_l0;
+                    l1 = l1 * alpha1 + block_l1;
+                    m0 = next_m0;
+                    m1 = next_m1;
+                    if (lid == 0) {
+                        alpha_s[group_lane * Br + row0] = alpha0;
+                        alpha_s[group_lane * Br + row1] = alpha1;
+                    }
+                }
             }
         } else {
-            const int worker_warp = warp - group_lane - 1;
+            const int worker_warp =
+                group_lane * ConsumerWarpsPerColumn + local_warp - ProducerWarpsPerColumn;
             const int worker_tid  = worker_warp * 32 + lane;
             stage_decode_value(v_s, packed_v_s, &metadata_s, tail_v, table_row, tail_slot, heads,
                                kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end),
@@ -604,8 +684,8 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
         }
         __syncthreads();
 
-        if (local_warp != 0) {
-            const int consumer_warp = local_warp - 1;
+        if (local_warp >= ProducerWarpsPerColumn) {
+            const int consumer_warp = local_warp - ProducerWarpsPerColumn;
             const int output_tile   = consumer_warp * PVNtPerWarp;
             const float alpha0      = alpha_s[group_lane * Br + gid];
             const float alpha1      = alpha_s[group_lane * Br + gid + 8];
@@ -663,8 +743,8 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
             partial_l[causal_partial_stat_index<Geometry>(q_head, column1, split, tokens)] = l1;
         }
     }
-    if (local_warp != 0) {
-        const int consumer_warp = local_warp - 1;
+    if (local_warp >= ProducerWarpsPerColumn) {
+        const int consumer_warp = local_warp - ProducerWarpsPerColumn;
 #pragma unroll
         for (int n = 0; n < PVNtPerWarp; ++n) {
             const int global_n = consumer_warp * PVNtPerWarp + n;
