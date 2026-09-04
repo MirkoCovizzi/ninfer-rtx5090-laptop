@@ -11,6 +11,7 @@ namespace {
 
 using Geometry = Nvfp4GdnInputGeometry;
 
+using M16N64                      = Nvfp4W4a4MmaSchedule<16, 64, 256, 1, 4, 2, 2>;
 using M32N64                      = Nvfp4W4a4MmaSchedule<32, 64, 256, 2, 4, 2, 2>;
 using M32N128                     = Nvfp4W4a4MmaSchedule<32, 128, 256, 2, 4, 2, 1>;
 using M64N128                     = Nvfp4W4a4MmaSchedule<64, 128, 256, 4, 2, 2, 1>;
@@ -45,6 +46,8 @@ void nvfp4_gdn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& 
             workspace.codes, workspace.scales, static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(qkv.data),
             static_cast<__nv_bfloat16*>(z.data), tokens, alpha, stream);
+    } else if (tokens <= 16) {
+        launch_gemm<M16N64>(weight, qkv, z, workspace, tokens, stream);
     } else if (tokens <= 64) {
         launch_gemm<M32N64>(weight, qkv, z, workspace, tokens, stream);
     } else if (tokens <= 96) {
