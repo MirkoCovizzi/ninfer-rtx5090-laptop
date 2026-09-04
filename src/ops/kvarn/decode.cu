@@ -181,25 +181,14 @@ void decode_attention(const Tensor& query, const Tensor& positions, const Tensor
         const bool multi    = query.ne[3] > 1;
         const bool masked   = valid_columns.data != nullptr;
         const auto dispatch = [&]<typename Geometry>() {
-            const bool pair_columns =
-                Geometry::QHeads == CausalD256H24Kv4::QHeads && width > 1 &&
-                ((width == 4 && envelope.max_visible_keys > Mtp3PackedWindow) ||
-                 envelope.max_visible_keys > DecodeMidWindow);
+            const bool pair_columns = Geometry::QHeads == CausalD256H24Kv4::QHeads && width > 1 &&
+                                      envelope.max_visible_keys > MtpPackedWindow;
             const auto launch = [&]<bool MultiBatch, bool Masked>() {
                 if (pair_columns) {
-                    if (width == 4) {
-                        launch_partial<Geometry, MultiBatch, Masked, 4>(
-                            query, positions, valid_columns, table_rows, scale, cache, envelope,
-                            begin, width, splits, acc, m, l, output, stream);
-                    } else if (width == 3 || width >= 5) {
-                        launch_partial<Geometry, MultiBatch, Masked, 3>(
-                            query, positions, valid_columns, table_rows, scale, cache, envelope,
-                            begin, width, splits, acc, m, l, output, stream);
-                    } else {
-                        launch_partial<Geometry, MultiBatch, Masked, 2>(
-                            query, positions, valid_columns, table_rows, scale, cache, envelope,
-                            begin, width, splits, acc, m, l, output, stream);
-                    }
+                    // Narrow widths mask unused columns; widths five and six use a second CTA.
+                    launch_partial<Geometry, MultiBatch, Masked, 4>(
+                        query, positions, valid_columns, table_rows, scale, cache, envelope, begin,
+                        width, splits, acc, m, l, output, stream);
                 } else {
                     launch_partial<Geometry, MultiBatch, Masked, 1>(
                         query, positions, valid_columns, table_rows, scale, cache, envelope, begin,
