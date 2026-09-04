@@ -304,7 +304,7 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
     constexpr int QKNt                   = Bc / 8;
     constexpr int QKKs                   = D / 16;
     constexpr int PVNt                   = D / 8;
-    constexpr int ProducerWarpsPerColumn = ColumnsPerBlock == 4 ? 2 : 1;
+    constexpr int ProducerWarpsPerColumn = ColumnsPerBlock == 4 ? 4 : 1;
     constexpr int ValueStageWarpsPerColumn = WarpsPerColumn - ProducerWarpsPerColumn;
     constexpr int ValueStageWarps          = ValueStageWarpsPerColumn * WarpGroups;
     constexpr int PVWarpsPerColumn         = ColumnsPerBlock == 4 ? WarpsPerColumn
@@ -448,7 +448,7 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
     const int b_rin    = lane & 7;
     const int b_koff   = ((lane >> 3) & 1) << 3;
 
-    // The four-column route splits QK across two producers, uses the other six warps to stage V,
+    // The four-column route splits QK across four producers, uses the other four warps to stage V,
     // then puts all eight warps on PV. Other routes retain fixed producer/consumer roles.
     union {
         unsigned query_fragment[ColumnsPerBlock >= 3 ? 1 : QKKs][4];
@@ -599,9 +599,9 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
                     }
                 }
                 if (group_lane == 0) {
-                    asm volatile("bar.sync 1, 64;" ::: "memory");
+                    asm volatile("bar.sync 1, 128;" ::: "memory");
                 } else {
-                    asm volatile("bar.sync 2, 64;" ::: "memory");
+                    asm volatile("bar.sync 2, 128;" ::: "memory");
                 }
                 block_m0 = producer_m_s[group_lane][0][row0];
                 block_m1 = producer_m_s[group_lane][0][row1];
@@ -668,9 +668,9 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
                     producer_l_s[group_lane][local_warp][row1] = block_l1;
                 }
                 if (group_lane == 0) {
-                    asm volatile("bar.sync 1, 64;" ::: "memory");
+                    asm volatile("bar.sync 1, 128;" ::: "memory");
                 } else {
-                    asm volatile("bar.sync 2, 64;" ::: "memory");
+                    asm volatile("bar.sync 2, 128;" ::: "memory");
                 }
                 if (local_warp == 0) {
 #pragma unroll
