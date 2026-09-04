@@ -300,9 +300,12 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
     constexpr int QKKs                   = D / 16;
     constexpr int PVNt                   = D / 8;
     constexpr int ProducerWarpsPerColumn = ColumnsPerBlock == 4 ? 2 : 1;
-    constexpr int ConsumerWarpsPerColumn = WarpsPerColumn - ProducerWarpsPerColumn;
-    constexpr int ConsumerWarps          = ConsumerWarpsPerColumn * WarpGroups;
-    constexpr int PVNtPerWarp            = div_up(PVNt, ConsumerWarpsPerColumn);
+    constexpr int ValueStageWarpsPerColumn = WarpsPerColumn - ProducerWarpsPerColumn;
+    constexpr int ValueStageWarps          = ValueStageWarpsPerColumn * WarpGroups;
+    constexpr int PVWarpsPerColumn         = ColumnsPerBlock == 4 ? WarpsPerColumn
+                                                                  : WarpsPerColumn - 1;
+    constexpr int FirstPVWarp              = WarpsPerColumn - PVWarpsPerColumn;
+    constexpr int PVNtPerWarp              = div_up(PVNt, PVWarpsPerColumn);
     constexpr int QKNtPerWarp             = QKNt / ProducerWarpsPerColumn;
     constexpr int PVKs                   = Bc / 16;
     constexpr int PageIds                = 64;
@@ -440,8 +443,8 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
     const int b_rin    = lane & 7;
     const int b_koff   = ((lane >> 3) & 1) << 3;
 
-    // The four-column route splits QK across two producers so its PV consumers do not wait on one
-    // serial score warp. Other routes retain one QK producer and seven PV consumers.
+    // The four-column route splits QK across two producers, uses the other six warps to stage V,
+    // then puts all eight warps on PV. Other routes retain fixed producer/consumer roles.
     union {
         unsigned query_fragment[ColumnsPerBlock >= 3 ? 1 : QKKs][4];
         float accumulator[PVNtPerWarp][4];
@@ -462,7 +465,7 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
     __syncthreads();
 
     int physical_page = physical_pages_s[0];
-    if (local_warp >= ProducerWarpsPerColumn) {
+    if (local_warp >= FirstPVWarp) {
 #pragma unroll
         for (int n = 0; n < PVNtPerWarp; ++n) {
 #pragma unroll
@@ -676,16 +679,16 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
             }
         } else {
             const int worker_warp =
-                group_lane * ConsumerWarpsPerColumn + local_warp - ProducerWarpsPerColumn;
+                group_lane * ValueStageWarpsPerColumn + local_warp - ProducerWarpsPerColumn;
             const int worker_tid  = worker_warp * 32 + lane;
             stage_decode_value(v_s, packed_v_s, &metadata_s, tail_v, table_row, tail_slot, heads,
                                kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end),
-                               worker_tid, ConsumerWarps * 32);
+                               worker_tid, ValueStageWarps * 32);
         }
         __syncthreads();
 
-        if (local_warp >= ProducerWarpsPerColumn) {
-            const int consumer_warp = local_warp - ProducerWarpsPerColumn;
+        if (local_warp >= FirstPVWarp) {
+            const int consumer_warp = local_warp - FirstPVWarp;
             const int output_tile   = consumer_warp * PVNtPerWarp;
             const float alpha0      = alpha_s[group_lane * Br + gid];
             const float alpha1      = alpha_s[group_lane * Br + gid + 8];
@@ -743,8 +746,8 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
             partial_l[causal_partial_stat_index<Geometry>(q_head, column1, split, tokens)] = l1;
         }
     }
-    if (local_warp >= ProducerWarpsPerColumn) {
-        const int consumer_warp = local_warp - ProducerWarpsPerColumn;
+    if (local_warp >= FirstPVWarp) {
+        const int consumer_warp = local_warp - FirstPVWarp;
 #pragma unroll
         for (int n = 0; n < PVNtPerWarp; ++n) {
             const int global_n = consumer_warp * PVNtPerWarp + n;
