@@ -112,6 +112,8 @@ reducing lanes, matching the scalar route's order. These constraints preserve pa
 where it is valid rather than falling back to scalar execution everywhere.
 The reducer computes each split's FP32 softmax weight once and shares it across output dimensions;
 the numerator and denominator accumulation orders are unchanged.
+The private BF16 probability tile uses a KVarN-local row-bit swizzle for conflict-free matrix loads;
+this changes only shared-memory addresses, not represented values or reduction order.
 
 #### Paper And Reference Alignment
 

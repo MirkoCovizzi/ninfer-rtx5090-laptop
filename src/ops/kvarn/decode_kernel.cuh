@@ -24,6 +24,11 @@ inline constexpr int kPackedVBytes        = Group * (D / 4);
 inline constexpr int kVCodeValues         = 4;
 static_assert(VBits == 2);
 
+__device__ __forceinline__ int decode_probability_swizzle(int row, int col) {
+    // A 64-byte row already selects bank bit 4; use the next row bits for the 16-byte XOR.
+    return (((col >> 3) ^ ((row >> 1) & 3)) << 3) | (col & 7);
+}
+
 struct alignas(16) DecodeRecordMetadata {
     __half k_scale[D];
     __half k_zero[D];
@@ -693,13 +698,13 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
                 block_l0 += p00 + p01;
                 block_l1 += p10 + p11;
                 const int probability_base = group_lane * Br * Bc;
-                p_s[probability_base + gid * Bc + causal_small_t_tc_swz32(gid, col0)] =
+                p_s[probability_base + gid * Bc + decode_probability_swizzle(gid, col0)] =
                     __float2bfloat16(p00);
-                p_s[probability_base + gid * Bc + causal_small_t_tc_swz32(gid, col1)] =
+                p_s[probability_base + gid * Bc + decode_probability_swizzle(gid, col1)] =
                     __float2bfloat16(p01);
-                p_s[probability_base + (gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col0)] =
+                p_s[probability_base + (gid + 8) * Bc + decode_probability_swizzle(gid + 8, col0)] =
                     __float2bfloat16(p10);
-                p_s[probability_base + (gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col1)] =
+                p_s[probability_base + (gid + 8) * Bc + decode_probability_swizzle(gid + 8, col1)] =
                     __float2bfloat16(p11);
             }
             if constexpr (ProducerWarpsPerColumn == 1) {
@@ -774,7 +779,7 @@ __launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32
                         probability_fragment[0], probability_fragment[1], probability_fragment[2],
                         probability_fragment[3],
                         smem_addr(&p_s[group_lane * Br * Bc + a_rowoff * Bc +
-                                       causal_small_t_tc_swz32(a_rowoff, probability_col)]));
+                                        decode_probability_swizzle(a_rowoff, probability_col)]));
                     unsigned value_fragment[2];
                     const int value_row = k * 16 + b_koff + b_rin;
                     const int value_col = global_n * 8;

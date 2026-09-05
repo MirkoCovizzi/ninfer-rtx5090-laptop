@@ -31,6 +31,19 @@ identifies samples containing page-closing Sinkhorn work. Compare, for example, 
 with `--context 8198` to distinguish closure cost from ordinary small-width append cost. Do not interpret the
 former as an amortized per-token latency.
 
+Use `--phase cached|append|provisional|prefill` and `--width 1..6` to isolate a decode/append
+case for kernel profiling; omit `--width` for the 1,024-token prefill case. `--batch 1..8` uses
+independent cache rows with equal context lengths; prefill is measured only at batch one.
+Provisional cases supply explicit valid-column counts, as the Engine does. Multi-row cases use
+the runtime's conservative lower execution-envelope bound by default. `--tight-envelope` instead
+uses the exact common frontier to measure launch overprovisioning on this homogeneous fixture;
+it is not a production optimization or evidence that arbitrary mixed-row graphs can use that bound.
+
+```bash
+./build/bench/ninfer_kvarn_attention_bench --context 196614 --phase provisional --width 4
+./build/bench/ninfer_kvarn_attention_bench --context 32774 --phase provisional --width 4 --batch 2
+```
+
 **KVarN Parity Qualification**
 
 The regression matrix and paper/reference comparison are maintained in
@@ -55,6 +68,23 @@ changed from 2.228/2.582 ms to 2.423/2.848 ms. Staging the 48-column activation 
 reduced its initial corrected latency from 3.708 ms to 2.848 ms. Nsight Compute confirmed static
 shared memory fell from 57,856 to 33,280 bytes and the occupancy limit rose from one to two CTAs
 per SM. This residual operator cost affects wide batches, not single-request vocabulary dispatch.
+
+The KVarN-local probability-tile swizzle subsequently removed two-way matrix-load bank conflicts
+without changing arithmetic or cache semantics. On the same GPU/toolchain, C=1 masked width-four
+append-and-attend medians at visible contexts 32,774 / 131,078 / 196,614 changed from
+142.112 / 534.528 / 784.384 us to 138.048 / 520.192 / 759.808 us (about 3% lower).
+The C=2 32,774-context case changed from 282.624 to 276.480 us with the production-conservative
+execution envelope unchanged. Page-closing and width-five/six 192K samples showed substantial
+timing variability; they do not establish a uniform gain across all cases.
+
+A matched, unprofiled public Engine MTP3 run with the optimized proposal head, graphs, 1,024-token
+prefill chunks, one warmup, and one measured repetition changed decode throughput from
+133.24 to 133.40 tok/s at 32,799 + 128 and from 86.49 to 87.25 tok/s at 131,103 + 128.
+Acceptance remained 1.0 / 0.85047. These small single-run changes are not statistical guarantees.
+Nsight Compute 2025.4.1 at its base-clock setting attributed the operator improvement to excess
+shared-memory wavefronts falling from 14,283,232 to 1,304,992; probability matrix-load conflicts
+were eliminated, while occupancy remained one 512-thread CTA per SM. Qualification passed the
+independent KVarN Op suite, all-depth 8,192-token greedy parity, and C=2 MTP3 prefix restoration.
 
 The product benchmark slices exact token counts from `bench/fixtures/bench_corpus.ids`, calls
 `Engine::prepare_tokens()`, then calls `Engine::generate()` once for each repetition. It does not
