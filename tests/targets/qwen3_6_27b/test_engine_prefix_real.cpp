@@ -131,6 +131,24 @@ ninfer::EngineOptions concurrent_engine_options(const char* artifact) {
     return options;
 }
 
+ninfer::EngineOptions kvarn_continuation_engine_options(const char* artifact) {
+    ninfer::EngineOptions options;
+    options.artifact_path                    = artifact;
+    options.max_context                      = 512;
+    options.kv_capacity                      = ninfer::KvCapacityPolicy::explicit_capacity(1024);
+    options.prefill_chunk                    = 256;
+    options.kv_cache                         = ninfer::KvCacheStorage::KvarnK4V2Group64;
+    options.speculative.backend              = ninfer::SpeculativeBackend::Mtp;
+    options.speculative.draft_tokens         = 3;
+    options.speculative.proposal_head        = ninfer::ProposalHead::Optimized;
+    options.max_concurrency                  = 2;
+    options.max_pending_requests             = 2;
+    options.context_cache.device_state_slots = 4;
+    options.context_cache.max_private_continuations = 2;
+    options.context_cache.max_shared_prefixes       = 0;
+    return options;
+}
+
 ninfer::EngineOptions pressure_resume_engine_options(const char* artifact) {
     ninfer::EngineOptions options;
     options.artifact_path                    = artifact;
@@ -280,6 +298,47 @@ int exercise_zero_suffix_reuse(ninfer::Engine& engine, const std::vector<ninfer:
     if (reused.generated_token_ids.size() != 2 ||
         reused.generated_token_ids[0] != baseline.generated_token_ids.back()) {
         std::cerr << "zero-suffix reuse did not resume from the retained target frontier\n";
+        return 1;
+    }
+    return 0;
+}
+
+int exercise_kvarn_continuation(const char* artifact) {
+    ninfer::Engine engine(kvarn_continuation_engine_options(artifact));
+    const auto request = [](bool reuse, std::uint32_t outputs) {
+        ninfer::RequestOptions options;
+        options.execution.requested_output_tokens = outputs;
+        options.execution.sampling.temperature    = 0.0F;
+        options.execution.allow_prefix_reuse      = reuse;
+        options.stop.include_model_defaults       = false;
+        return options;
+    };
+
+    // Position 191 makes initial MTP drafting cross the first non-sink page boundary.
+    const std::vector<ninfer::TokenId> prompt(191, 198);
+    const ninfer::GenerationResult source =
+        engine.generate(engine.prepare_tokens(prompt), request(true, 4));
+    if (source.generated_token_ids.size() != 4) {
+        std::cerr << "KVarN continuation source did not complete\n";
+        return 1;
+    }
+    std::vector<ninfer::TokenId> continuation = prompt;
+    continuation.insert(continuation.end(), source.generated_token_ids.begin(),
+                        source.generated_token_ids.end() - 1);
+
+    const ninfer::GenerationResult baseline =
+        engine.generate(engine.prepare_tokens(continuation), request(false, 1));
+    std::vector<ninfer::TokenId> filler_prompt(193, 197);
+    auto filler = engine.submit(engine.prepare_tokens(std::move(filler_prompt)), request(false, 8));
+    auto resumed = engine.submit(engine.prepare_tokens(continuation), request(true, 1));
+    const ninfer::GenerationResult resumed_result = resumed.wait();
+    const ninfer::GenerationResult filler_result  = filler.wait();
+    if (baseline.generated_token_ids.size() != 1 || filler_result.generated_token_ids.size() != 8 ||
+        resumed_result.generated_token_ids.size() != 1 ||
+        resumed_result.reused_prompt_tokens != continuation.size() ||
+        resumed_result.generated_token_ids != baseline.generated_token_ids) {
+        std::cerr << "KVarN continuation changed after cross-row activation: reused="
+                  << resumed_result.reused_prompt_tokens << '\n';
         return 1;
     }
     return 0;
@@ -1447,6 +1506,16 @@ int main() {
             return 1;
         }
         const int result = exercise_pressure_partial_spill_and_resume(qwen38_nvfp4);
+        if (result == 0) { std::cout << "ok\n"; }
+        return result;
+    }
+    if (scenario != nullptr && std::string_view(scenario) == "kvarn-continuation") {
+        const char* artifact = nvfp4 != nullptr && *nvfp4 != '\0' ? nvfp4 : groupwise;
+        if (artifact == nullptr || *artifact == '\0') {
+            std::cerr << "kvarn-continuation requires a Qwen3.6 27B artifact\n";
+            return 1;
+        }
+        const int result = exercise_kvarn_continuation(artifact);
         if (result == 0) { std::cout << "ok\n"; }
         return result;
     }

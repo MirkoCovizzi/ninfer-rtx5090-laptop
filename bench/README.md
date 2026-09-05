@@ -19,7 +19,74 @@ cmake --build build --parallel --target ninfer_bench
 
 ## Product benchmark
 
-The benchmark slices exact token counts from `bench/fixtures/bench_corpus.ids`, calls
+For KVarN, use at least 128 decode tokens and include non-page-aligned prompt lengths so the
+measurement includes periodic 64-token page encoding and speculative page-boundary handling.
+Record acceptance alongside throughput; a short, all-accepted run is not representative of every
+MTP workload.
+
+`ninfer_kvarn_attention_bench --context N` measures cached attention, committed append, provisional
+widths 1 through 6, and a prefill append-and-attend chunk ending at visible context `N`. Each sample
+restores Q/K/V and the exact pre-append cache state outside the timed interval. `closes_page=1`
+identifies samples containing page-closing Sinkhorn work. Compare, for example, `--context 8192`
+with `--context 8198` to distinguish closure cost from ordinary small-width append cost. Do not interpret the
+former as an amortized per-token latency.
+
+Use `--phase cached|append|provisional|prefill` and `--width 1..6` to isolate a decode/append
+case for kernel profiling; omit `--width` for the 1,024-token prefill case. `--batch 1..8` uses
+independent cache rows with equal context lengths; prefill is measured only at batch one.
+Provisional cases supply explicit valid-column counts, as the Engine does. Multi-row cases use
+the runtime's conservative lower execution-envelope bound by default. `--tight-envelope` instead
+uses the exact common frontier to measure launch overprovisioning on this homogeneous fixture;
+it is not a production optimization or evidence that arbitrary mixed-row graphs can use that bound.
+
+```bash
+./build/bench/ninfer_kvarn_attention_bench --context 196614 --phase provisional --width 4
+./build/bench/ninfer_kvarn_attention_bench --context 32774 --phase provisional --width 4 --batch 2
+```
+
+**KVarN Parity Qualification**
+
+The regression matrix and paper/reference comparison are maintained in
+[`paged-kv-cache.md`](../docs/maintainer/paged-kv-cache.md#greedy-regression).
+The parity fixes retain packed decode and the K4V2-G64 codec. A matched public Engine check on
+Qwen3.8-27B NVFP4, RTX 5090 Laptop GPU (82 SMs), CUDA 13.1/driver 13.2 used MTP5 with the optimized
+proposal head, CUDA Graphs, 1,024-token prefill chunks, one warmup and one measured repetition:
+
+| Prompt + generated tokens | Before partition fix, decode tok/s | Qualified implementation, decode tok/s |
+|---|---:|---:|
+| 32,799 + 128 | 161.43 | 161.55 |
+| 131,103 + 128 | 92.41 | 90.68 |
+
+Acceptance remained 1.0 and 0.85 respectively. These are single-run measurements, not a claim of
+statistical equivalence or zero cost: the final 128K point is about 1.9% slower. Final prefill
+rates were 3,676 and 1,756 tok/s, versus 3,703 and 1,781 before the partition fix. This comparison
+does not establish multi-request throughput or the paper's quality results.
+
+Wide-batch parity additionally requires the W8 vocabulary projection to retain the same eight-way
+K reduction through 48 columns. At `N=248320,K=5120`, single cold-cache Linear samples at T=40/48
+changed from 2.228/2.582 ms to 2.423/2.848 ms. Staging the 48-column activation tile in two halves
+reduced its initial corrected latency from 3.708 ms to 2.848 ms. Nsight Compute confirmed static
+shared memory fell from 57,856 to 33,280 bytes and the occupancy limit rose from one to two CTAs
+per SM. This residual operator cost affects wide batches, not single-request vocabulary dispatch.
+
+The KVarN-local probability-tile swizzle subsequently removed two-way matrix-load bank conflicts
+without changing arithmetic or cache semantics. On the same GPU/toolchain, C=1 masked width-four
+append-and-attend medians at visible contexts 32,774 / 131,078 / 196,614 changed from
+142.112 / 534.528 / 784.384 us to 138.048 / 520.192 / 759.808 us (about 3% lower).
+The C=2 32,774-context case changed from 282.624 to 276.480 us with the production-conservative
+execution envelope unchanged. Page-closing and width-five/six 192K samples showed substantial
+timing variability; they do not establish a uniform gain across all cases.
+
+A matched, unprofiled public Engine MTP3 run with the optimized proposal head, graphs, 1,024-token
+prefill chunks, one warmup, and one measured repetition changed decode throughput from
+133.24 to 133.40 tok/s at 32,799 + 128 and from 86.49 to 87.25 tok/s at 131,103 + 128.
+Acceptance remained 1.0 / 0.85047. These small single-run changes are not statistical guarantees.
+Nsight Compute 2025.4.1 at its base-clock setting attributed the operator improvement to excess
+shared-memory wavefronts falling from 14,283,232 to 1,304,992; probability matrix-load conflicts
+were eliminated, while occupancy remained one 512-thread CTA per SM. Qualification passed the
+independent KVarN Op suite, all-depth 8,192-token greedy parity, and C=2 MTP3 prefix restoration.
+
+The product benchmark slices exact token counts from `bench/fixtures/bench_corpus.ids`, calls
 `Engine::prepare_tokens()`, then calls `Engine::generate()` once for each repetition. It does not
 have a private prefill/decode loop and does not call target implementation interfaces.
 
@@ -48,7 +115,7 @@ ninfer_bench --weights <artifact.ninfer>
           [-pg, --prompt-gen <P,G;P,G...>]
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
-          [--kv-dtype <bf16|int8|fp8>]
+          [--kv-dtype <bf16|int8|fp8|kvarn>]
           [--mtp-draft-tokens <0..5>] [--lm-head-draft]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]

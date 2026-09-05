@@ -52,6 +52,7 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
 
     Tensor ar_position = state.execution.io.mtp->position.slice(0, 0, 1);
     ops::set_i32_scalar(ar_position, position + 1, state.execution.device.stream);
+    card.set_kvarn_provisional(true);
     for (int i = 1; i < static_cast<int>(state.mtp_proposal_extent); ++i) {
         Tensor previous_token = state.execution.io.mtp->draft_tokens.slice(0, i - 1, 1);
         Tensor next_draft     = state.execution.io.mtp->draft_tokens.slice(0, i, 1);
@@ -151,6 +152,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                                     state.execution.device.stream);
         card.mtp_forward_decode_batch(alignment_ids, target_hidden, target_positions, target_rope,
                                       licensed_counts, mtp_rows, envelopes.batch, alignment_hidden);
+        card.set_kvarn_provisional(true);
         ops::speculative_select_accepted_hidden(alignment_hidden, accepted, ar_hidden,
                                                 state.execution.device.stream);
 

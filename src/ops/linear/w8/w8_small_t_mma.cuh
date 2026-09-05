@@ -68,6 +68,11 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
     constexpr int kGroupK     = Schedule::kGroupK;
     constexpr int kGroups     = kHidden / kGroupK;
     constexpr int kTileCols   = Schedule::kTileTokens;
+    // Wide vocabulary verification keeps eight K splits but stages half its columns at a time.
+    // This avoids the >48 KiB shared-memory footprint without changing any column's arithmetic.
+    constexpr int kStageCols = Geometry::kOutputRows == 248320 && kTileCols == 48 ? 24 : kTileCols;
+    constexpr int kColumnStages = kTileCols / kStageCols;
+    constexpr int kStageNt      = kStageCols / 8;
     static_assert((kHidden % kGroupK) == 0);
     static_assert(ActiveCols >= 1 && ActiveCols <= kTileCols);
     static_assert(RowPolicy::kOutputRowsPerCta <= kRowsPerCta);
@@ -77,7 +82,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
     union SharedStorage {
         struct {
             std::uint8_t codes[kMmaRows][kGroupK];
-            __nv_bfloat16 activations[kWarps][kTileCols * kTileK];
+            __nv_bfloat16 activations[kWarps][kStageCols * kTileK];
             std::uint8_t scales[kMmaRows][Schedule::kScaleAccess == W8SmallTMmaScaleAccess::Shared
                                               ? Schedule::kScaleBytesPerRow
                                               : 1];
@@ -100,26 +105,27 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
 
     const int cta_row0 = static_cast<int>(blockIdx.x) * RowPolicy::kOutputRowsPerCta;
 
-    const auto stage_x = [&](int group_k0) {
+    const auto stage_x = [&](int group_k0, int column_base) {
         constexpr bool kPaddedStage =
             Schedule::kActivationStage == W8SmallTMmaActivationStage::PaddedZero;
-        constexpr int kStageCols     = kPaddedStage ? kTileCols : ActiveCols;
-        constexpr int kItemsPerSplit = kStageCols * (kTileK / 8);
-        for (int item = lane; item < kItemsPerSplit; item += 32) {
+        const int stage_cols =
+            kPaddedStage ? kStageCols : min(kStageCols, ActiveCols - column_base);
+        const int items_per_split = stage_cols * (kTileK / 8);
+        for (int item = lane; item < items_per_split; item += 32) {
             const int col = item / (kTileK / 8);
             const int k8  = item - col * (kTileK / 8);
             auto* dst     = &b_shared[warp][col * kTileK + w8_small_t_swizzle_64(col, k8 * 8)];
             if constexpr (!kPaddedStage || ActiveCols == kTileCols) {
                 cp_async<16, Schedule::kActivationCache>(
-                    dst, &x[static_cast<std::int64_t>(col) * kHidden + group_k0 + warp * kTileK +
-                            k8 * 8]);
+                    dst, &x[static_cast<std::int64_t>(column_base + col) * kHidden + group_k0 +
+                            warp * kTileK + k8 * 8]);
             } else {
-                const int source_col = col < ActiveCols ? col : 0;
+                const int source_col = column_base + col < ActiveCols ? column_base + col : 0;
                 cp_async_zfill<16, Schedule::kActivationCache>(
                     dst,
                     &x[static_cast<std::int64_t>(source_col) * kHidden + group_k0 + warp * kTileK +
                        k8 * 8],
-                    col < ActiveCols ? 16 : 0);
+                    column_base + col < ActiveCols ? 16 : 0);
             }
         }
     };
@@ -165,7 +171,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
     }
 
     stage_codes(0);
-    stage_x(0);
+    stage_x(0, 0);
     cp_commit();
     cp_wait<0>();
     __syncthreads();
@@ -193,61 +199,75 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
         const unsigned bot_scale_pair = __shfl_sync(kMask, lane_scale_pair, (lane & ~3) + 1);
 
 #pragma unroll
-        for (int group = 0; group < 2; ++group) {
-            float group_acc[kNt][4];
-#pragma unroll
-            for (int ni = 0; ni < kNt; ++ni) {
-                group_acc[ni][0] = 0.0f;
-                group_acc[ni][1] = 0.0f;
-                group_acc[ni][2] = 0.0f;
-                group_acc[ni][3] = 0.0f;
+        for (int column_stage = 0; column_stage < kColumnStages; ++column_stage) {
+            if (column_stage != 0) {
+                __syncthreads();
+                stage_x(group_k0, column_stage * kStageCols);
+                cp_commit();
+                cp_wait<0>();
+                __syncthreads();
             }
 #pragma unroll
-            for (int ki = 0; ki < 2; ++ki) {
-                const int ks              = group * 2 + ki;
-                const int code_col        = ks * 16 + lid * 2;
-                const auto load_code_pair = [&](int code_row, int col) {
-                    const int chunk  = (warp_koff + col) >> 4;
-                    const int offset = (chunk ^ (code_row & 7)) * 16 + (col & 15);
-                    return static_cast<unsigned>(
-                        *reinterpret_cast<const unsigned short*>(&code_shared[code_row][offset]));
-                };
-                const unsigned af0 = w8_small_t_bf16_pair_from_s8(load_code_pair(gid, code_col));
-                const unsigned af1 =
-                    w8_small_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col));
-                const unsigned af2 =
-                    w8_small_t_bf16_pair_from_s8(load_code_pair(gid, code_col + 8));
-                const unsigned af3 =
-                    w8_small_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col + 8));
+            for (int group = 0; group < 2; ++group) {
+                float group_acc[kStageNt][4];
 #pragma unroll
-                for (int ni = 0; ni < kNt; ++ni) {
-                    unsigned bf0, bf1;
-                    const int br = ni * 8 + b_rin;
-                    ldmatrix_x2(
-                        bf0, bf1,
-                        smem_addr(&b_shared[k_split][br * kTileK +
-                                                     w8_small_t_swizzle_64(br, ks * 16 + b_koff)]));
-                    mma_bf16(group_acc[ni][0], group_acc[ni][1], group_acc[ni][2], group_acc[ni][3],
-                             af0, af1, af2, af3, bf0, bf1);
+                for (int ni = 0; ni < kStageNt; ++ni) {
+                    group_acc[ni][0] = 0.0f;
+                    group_acc[ni][1] = 0.0f;
+                    group_acc[ni][2] = 0.0f;
+                    group_acc[ni][3] = 0.0f;
                 }
-            }
-            const unsigned top_bits = group == 0 ? top_scale_pair & 0xffffu : top_scale_pair >> 16;
-            const unsigned bot_bits = group == 0 ? bot_scale_pair & 0xffffu : bot_scale_pair >> 16;
-            const float top_scale   = __half2float(__ushort_as_half(top_bits));
-            const float bot_scale   = __half2float(__ushort_as_half(bot_bits));
 #pragma unroll
-            for (int ni = 0; ni < kNt; ++ni) {
-                acc[ni][0] = fmaf(group_acc[ni][0], top_scale, acc[ni][0]);
-                acc[ni][1] = fmaf(group_acc[ni][1], top_scale, acc[ni][1]);
-                acc[ni][2] = fmaf(group_acc[ni][2], bot_scale, acc[ni][2]);
-                acc[ni][3] = fmaf(group_acc[ni][3], bot_scale, acc[ni][3]);
+                for (int ki = 0; ki < 2; ++ki) {
+                    const int ks              = group * 2 + ki;
+                    const int code_col        = ks * 16 + lid * 2;
+                    const auto load_code_pair = [&](int code_row, int col) {
+                        const int chunk  = (warp_koff + col) >> 4;
+                        const int offset = (chunk ^ (code_row & 7)) * 16 + (col & 15);
+                        return static_cast<unsigned>(*reinterpret_cast<const unsigned short*>(
+                            &code_shared[code_row][offset]));
+                    };
+                    const unsigned af0 =
+                        w8_small_t_bf16_pair_from_s8(load_code_pair(gid, code_col));
+                    const unsigned af1 =
+                        w8_small_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col));
+                    const unsigned af2 =
+                        w8_small_t_bf16_pair_from_s8(load_code_pair(gid, code_col + 8));
+                    const unsigned af3 =
+                        w8_small_t_bf16_pair_from_s8(load_code_pair(gid + 8, code_col + 8));
+#pragma unroll
+                    for (int ni = 0; ni < kStageNt; ++ni) {
+                        unsigned bf0, bf1;
+                        const int br = ni * 8 + b_rin;
+                        ldmatrix_x2(
+                            bf0, bf1,
+                            smem_addr(&b_shared[k_split][br * kTileK + w8_small_t_swizzle_64(
+                                                                           br, ks * 16 + b_koff)]));
+                        mma_bf16(group_acc[ni][0], group_acc[ni][1], group_acc[ni][2],
+                                 group_acc[ni][3], af0, af1, af2, af3, bf0, bf1);
+                    }
+                }
+                const unsigned top_bits =
+                    group == 0 ? top_scale_pair & 0xffffu : top_scale_pair >> 16;
+                const unsigned bot_bits =
+                    group == 0 ? bot_scale_pair & 0xffffu : bot_scale_pair >> 16;
+                const float top_scale = __half2float(__ushort_as_half(top_bits));
+                const float bot_scale = __half2float(__ushort_as_half(bot_bits));
+#pragma unroll
+                for (int ni = 0; ni < kStageNt; ++ni) {
+                    const int out_ni = column_stage * kStageNt + ni;
+                    acc[out_ni][0]   = fmaf(group_acc[ni][0], top_scale, acc[out_ni][0]);
+                    acc[out_ni][1]   = fmaf(group_acc[ni][1], top_scale, acc[out_ni][1]);
+                    acc[out_ni][2]   = fmaf(group_acc[ni][2], bot_scale, acc[out_ni][2]);
+                    acc[out_ni][3]   = fmaf(group_acc[ni][3], bot_scale, acc[out_ni][3]);
+                }
             }
         }
 
         if (group_index + 1 < kGroups) {
             __syncthreads();
             stage_codes(group_k0 + kGroupK);
-            stage_x(group_k0 + kGroupK);
+            stage_x(group_k0 + kGroupK, 0);
             cp_commit();
             cp_wait<0>();
             __syncthreads();

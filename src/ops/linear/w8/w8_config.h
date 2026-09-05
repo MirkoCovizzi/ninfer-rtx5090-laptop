@@ -67,7 +67,7 @@ using W8MtpDownProjectionGeometry      = W8LinearGeometry<5120, 17408>;
 using W835bMtpProjectionGeometry       = W8LinearGeometry<2048, 4096>;
 
 inline constexpr std::int32_t kW8VocabularyFirstSmallT         = 1;
-inline constexpr std::int32_t kW8VocabularyLastSmallT          = 33;
+inline constexpr std::int32_t kW8VocabularyLastSmallT          = 48;
 inline constexpr std::int32_t kW8MtpInputFirstSmallT           = 1;
 inline constexpr std::int32_t kW8MtpInputLastSmallT            = 48;
 inline constexpr std::int32_t kW8MtpAttentionFirstSmallT       = 1;
@@ -93,8 +93,10 @@ struct W8LinearSmallTProductionSchedule<W8VocabularyProjectionGeometry, ActiveTo
                                        : ActiveTokens <= 16 ? 16
                                        : ActiveTokens <= 24 ? 24
                                        : ActiveTokens <= 32 ? 32
-                                                            : 40;
-    static constexpr int kKWarps     = ActiveTokens <= 32 ? 8 : 4;
+                                       : ActiveTokens <= 40 ? 40
+                                                            : 48;
+    // Keep the decode K-reduction profile across all eight-row MTP verification widths.
+    static constexpr int kKWarps = 8;
     static constexpr auto kScaleAccess =
         ActiveTokens > 4 ? W8SmallTMmaScaleAccess::Shared : W8SmallTMmaScaleAccess::Direct;
     using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, 2, kScaleAccess>;

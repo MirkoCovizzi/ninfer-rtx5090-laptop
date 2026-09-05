@@ -1,0 +1,1002 @@
+#pragma once
+
+#include "ninfer/ops/kvarn.h"
+#include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
+#include "ops/kvarn/config.cuh"
+#include "ops/kvarn/hadamard.cuh"
+
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <math_constants.h>
+
+#include <climits>
+#include <cstdint>
+
+namespace ninfer::ops::kvarn {
+namespace detail {
+
+inline constexpr int kDecodeBc            = 32;
+inline constexpr int kDecodeBr            = 16;
+inline constexpr int kDecodeWarps         = 8;
+inline constexpr int kPackedKWordsPerHalf = 4;
+inline constexpr int kPackedKWords        = 2 * kPackedKWordsPerHalf * D;
+inline constexpr int kPackedVBytes        = Group * (D / 4);
+inline constexpr int kVCodeValues         = 4;
+static_assert(VBits == 2);
+
+__device__ __forceinline__ int decode_probability_swizzle(int row, int col) {
+    // A 64-byte row already selects bank bit 4; use the next row bits for the 16-byte XOR.
+    return (((col >> 3) ^ ((row >> 1) & 3)) << 3) | (col & 7);
+}
+
+struct alignas(16) DecodeRecordMetadata {
+    __half k_scale[D];
+    __half k_zero[D];
+    float k_token_scale[Group];
+    // Plane by position in the packed V byte so consumer warps read consecutive banks.
+    float v_channel_scale[kVCodeValues][D / kVCodeValues];
+    float v_base[Group][kVCodeValues];
+};
+
+template <typename Geometry>
+__device__ __forceinline__ int kvarn_decode_active_splits(int window, int launch_capacity) {
+    if constexpr (Geometry::QHeads == 24) {
+        if (window > 8198) {
+            int splits    = div_up(window, 192);
+            const int cap = window <= DecodeMidWindow ? DecodeMidSplits : DecodeLongSplits;
+            splits        = min(splits, cap);
+            return min(splits, launch_capacity);
+        }
+    }
+    return causal_small_t_active_splits<Geometry, false>(window, launch_capacity, 1);
+}
+
+__device__ __forceinline__ int decode_tail_slot(const std::int32_t* markers, int table_row,
+                                                int logical_page) {
+    int tail_slot = -1;
+#pragma unroll
+    for (int slot = 0; slot < kKvarnTailSlots; ++slot) {
+        if (markers[slot + kKvarnTailSlots * table_row] == logical_page) { tail_slot = slot; }
+    }
+    return tail_slot;
+}
+
+// The closing query sees the encoded page, whereas earlier queries still see its BF16 tail.
+// Packed CTAs must not share K/V staging across that representation boundary.
+__device__ __forceinline__ int decode_tail_boundary(int first_position, int tokens) {
+    if (first_position / Group < kKvarnSinkPages) { return tokens; }
+    return min(tokens, Group - 1 - (first_position & (Group - 1)));
+}
+
+// Share staged K/V only while every column retains its scalar split partition and page view.
+template <typename Geometry, int ColumnsPerBlock>
+__device__ __forceinline__ int decode_group_end(int first_position, int begin, int tokens,
+                                                int split_capacity) {
+    int end            = min(begin + ColumnsPerBlock, tokens);
+    const int boundary = decode_tail_boundary(first_position + begin, end - begin);
+    if (boundary > 0) { end = min(end, begin + boundary); }
+    const int window = first_position + begin + 1;
+    const int splits = kvarn_decode_active_splits<Geometry>(window, split_capacity);
+    const int tiles  = div_up(window, kDecodeBc);
+    const bool tiled = tiles >= splits;
+    const int units  = div_up(tiled ? tiles : window, splits);
+    // Stop at the next unit-size, split-count, or policy change without scanning columns.
+    int partition_end = units * splits * (tiled ? kDecodeBc : 1);
+    if (!tiled) { partition_end = min(partition_end, (splits - 1) * kDecodeBc); }
+    if constexpr (Geometry::QHeads == 24) {
+        if (window > 8198) {
+            if (window <= DecodeMidWindow) { partition_end = min(partition_end, DecodeMidWindow); }
+            return min(end, partition_end - first_position);
+        }
+    }
+    const int keys = (window <= 4096    ? 64
+                      : window <= 8198  ? 128
+                      : window <= 16390 ? 256
+                                        : 480) /
+                     Geometry::SmallTSplitScale;
+    const int policy_end = window <= 4096    ? 4096
+                           : window <= 8198  ? 8198
+                           : window <= 16390 ? 16390
+                                             : INT_MAX;
+    partition_end        = min(partition_end, policy_end);
+    if (splits < min(split_capacity, Geometry::SmallTMaximumSplits)) {
+        partition_end = min(partition_end, splits * keys);
+    }
+    return min(end, partition_end - first_position);
+}
+
+__device__ __forceinline__ void stage_decode_record(unsigned* packed_k, std::uint8_t* packed_v,
+                                                    DecodeRecordMetadata* metadata,
+                                                    const std::uint8_t* record, int tid,
+                                                    int threads) {
+    constexpr int KChunks = kKvarnKScaleOffset / 16;
+    for (int chunk = tid; chunk < KChunks; chunk += threads) {
+        const int4 packed = load_vec<int4>(record + kKvarnKPackedOffset + chunk * 16);
+        const int dim     = chunk >> 1;
+        const int half    = chunk & 1;
+        packed_k[(half * kPackedKWordsPerHalf + 0) * D + dim] = static_cast<unsigned>(packed.x);
+        packed_k[(half * kPackedKWordsPerHalf + 1) * D + dim] = static_cast<unsigned>(packed.y);
+        packed_k[(half * kPackedKWordsPerHalf + 2) * D + dim] = static_cast<unsigned>(packed.z);
+        packed_k[(half * kPackedKWordsPerHalf + 3) * D + dim] = static_cast<unsigned>(packed.w);
+    }
+    constexpr int VChunks = kPackedVBytes / 16;
+    for (int chunk = tid; chunk < VChunks; chunk += threads) {
+        store_vec(packed_v + chunk * 16, load_vec<int4>(record + kKvarnVPackedOffset + chunk * 16));
+    }
+
+    const auto* k_scale   = reinterpret_cast<const __half*>(record + kKvarnKScaleOffset);
+    const auto* k_zero    = reinterpret_cast<const __half*>(record + kKvarnKZeroOffset);
+    const auto* k_token   = reinterpret_cast<const __half*>(record + kKvarnKTokenScaleOffset);
+    const auto* v_channel = reinterpret_cast<const __half*>(record + kKvarnVChannelScaleOffset);
+    const auto* v_scale   = reinterpret_cast<const __half*>(record + kKvarnVTokenScaleOffset);
+    const auto* v_zero    = reinterpret_cast<const __half*>(record + kKvarnVTokenZeroOffset);
+    for (int dim = tid; dim < D; dim += threads) {
+        metadata->k_scale[dim]                       = k_scale[dim];
+        metadata->k_zero[dim]                        = k_zero[dim];
+        metadata->v_channel_scale[dim & 3][dim >> 2] = __half2float(v_channel[dim]);
+    }
+    for (int token = tid; token < Group; token += threads) {
+        metadata->k_token_scale[token] = __half2float(k_token[token]);
+        const float scale              = __half2float(v_scale[token]);
+        const float zero               = __half2float(v_zero[token]);
+#pragma unroll
+        for (int code = 0; code < kVCodeValues; ++code) {
+            metadata->v_base[token][code] = fmaf(static_cast<float>(code), scale, zero);
+        }
+    }
+    __syncthreads();
+}
+
+__device__ __forceinline__ void
+stage_decode_key_quad(__nv_bfloat16* destination, const unsigned* packed_k,
+                      const DecodeRecordMetadata* metadata, const __nv_bfloat16* tail_k,
+                      int table_row, int tail_slot, int heads, int head, int logical_begin,
+                      int valid_begin, int valid_end, int tid) {
+    constexpr int Bc     = kDecodeBc;
+    const int token_base = logical_begin & (Group - 1);
+    if (tail_slot >= 0) {
+        for (int chunk = tid; chunk < Bc * (D / 8); chunk += 2 * D) {
+            const int token       = chunk / (D / 8);
+            const int d           = (chunk % (D / 8)) * 8;
+            __nv_bfloat16* output = destination + token * D + causal_small_t_tc_swz(token, d);
+            const int position    = logical_begin + token;
+            if (position < valid_begin || position >= valid_end) {
+                store_vec(output, make_int4(0, 0, 0, 0));
+                continue;
+            }
+            const std::int64_t source =
+                static_cast<std::int64_t>(d) +
+                static_cast<std::int64_t>(D) *
+                    (token_base + token +
+                     Group * (head + heads * (tail_slot + kKvarnTailSlots * table_row)));
+            store_vec(output, load_vec<int4>(tail_k + source));
+        }
+        return;
+    }
+
+    const int record_half = token_base / Bc;
+    const int segment     = tid / D;
+    const int dim         = tid & (D - 1);
+    const int word_base   = record_half * kPackedKWordsPerHalf;
+    const int4 packed     = make_int4(static_cast<int>(packed_k[(word_base + 0) * D + dim]),
+                                      static_cast<int>(packed_k[(word_base + 1) * D + dim]),
+                                      static_cast<int>(packed_k[(word_base + 2) * D + dim]),
+                                      static_cast<int>(packed_k[(word_base + 3) * D + dim]));
+    const float scale     = __half2float(metadata->k_scale[dim]);
+    const float zero      = __half2float(metadata->k_zero[dim]);
+#pragma unroll
+    for (int pair = segment; pair < Bc / 2; pair += 2) {
+        const int token      = 2 * pair;
+        const int word_index = pair >> 2;
+        const unsigned word  = word_index == 0   ? static_cast<unsigned>(packed.x)
+                               : word_index == 1 ? static_cast<unsigned>(packed.y)
+                               : word_index == 2 ? static_cast<unsigned>(packed.z)
+                                                 : static_cast<unsigned>(packed.w);
+        const unsigned codes = (word >> (8 * (pair & 3))) & 0xffU;
+        const auto token_scales =
+            *reinterpret_cast<const float2*>(metadata->k_token_scale + token_base + token);
+        const float decoded0 = fmaf(static_cast<float>(codes & 15U), scale, zero) * token_scales.x;
+        const float decoded1 = fmaf(static_cast<float>(codes >> 4), scale, zero) * token_scales.y;
+        const int position0  = logical_begin + token;
+        const int position1  = position0 + 1;
+        destination[token * D + causal_small_t_tc_swz(token, dim)] =
+            position0 >= valid_begin && position0 < valid_end ? __float2bfloat16_rn(decoded0)
+                                                              : __float2bfloat16_rn(0.0F);
+        destination[(token + 1) * D + causal_small_t_tc_swz(token + 1, dim)] =
+            position1 >= valid_begin && position1 < valid_end ? __float2bfloat16_rn(decoded1)
+                                                              : __float2bfloat16_rn(0.0F);
+    }
+}
+
+__device__ __forceinline__ void
+stage_decode_key(__nv_bfloat16* destination, const unsigned* packed_k,
+                 const DecodeRecordMetadata* metadata, const __nv_bfloat16* tail_k, int table_row,
+                 int tail_slot, int heads, int head, int logical_begin, int valid_begin,
+                 int valid_end, int tid, int threads) {
+    constexpr int Bc     = kDecodeBc;
+    const int token_base = logical_begin & (Group - 1);
+    if (tail_slot >= 0) {
+        for (int chunk = tid; chunk < Bc * (D / 8); chunk += threads) {
+            const int token       = chunk / (D / 8);
+            const int d           = (chunk % (D / 8)) * 8;
+            __nv_bfloat16* output = destination + token * D + causal_small_t_tc_swz(token, d);
+            const int position    = logical_begin + token;
+            if (position < valid_begin || position >= valid_end) {
+                store_vec(output, make_int4(0, 0, 0, 0));
+                continue;
+            }
+            const std::int64_t source =
+                static_cast<std::int64_t>(d) +
+                static_cast<std::int64_t>(D) *
+                    (token_base + token +
+                     Group * (head + heads * (tail_slot + kKvarnTailSlots * table_row)));
+            store_vec(output, load_vec<int4>(tail_k + source));
+        }
+        return;
+    }
+
+    const int warp        = tid >> 5;
+    const int lane        = tid & 31;
+    const int record_half = token_base / Bc;
+    for (int dim = warp * 32 + lane; dim < D; dim += (threads / 32) * 32) {
+        const int word_base = record_half * kPackedKWordsPerHalf;
+        const int4 packed   = make_int4(static_cast<int>(packed_k[(word_base + 0) * D + dim]),
+                                        static_cast<int>(packed_k[(word_base + 1) * D + dim]),
+                                        static_cast<int>(packed_k[(word_base + 2) * D + dim]),
+                                        static_cast<int>(packed_k[(word_base + 3) * D + dim]));
+        const float scale   = __half2float(metadata->k_scale[dim]);
+        const float zero    = __half2float(metadata->k_zero[dim]);
+#pragma unroll
+        for (int pair = 0; pair < Bc / 2; ++pair) {
+            const int token      = 2 * pair;
+            const int word_index = pair >> 2;
+            const unsigned word  = word_index == 0   ? static_cast<unsigned>(packed.x)
+                                   : word_index == 1 ? static_cast<unsigned>(packed.y)
+                                   : word_index == 2 ? static_cast<unsigned>(packed.z)
+                                                     : static_cast<unsigned>(packed.w);
+            const unsigned codes = (word >> (8 * (pair & 3))) & 0xffU;
+            const auto token_scales =
+                *reinterpret_cast<const float2*>(metadata->k_token_scale + token_base + token);
+            const float decoded0 =
+                fmaf(static_cast<float>(codes & 15U), scale, zero) * token_scales.x;
+            const float decoded1 =
+                fmaf(static_cast<float>(codes >> 4), scale, zero) * token_scales.y;
+            const int position0 = logical_begin + token;
+            const int position1 = position0 + 1;
+            destination[token * D + causal_small_t_tc_swz(token, dim)] =
+                position0 >= valid_begin && position0 < valid_end ? __float2bfloat16_rn(decoded0)
+                                                                  : __float2bfloat16_rn(0.0F);
+            destination[(token + 1) * D + causal_small_t_tc_swz(token + 1, dim)] =
+                position1 >= valid_begin && position1 < valid_end ? __float2bfloat16_rn(decoded1)
+                                                                  : __float2bfloat16_rn(0.0F);
+        }
+    }
+}
+
+__device__ __forceinline__ void
+stage_decode_value(__nv_bfloat16* destination, const std::uint8_t* packed_v,
+                   const DecodeRecordMetadata* metadata, const __nv_bfloat16* tail_v, int table_row,
+                   int tail_slot, int heads, int head, int logical_begin, int valid_begin,
+                   int valid_end, int tid, int threads) {
+    constexpr int Bc     = kDecodeBc;
+    const int token_base = logical_begin & (Group - 1);
+    if (tail_slot >= 0) {
+        for (int chunk = tid; chunk < Bc * (D / 8); chunk += threads) {
+            const int token       = chunk / (D / 8);
+            const int d           = (chunk % (D / 8)) * 8;
+            __nv_bfloat16* output = destination + token * D + causal_small_t_tc_swz(token, d);
+            const int position    = logical_begin + token;
+            if (position < valid_begin || position >= valid_end) {
+                store_vec(output, make_int4(0, 0, 0, 0));
+                continue;
+            }
+            const std::int64_t source =
+                static_cast<std::int64_t>(d) +
+                static_cast<std::int64_t>(D) *
+                    (token_base + token +
+                     Group * (head + heads * (tail_slot + kKvarnTailSlots * table_row)));
+            store_vec(output, load_vec<int4>(tail_v + source));
+        }
+        return;
+    }
+
+    for (int item = tid; item < Bc * (D / 8); item += threads) {
+        const int token        = item / (D / 8);
+        const int packed_pair  = item - token * (D / 8);
+        const int record_token = token_base + token;
+        const int position     = logical_begin + token;
+        const auto packed      = *reinterpret_cast<const std::uint16_t*>(
+            packed_v + record_token * (D / 4) + 2 * packed_pair);
+        unsigned values[8];
+#pragma unroll
+        for (int value_index = 0; value_index < 8; ++value_index) {
+            const int packed_dim = 2 * packed_pair + (value_index >> 2);
+            const int plane      = value_index & 3;
+            const int code       = (packed >> (2 * value_index)) & 3;
+            const float decoded =
+                metadata->v_base[record_token][code] * metadata->v_channel_scale[plane][packed_dim];
+            const __nv_bfloat16 value = position >= valid_begin && position < valid_end
+                                            ? __float2bfloat16_rn(decoded)
+                                            : __float2bfloat16_rn(0.0F);
+            values[value_index]       = __bfloat16_as_ushort(value);
+        }
+        const int4 packed_values = make_int4(static_cast<int>(values[0] | (values[1] << 16)),
+                                             static_cast<int>(values[2] | (values[3] << 16)),
+                                             static_cast<int>(values[4] | (values[5] << 16)),
+                                             static_cast<int>(values[6] | (values[7] << 16)));
+        auto* output = destination + token * D + causal_small_t_tc_swz(token, 8 * packed_pair);
+        store_vec(output, packed_values);
+    }
+}
+
+template <typename Geometry, bool MultiBatch, bool Masked, int ColumnsPerBlock = 1>
+__launch_bounds__(kDecodeWarps*(ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock) * 32,
+                  ColumnsPerBlock == 1 ? 2 : 1) __global__
+    void attention_decode_kernel(const __nv_bfloat16* q, const std::uint8_t* records,
+                                 const __nv_bfloat16* tail_k, const __nv_bfloat16* tail_v,
+                                 const std::int32_t* markers, const std::int32_t* positions,
+                                 const std::int32_t* block_tables,
+                                 const std::int32_t* valid_columns, const std::int32_t* table_rows,
+                                 std::int32_t table_stride, std::int32_t tokens,
+                                 std::int32_t full_width, std::int32_t column_begin,
+                                 std::int32_t logical_capacity, std::int32_t heads, float scale,
+                                 __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
+    static_assert(ColumnsPerBlock >= 1 && ColumnsPerBlock <= 4);
+    constexpr int ColumnsPerMma            = ColumnsPerBlock == 4 ? 2 : 1;
+    constexpr int WarpGroups               = ColumnsPerBlock / ColumnsPerMma;
+    constexpr int WarpsPerColumn           = kDecodeWarps;
+    constexpr int Wc                       = WarpsPerColumn * WarpGroups;
+    constexpr int Br                       = kDecodeBr;
+    constexpr int Bc                       = kDecodeBc;
+    constexpr int Threads                  = Wc * 32;
+    constexpr int QKNt                     = Bc / 8;
+    constexpr int QKKs                     = D / 16;
+    constexpr int PVNt                     = D / 8;
+    constexpr int ProducerWarpsPerColumn   = ColumnsPerBlock == 4 ? 4 : 1;
+    constexpr int ValueStageWarpsPerColumn = WarpsPerColumn - ProducerWarpsPerColumn;
+    constexpr int ValueStageWarps          = ValueStageWarpsPerColumn * WarpGroups;
+    constexpr int PVWarpsPerColumn = ColumnsPerBlock == 4 ? WarpsPerColumn : WarpsPerColumn - 1;
+    constexpr int FirstPVWarp      = WarpsPerColumn - PVWarpsPerColumn;
+    constexpr int PVNtPerWarp      = div_up(PVNt, PVWarpsPerColumn);
+    constexpr int QKNtPerWarp      = QKNt / ProducerWarpsPerColumn;
+    constexpr int PVKs             = Bc / 16;
+    constexpr int PageIds          = 64;
+    constexpr float Log2E          = 1.4426950408889634074f;
+    constexpr unsigned FullMask    = 0xffffffffu;
+    static_assert(Group == 2 * Bc);
+    static_assert(QKNt % ProducerWarpsPerColumn == 0);
+    static_assert(Geometry::GroupSize <= Br);
+
+    __shared__ __align__(16) __nv_bfloat16 qkv_s[2 * Bc * D];
+    __shared__ __align__(16) __nv_bfloat16 p_s[WarpGroups * Br * Bc];
+    __shared__ float alpha_s[WarpGroups * Br];
+    __shared__ float producer_m_s[WarpGroups][ProducerWarpsPerColumn][Br];
+    __shared__ float producer_l_s[WarpGroups][ProducerWarpsPerColumn][Br][4];
+    __shared__ float running_m_s[WarpGroups][Br];
+    __shared__ __align__(16) unsigned packed_k_s[kPackedKWords];
+    __shared__ __align__(16) std::uint8_t packed_v_s[kPackedVBytes];
+    __shared__ DecodeRecordMetadata metadata_s;
+    __shared__ std::int32_t physical_pages_s[PageIds];
+    extern __shared__ __align__(16) __nv_bfloat16 query_s[];
+    __nv_bfloat16* k_s = qkv_s;
+    __nv_bfloat16* v_s = qkv_s + Bc * D;
+
+    const int kv_head       = static_cast<int>(blockIdx.x);
+    const int split         = static_cast<int>(blockIdx.y);
+    const int flat_group    = static_cast<int>(blockIdx.z);
+    const int column_groups = div_up(tokens + 2 * (ColumnsPerBlock - 1), ColumnsPerBlock);
+    const int batch         = MultiBatch ? flat_group / column_groups : 0;
+    const int column_group  = MultiBatch ? flat_group - batch * column_groups : flat_group;
+    const int split_count   = static_cast<int>(gridDim.y);
+    const int tid           = static_cast<int>(threadIdx.x);
+    const int warp          = tid >> 5;
+    const int lane          = tid & 31;
+    const int group_lane    = warp / WarpsPerColumn;
+    const int local_warp    = warp - group_lane * WarpsPerColumn;
+    const int local_tid     = local_warp * 32 + lane;
+    const std::int64_t batch_column_base =
+        MultiBatch ? static_cast<std::int64_t>(batch) * full_width : 0;
+    int group_begin = column_group;
+    int group_end   = min(group_begin + 1, tokens);
+    if constexpr (ColumnsPerBlock > 1) {
+        group_end = 0;
+        for (int group = 0; group <= column_group && group_end < tokens; ++group) {
+            group_begin = group_end;
+            group_end   = decode_group_end<Geometry, ColumnsPerBlock>(
+                positions[batch_column_base + column_begin], group_begin, tokens, split_count);
+            if (group < column_group && group_end == tokens) { group_begin = tokens; }
+        }
+    }
+    if (group_begin >= tokens) { return; }
+    const int column         = group_begin + group_lane * ColumnsPerMma;
+    const int row_count      = Geometry::GroupSize;
+    const int current_column = column_begin + column;
+    const std::int64_t column_base =
+        current_column + (MultiBatch ? static_cast<std::int64_t>(batch) * full_width : 0);
+    const int table_row = table_rows == nullptr ? 0 : table_rows[batch];
+    const std::int32_t* block_table =
+        block_tables + static_cast<std::int64_t>(table_row) * table_stride;
+    if constexpr (MultiBatch) {
+        partial_acc +=
+            static_cast<std::int64_t>(batch) * D * Geometry::QHeads * tokens * split_count;
+        partial_m += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
+        partial_l += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
+    }
+
+    auto write_neutral = [&]() {
+        for (int packed_column = 0; packed_column < ColumnsPerMma; ++packed_column) {
+            const int output_column = column + packed_column;
+            if (output_column >= group_end) { continue; }
+            for (int row = local_tid; row < row_count; row += WarpsPerColumn * 32) {
+                const int q_head = kv_head * Geometry::GroupSize + row;
+                partial_m[causal_partial_stat_index<Geometry>(q_head, output_column, split,
+                                                              tokens)] = -CUDART_INF_F;
+                partial_l[causal_partial_stat_index<Geometry>(q_head, output_column, split,
+                                                              tokens)] = 0.0f;
+            }
+            for (int index = local_tid; index < row_count * D; index += WarpsPerColumn * 32) {
+                const int row    = index / D;
+                const int d      = index % D;
+                const int q_head = kv_head * Geometry::GroupSize + row;
+                partial_acc[causal_partial_acc_index<Geometry>(q_head, d, output_column, split,
+                                                               tokens)] = __float2bfloat16(0.0f);
+            }
+        }
+    };
+
+    const int valid_tokens = Masked ? min(tokens, valid_columns[batch] - column_begin) : tokens;
+    const bool valid0      = column < group_end && column < valid_tokens;
+    const bool valid1 = ColumnsPerMma == 2 && column + 1 < group_end && column + 1 < valid_tokens;
+    if (kv_head >= Geometry::KVHeads || group_begin >= valid_tokens || split_count <= 0) {
+        if (kv_head < Geometry::KVHeads && column < group_end) { write_neutral(); }
+        return;
+    }
+    const int anchor_column   = min(group_end, valid_tokens) - 1;
+    const int query_position0 = valid0 ? positions[batch_column_base + current_column] : -1;
+    const int query_position1 = valid1 ? positions[batch_column_base + current_column + 1] : -1;
+    const int anchor_position = positions[batch_column_base + column_begin + anchor_column];
+    if (anchor_position < 0 || anchor_position >= logical_capacity) {
+        if (column < group_end) { write_neutral(); }
+        return;
+    }
+    const int window        = anchor_position + 1;
+    const int active_splits = kvarn_decode_active_splits<Geometry>(window, split_count);
+    if (split >= active_splits) { return; }
+    const int logical_tiles = div_up(window, Bc);
+    const bool tile_split   = logical_tiles >= active_splits;
+    const int units_per_split =
+        tile_split ? div_up(logical_tiles, active_splits) : div_up(window, active_splits);
+    const int split_start = split * units_per_split * (tile_split ? Bc : 1);
+    const int split_end   = min(split_start + units_per_split * (tile_split ? Bc : 1), window);
+    if (split_start >= split_end) {
+        write_neutral();
+        return;
+    }
+    const int first_tile = (split_start / Bc) * Bc;
+    const int key_blocks = div_up(split_end - first_tile, Bc);
+    const int first_page = first_tile >> kPagedKVPageShift;
+    const int page_count = ((split_end - 1) >> kPagedKVPageShift) - first_page + 1;
+    for (int page = tid; page < page_count; page += Threads) {
+        physical_pages_s[page] = block_table[first_page + page];
+    }
+    for (int index = local_tid; index < Br * D; index += WarpsPerColumn * 32) {
+        const int stage_row              = index / D;
+        const int d                      = index % D;
+        const int packed_column          = ColumnsPerMma == 2 ? stage_row >> 3 : 0;
+        const int row                    = ColumnsPerMma == 2 ? stage_row & 7 : stage_row;
+        const bool valid                 = packed_column == 0 ? valid0 : valid1;
+        const int q_head                 = kv_head * Geometry::GroupSize + row;
+        const std::int64_t source_column = column_base + packed_column;
+        __nv_bfloat16* query_stage       = ColumnsPerBlock >= 3 ? query_s : qkv_s;
+        query_stage[(group_lane * Br + stage_row) * D + causal_small_t_tc_swz(stage_row, d)] =
+            valid && row < row_count
+                ? q[static_cast<std::int64_t>(D) * Geometry::QHeads * source_column +
+                    causal_q_index<Geometry>(q_head, d)]
+                : __float2bfloat16(0.0f);
+    }
+    __syncthreads();
+
+    const int gid      = lane >> 2;
+    const int lid      = lane & 3;
+    const int a_mat    = lane >> 3;
+    const int a_rin    = lane & 7;
+    const int a_rowoff = a_rin + ((a_mat & 1) << 3);
+    const int a_coloff = (a_mat >> 1) << 3;
+    const int b_rin    = lane & 7;
+    const int b_koff   = ((lane >> 3) & 1) << 3;
+
+    // The four-column route splits QK across four producers, uses the other four warps to stage V,
+    // then puts all eight warps on PV. Other routes retain fixed producer/consumer roles.
+    union {
+        unsigned query_fragment[ColumnsPerBlock >= 3 ? 1 : QKKs][4];
+        float accumulator[PVNtPerWarp][4];
+    } warp_state;
+
+    if constexpr (ColumnsPerBlock < 3) {
+        if (local_warp == 0) {
+#pragma unroll
+            for (int k = 0; k < QKKs; ++k) {
+                const int query_col = k * 16 + a_coloff;
+                ldmatrix_x4(warp_state.query_fragment[k][0], warp_state.query_fragment[k][1],
+                            warp_state.query_fragment[k][2], warp_state.query_fragment[k][3],
+                            smem_addr(&qkv_s[(group_lane * Br + a_rowoff) * D +
+                                             causal_small_t_tc_swz(a_rowoff, query_col)]));
+            }
+        }
+    }
+    __syncthreads();
+
+    int physical_page = physical_pages_s[0];
+    if (local_warp >= FirstPVWarp) {
+#pragma unroll
+        for (int n = 0; n < PVNtPerWarp; ++n) {
+#pragma unroll
+            for (int item = 0; item < 4; ++item) { warp_state.accumulator[n][item] = 0.0f; }
+        }
+    }
+    float m0 = -CUDART_INF_F, m1 = -CUDART_INF_F, l0 = 0.0f, l1 = 0.0f;
+    bool key_ready = false;
+    for (int block = 0; block < key_blocks; ++block) {
+        const int k0 = first_tile + block * Bc;
+        if (block != 0 && (k0 & kPagedKVPageMask) == 0) {
+            physical_page = physical_pages_s[(k0 >> kPagedKVPageShift) - first_page];
+        }
+        const int logical_page = k0 / Group;
+        const int tail_slot =
+            logical_page >= kKvarnSinkPages && anchor_position >= (logical_page + 1) * Group - 1
+                ? -1
+                : decode_tail_slot(markers, table_row, logical_page);
+        const std::uint8_t* record =
+            records +
+            (static_cast<std::int64_t>(physical_page) * heads + kv_head) * kKvarnRecordBytes;
+        if (tail_slot < 0 && (block == 0 || (k0 & (Group - 1)) == 0)) {
+            stage_decode_record(packed_k_s, packed_v_s, &metadata_s, record, tid, Threads);
+        }
+        if constexpr (ColumnsPerBlock == 4) {
+            if (!key_ready) {
+                stage_decode_key_quad(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot,
+                                      heads, kv_head, k0, max(k0, split_start),
+                                      min(k0 + Bc, split_end), tid);
+                __syncthreads();
+            }
+            key_ready = false;
+        } else {
+            stage_decode_key(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot, heads,
+                             kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end), tid,
+                             Threads);
+            __syncthreads();
+        }
+
+        if (local_warp < ProducerWarpsPerColumn) {
+            float score[QKNtPerWarp][4];
+#pragma unroll
+            for (int tile = 0; tile < QKNtPerWarp; ++tile) {
+                score[tile][0] = score[tile][1] = score[tile][2] = score[tile][3] = 0.0f;
+            }
+#pragma unroll
+            for (int k = 0; k < QKKs; ++k) {
+#pragma unroll
+                for (int local_tile = 0; local_tile < QKNtPerWarp; ++local_tile) {
+                    const int tile = local_warp * QKNtPerWarp + local_tile;
+                    unsigned key_fragment[2];
+                    const int row = tile * 8 + b_rin;
+                    const int col = k * 16 + b_koff;
+                    ldmatrix_x2(key_fragment[0], key_fragment[1],
+                                smem_addr(&k_s[row * D + causal_small_t_tc_swz(row, col)]));
+                    if constexpr (ColumnsPerBlock >= 3) {
+                        unsigned query_fragment[4];
+                        const int query_col = k * 16 + a_coloff;
+                        ldmatrix_x4(
+                            query_fragment[0], query_fragment[1], query_fragment[2],
+                            query_fragment[3],
+                            smem_addr(&query_s[(group_lane * Br + a_rowoff) * D +
+                                               causal_small_t_tc_swz(a_rowoff, query_col)]));
+                        mma_bf16(score[local_tile][0], score[local_tile][1], score[local_tile][2],
+                                 score[local_tile][3], query_fragment[0], query_fragment[1],
+                                 query_fragment[2], query_fragment[3], key_fragment[0],
+                                 key_fragment[1]);
+                    } else {
+                        mma_bf16(score[local_tile][0], score[local_tile][1], score[local_tile][2],
+                                 score[local_tile][3], warp_state.query_fragment[k][0],
+                                 warp_state.query_fragment[k][1], warp_state.query_fragment[k][2],
+                                 warp_state.query_fragment[k][3], key_fragment[0], key_fragment[1]);
+                    }
+                }
+            }
+            const int row0          = gid;
+            const int row1          = row0 + 8;
+            const bool row1_valid   = ColumnsPerMma == 2 ? row0 < row_count : row1 < row_count;
+            const int row1_position = ColumnsPerMma == 2 ? query_position1 : query_position0;
+            float block_m0 = -CUDART_INF_F, block_m1 = -CUDART_INF_F;
+#pragma unroll
+            for (int local_tile = 0; local_tile < QKNtPerWarp; ++local_tile) {
+                const int tile       = local_warp * QKNtPerWarp + local_tile;
+                const int col0       = tile * 8 + 2 * lid;
+                const int col1       = col0 + 1;
+                const int key0       = k0 + col0;
+                const int key1       = k0 + col1;
+                score[local_tile][0] = row0 < row_count && key0 >= split_start &&
+                                               key0 < split_end && key0 <= query_position0
+                                           ? score[local_tile][0] * scale
+                                           : -CUDART_INF_F;
+                score[local_tile][1] = row0 < row_count && key1 >= split_start &&
+                                               key1 < split_end && key1 <= query_position0
+                                           ? score[local_tile][1] * scale
+                                           : -CUDART_INF_F;
+                score[local_tile][2] =
+                    row1_valid && key0 >= split_start && key0 < split_end && key0 <= row1_position
+                        ? score[local_tile][2] * scale
+                        : -CUDART_INF_F;
+                score[local_tile][3] =
+                    row1_valid && key1 >= split_start && key1 < split_end && key1 <= row1_position
+                        ? score[local_tile][3] * scale
+                        : -CUDART_INF_F;
+                block_m0 = fmaxf(block_m0, fmaxf(score[local_tile][0], score[local_tile][1]));
+                block_m1 = fmaxf(block_m1, fmaxf(score[local_tile][2], score[local_tile][3]));
+            }
+            block_m0 = warp_max<4>(block_m0, FullMask);
+            block_m1 = warp_max<4>(block_m1, FullMask);
+            float next_m0;
+            float next_m1;
+            float alpha0;
+            float alpha1;
+            if constexpr (ProducerWarpsPerColumn == 1) {
+                next_m0 = fmaxf(m0, block_m0);
+                next_m1 = fmaxf(m1, block_m1);
+                alpha0  = m0 == -CUDART_INF_F ? 0.0f : exp2_approx((m0 - next_m0) * Log2E);
+                alpha1  = m1 == -CUDART_INF_F ? 0.0f : exp2_approx((m1 - next_m1) * Log2E);
+            } else {
+                if (lid == 0) {
+                    producer_m_s[group_lane][local_warp][row0] = block_m0;
+                    producer_m_s[group_lane][local_warp][row1] = block_m1;
+                    if (local_warp == 0) {
+                        running_m_s[group_lane][row0] = m0;
+                        running_m_s[group_lane][row1] = m1;
+                    }
+                }
+                if (group_lane == 0) {
+                    asm volatile("bar.sync 1, 128;" ::: "memory");
+                } else {
+                    asm volatile("bar.sync 2, 128;" ::: "memory");
+                }
+                block_m0 = producer_m_s[group_lane][0][row0];
+                block_m1 = producer_m_s[group_lane][0][row1];
+#pragma unroll
+                for (int producer = 1; producer < ProducerWarpsPerColumn; ++producer) {
+                    block_m0 = fmaxf(block_m0, producer_m_s[group_lane][producer][row0]);
+                    block_m1 = fmaxf(block_m1, producer_m_s[group_lane][producer][row1]);
+                }
+                const float previous_m0 = running_m_s[group_lane][row0];
+                const float previous_m1 = running_m_s[group_lane][row1];
+                next_m0                 = fmaxf(previous_m0, block_m0);
+                next_m1                 = fmaxf(previous_m1, block_m1);
+                alpha0                  = previous_m0 == -CUDART_INF_F
+                                              ? 0.0f
+                                              : exp2_approx((previous_m0 - next_m0) * Log2E);
+                alpha1                  = previous_m1 == -CUDART_INF_F
+                                              ? 0.0f
+                                              : exp2_approx((previous_m1 - next_m1) * Log2E);
+            }
+            float block_l0 = 0.0f, block_l1 = 0.0f;
+#pragma unroll
+            for (int local_tile = 0; local_tile < QKNtPerWarp; ++local_tile) {
+                const int tile  = local_warp * QKNtPerWarp + local_tile;
+                const int col0  = tile * 8 + 2 * lid;
+                const int col1  = col0 + 1;
+                const float p00 = next_m0 > -CUDART_INF_F && score[local_tile][0] > -CUDART_INF_F
+                                      ? exp2_approx((score[local_tile][0] - next_m0) * Log2E)
+                                      : 0.0f;
+                const float p01 = next_m0 > -CUDART_INF_F && score[local_tile][1] > -CUDART_INF_F
+                                      ? exp2_approx((score[local_tile][1] - next_m0) * Log2E)
+                                      : 0.0f;
+                const float p10 = next_m1 > -CUDART_INF_F && score[local_tile][2] > -CUDART_INF_F
+                                      ? exp2_approx((score[local_tile][2] - next_m1) * Log2E)
+                                      : 0.0f;
+                const float p11 = next_m1 > -CUDART_INF_F && score[local_tile][3] > -CUDART_INF_F
+                                      ? exp2_approx((score[local_tile][3] - next_m1) * Log2E)
+                                      : 0.0f;
+                block_l0 += p00 + p01;
+                block_l1 += p10 + p11;
+                const int probability_base = group_lane * Br * Bc;
+                p_s[probability_base + gid * Bc + decode_probability_swizzle(gid, col0)] =
+                    __float2bfloat16(p00);
+                p_s[probability_base + gid * Bc + decode_probability_swizzle(gid, col1)] =
+                    __float2bfloat16(p01);
+                p_s[probability_base + (gid + 8) * Bc + decode_probability_swizzle(gid + 8, col0)] =
+                    __float2bfloat16(p10);
+                p_s[probability_base + (gid + 8) * Bc + decode_probability_swizzle(gid + 8, col1)] =
+                    __float2bfloat16(p11);
+            }
+            if constexpr (ProducerWarpsPerColumn == 1) {
+                block_l0 = warp_sum<4>(block_l0, FullMask);
+                block_l1 = warp_sum<4>(block_l1, FullMask);
+                l0       = l0 * alpha0 + block_l0;
+                l1       = l1 * alpha1 + block_l1;
+                m0       = next_m0;
+                m1       = next_m1;
+                if (lid == 0) {
+                    alpha_s[group_lane * Br + row0] = alpha0;
+                    alpha_s[group_lane * Br + row1] = alpha1;
+                }
+            } else {
+                producer_l_s[group_lane][local_warp][row0][lid] = block_l0;
+                producer_l_s[group_lane][local_warp][row1][lid] = block_l1;
+                if (group_lane == 0) {
+                    asm volatile("bar.sync 1, 128;" ::: "memory");
+                } else {
+                    asm volatile("bar.sync 2, 128;" ::: "memory");
+                }
+                if (local_warp == 0) {
+                    // Preserve the scalar route's per-lane tile sum before reducing lanes.
+#pragma unroll
+                    for (int producer = 1; producer < ProducerWarpsPerColumn; ++producer) {
+                        block_l0 += producer_l_s[group_lane][producer][row0][lid];
+                        block_l1 += producer_l_s[group_lane][producer][row1][lid];
+                    }
+                    block_l0 = warp_sum<4>(block_l0, FullMask);
+                    block_l1 = warp_sum<4>(block_l1, FullMask);
+                    l0       = l0 * alpha0 + block_l0;
+                    l1       = l1 * alpha1 + block_l1;
+                    m0       = next_m0;
+                    m1       = next_m1;
+                    if (lid == 0) {
+                        alpha_s[group_lane * Br + row0] = alpha0;
+                        alpha_s[group_lane * Br + row1] = alpha1;
+                    }
+                }
+            }
+        } else {
+            const int worker_warp =
+                group_lane * ValueStageWarpsPerColumn + local_warp - ProducerWarpsPerColumn;
+            const int worker_tid = worker_warp * 32 + lane;
+            stage_decode_value(v_s, packed_v_s, &metadata_s, tail_v, table_row, tail_slot, heads,
+                               kv_head, k0, max(k0, split_start), min(k0 + Bc, split_end),
+                               worker_tid, ValueStageWarps * 32);
+        }
+        __syncthreads();
+
+        if (local_warp >= FirstPVWarp) {
+            const int consumer_warp = local_warp - FirstPVWarp;
+            const int output_tile   = consumer_warp * PVNtPerWarp;
+            const float alpha0      = alpha_s[group_lane * Br + gid];
+            const float alpha1      = alpha_s[group_lane * Br + gid + 8];
+#pragma unroll
+            for (int n = 0; n < PVNtPerWarp; ++n) {
+                warp_state.accumulator[n][0] *= alpha0;
+                warp_state.accumulator[n][1] *= alpha0;
+                warp_state.accumulator[n][2] *= alpha1;
+                warp_state.accumulator[n][3] *= alpha1;
+            }
+#pragma unroll
+            for (int n = 0; n < PVNtPerWarp; ++n) {
+                const int global_n = output_tile + n;
+                if (global_n >= PVNt) { continue; }
+#pragma unroll
+                for (int k = 0; k < PVKs; ++k) {
+                    unsigned probability_fragment[4];
+                    const int probability_col = k * 16 + a_coloff;
+                    ldmatrix_x4(
+                        probability_fragment[0], probability_fragment[1], probability_fragment[2],
+                        probability_fragment[3],
+                        smem_addr(&p_s[group_lane * Br * Bc + a_rowoff * Bc +
+                                        decode_probability_swizzle(a_rowoff, probability_col)]));
+                    unsigned value_fragment[2];
+                    const int value_row = k * 16 + b_koff + b_rin;
+                    const int value_col = global_n * 8;
+                    ldmatrix_x2_t(
+                        value_fragment[0], value_fragment[1],
+                        smem_addr(
+                            &v_s[value_row * D + causal_small_t_tc_swz(value_row, value_col)]));
+                    mma_bf16(warp_state.accumulator[n][0], warp_state.accumulator[n][1],
+                             warp_state.accumulator[n][2], warp_state.accumulator[n][3],
+                             probability_fragment[0], probability_fragment[1],
+                             probability_fragment[2], probability_fragment[3], value_fragment[0],
+                             value_fragment[1]);
+                }
+            }
+        }
+        if constexpr (ColumnsPerBlock == 4) {
+            const int next_k0 = k0 + Bc;
+            if (block + 1 < key_blocks && (next_k0 & (Group - 1)) != 0) {
+                stage_decode_key_quad(k_s, packed_k_s, &metadata_s, tail_k, table_row, tail_slot,
+                                      heads, kv_head, next_k0, max(next_k0, split_start),
+                                      min(next_k0 + Bc, split_end), tid);
+                key_ready = true;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (local_warp == 0 && lid == 0 && column < group_end) {
+        const int row0 = gid;
+        const int row1 = row0 + 8;
+        if (row0 < row_count) {
+            const int q_head = kv_head * Geometry::GroupSize + row0;
+            partial_m[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = m0;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, column, split, tokens)] = l0;
+        }
+        const int row1_head = ColumnsPerMma == 2 ? row0 : row1;
+        const int column1   = ColumnsPerMma == 2 ? column + 1 : column;
+        if (row1_head < row_count && column1 < group_end) {
+            const int q_head = kv_head * Geometry::GroupSize + row1_head;
+            partial_m[causal_partial_stat_index<Geometry>(q_head, column1, split, tokens)] = m1;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, column1, split, tokens)] = l1;
+        }
+    }
+    if (local_warp >= FirstPVWarp) {
+        const int consumer_warp = local_warp - FirstPVWarp;
+#pragma unroll
+        for (int n = 0; n < PVNtPerWarp; ++n) {
+            const int global_n = consumer_warp * PVNtPerWarp + n;
+            if (global_n >= PVNt) { continue; }
+            const int d0   = global_n * 8 + 2 * lid;
+            const int d1   = d0 + 1;
+            const int row0 = gid;
+            const int row1 = row0 + 8;
+            if (row0 < row_count) {
+                qkv_s[(group_lane * Br + row0) * D + d0] =
+                    __float2bfloat16(warp_state.accumulator[n][0]);
+                qkv_s[(group_lane * Br + row0) * D + d1] =
+                    __float2bfloat16(warp_state.accumulator[n][1]);
+            }
+            const int row1_head = ColumnsPerMma == 2 ? row0 : row1;
+            if (row1_head < row_count) {
+                qkv_s[(group_lane * Br + row1) * D + d0] =
+                    __float2bfloat16(warp_state.accumulator[n][2]);
+                qkv_s[(group_lane * Br + row1) * D + d1] =
+                    __float2bfloat16(warp_state.accumulator[n][3]);
+            }
+        }
+    }
+    __syncthreads();
+    if (column >= group_end) { return; }
+    for (int chunk = local_tid; chunk < ColumnsPerMma * row_count * (D / 8);
+         chunk += WarpsPerColumn * 32) {
+        const int packed_column = chunk / (row_count * (D / 8));
+        const int local_chunk   = chunk - packed_column * row_count * (D / 8);
+        const int row           = local_chunk / (D / 8);
+        const int d             = (local_chunk % (D / 8)) * 8;
+        const int output_column = column + packed_column;
+        if (output_column >= group_end) { continue; }
+        const int source_row = row + (ColumnsPerMma == 2 ? packed_column * 8 : 0);
+        const int q_head     = kv_head * Geometry::GroupSize + row;
+        const std::int64_t destination =
+            causal_partial_acc_index<Geometry>(q_head, d, output_column, split, tokens);
+        store_vec(partial_acc + destination,
+                  load_vec<int4>(qkv_s + (group_lane * Br + source_row) * D + d));
+    }
+}
+
+template <typename Geometry, bool MultiBatch, bool Masked, bool PerTokenSplits, int ColumnsPerBlock>
+__launch_bounds__(D) __global__
+    void reduce_output_hadamard_kernel(const __nv_bfloat16* partial_acc, const float* partial_m,
+                                       const float* partial_l, const std::int32_t* positions,
+                                       const std::int32_t* valid_columns, std::int32_t tokens,
+                                       std::int32_t full_width, std::int32_t column_begin,
+                                       std::int32_t batch_size, std::int32_t split_count,
+                                       __nv_bfloat16* output) {
+    const int q_head      = static_cast<int>(blockIdx.x);
+    const int flat_column = static_cast<int>(blockIdx.z);
+    int batch             = 0;
+    int token             = flat_column;
+    if constexpr (MultiBatch) {
+        batch = flat_column / tokens;
+        token = flat_column - batch * tokens;
+    }
+    const int tid = static_cast<int>(threadIdx.x);
+    if (q_head >= Geometry::QHeads || token >= tokens) { return; }
+    if constexpr (MultiBatch) {
+        if (batch >= batch_size) { return; }
+    }
+
+    positions += column_begin;
+    if constexpr (MultiBatch) { positions += batch * full_width; }
+    int split_token = PerTokenSplits ? token : tokens - 1;
+    if constexpr (ColumnsPerBlock > 1) {
+        const int valid_tokens = Masked ? min(tokens, valid_columns[batch] - column_begin) : tokens;
+        for (int begin = 0; begin < tokens;) {
+            const int end = decode_group_end<Geometry, ColumnsPerBlock>(positions[0], begin, tokens,
+                                                                        split_count);
+            if (token < end) {
+                if (begin < valid_tokens) { split_token = min(end, valid_tokens) - 1; }
+                break;
+            }
+            begin = end;
+        }
+    }
+    const int query_position = positions[split_token];
+    int output_column        = column_begin + token;
+    if constexpr (MultiBatch) { output_column += batch * full_width; }
+
+    std::int64_t partial_acc_offset = 0;
+    if constexpr (MultiBatch) {
+        partial_acc_offset =
+            static_cast<std::int64_t>(batch) * D * Geometry::QHeads * tokens * split_count;
+        const std::int64_t stat_offset =
+            static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
+        partial_m += stat_offset;
+        partial_l += stat_offset;
+    }
+    const int active_splits = kvarn_decode_active_splits<Geometry>(query_position + 1, split_count);
+
+    __shared__ float stage[2][D];
+    __shared__ float split_weights[D];
+    static_assert(Geometry::SmallTMaximumSplits <= D);
+    float local_m = -CUDART_INF_F;
+    for (int split = tid; split < active_splits; split += D) {
+        local_m = fmaxf(
+            local_m, partial_m[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)]);
+    }
+    stage[0][tid] = local_m;
+    __syncthreads();
+    for (int stride = D / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) { stage[0][tid] = fmaxf(stage[0][tid], stage[0][tid + stride]); }
+        __syncthreads();
+    }
+    const float head_m = stage[0][0];
+
+    float local_l = 0.0F;
+    if (head_m > -CUDART_INF_F) {
+        for (int split = tid; split < active_splits; split += D) {
+            const float tile_l =
+                partial_l[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)];
+            const float weight = tile_l > 0.0F ? expf(partial_m[causal_partial_stat_index<Geometry>(
+                                                          q_head, token, split, tokens)] -
+                                                      head_m)
+                                               : 0.0F;
+            split_weights[split] = weight;
+            if (tile_l > 0.0F) { local_l += tile_l * weight; }
+        }
+    }
+    stage[0][tid] = local_l;
+    __syncthreads();
+    for (int stride = D / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) { stage[0][tid] += stage[0][tid + stride]; }
+        __syncthreads();
+    }
+    const float head_l = stage[0][0];
+
+    float numerator = 0.0F;
+    if (head_l > 0.0F) {
+        for (int split = 0; split < active_splits; ++split) {
+            const float tile_l =
+                partial_l[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)];
+            if (tile_l <= 0.0F) { continue; }
+            const float weight       = split_weights[split];
+            const std::int64_t index = partial_acc_offset + causal_partial_acc_index<Geometry>(
+                                                                q_head, tid, token, split, tokens);
+            numerator += __bfloat162float(partial_acc[index]) * weight;
+        }
+    }
+    bool valid = true;
+    if constexpr (Masked) { valid = column_begin + token < valid_columns[batch]; }
+    const float combined = valid && head_l > 0.0F ? numerator / head_l : 0.0F;
+    float value          = __bfloat162float(__float2bfloat16_rn(combined));
+
+#pragma unroll
+    for (int span = 1; span < 32; span <<= 1) {
+        const float other = __shfl_xor_sync(0xffffffffU, value, span);
+        value             = (tid & span) == 0 ? value + other : other - value;
+    }
+    stage[0][tid] = value;
+    __syncthreads();
+    int current = 0;
+#pragma unroll
+    for (int span = 32; span < D; span <<= 1) {
+        const int group         = tid / (2 * span);
+        const int lane          = tid & (span - 1);
+        const int left          = group * 2 * span + lane;
+        const int right         = left + span;
+        const float left_value  = stage[current][left];
+        const float right_value = stage[current][right];
+        value = (tid & span) == 0 ? left_value + right_value : left_value - right_value;
+        stage[current ^ 1][tid] = value;
+        current ^= 1;
+        __syncthreads();
+    }
+    output[causal_q_index<Geometry>(q_head, tid, output_column)] =
+        __float2bfloat16_rn(value * 0.0625F);
+}
+
+} // namespace detail
+} // namespace ninfer::ops::kvarn
