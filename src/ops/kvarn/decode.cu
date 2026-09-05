@@ -88,7 +88,8 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
                     CausalAttentionExecutionEnvelope envelope, int column_begin, int width,
                     int splits, Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
                     Tensor& output, cudaStream_t stream) {
-    const dim3 grid(Geometry::KVHeads, splits, query.ne[3] * div_up(width, ColumnsPerBlock));
+    const dim3 grid(Geometry::KVHeads, splits,
+                    query.ne[3] * div_up(width + 2 * (ColumnsPerBlock - 1), ColumnsPerBlock));
     constexpr int query_groups = ColumnsPerBlock == 4 ? 2 : ColumnsPerBlock;
     constexpr std::size_t query_smem =
         ColumnsPerBlock >= 3
@@ -164,14 +165,17 @@ void decode_attention(const Tensor& query, const Tensor& positions, const Tensor
     for (int begin = 0; begin < query.ne[2]; begin += kChunk) {
         const int width = std::min(kChunk, query.ne[2] - begin);
         auto scope      = workspace.scope();
-        const int split_capacity =
+        int split_capacity =
             ops::detail::causal_attention_split_capacity(query.ne[1], width, DType::BF16, envelope);
+        if (query.ne[1] == CausalD256H24Kv4::QHeads && envelope.max_visible_keys > 8198) {
+            split_capacity = std::max(split_capacity, DecodeLongSplits);
+        }
         const int split_scale = query.ne[1] == CausalD256H24Kv4::QHeads
                                     ? CausalD256H24Kv4::SmallTSplitScale
                                     : CausalD256H16Kv2::SmallTSplitScale;
         int split_limit       = DecodeLongSplits * split_scale;
-        if (width == 1 && query.ne[1] == CausalD256H24Kv4::QHeads &&
-            envelope.min_visible_keys > 8198 && envelope.max_visible_keys <= DecodeMidWindow) {
+        if (query.ne[1] == CausalD256H24Kv4::QHeads && envelope.min_visible_keys > 8198 &&
+            envelope.max_visible_keys <= DecodeMidWindow) {
             split_limit = DecodeMidSplits;
         }
         const int splits = std::min(split_capacity, split_limit);

@@ -188,8 +188,6 @@ public:
 
     void commit_text_kvarn_pages(const Tensor& positions, const Tensor& accepted_columns,
                                  const Tensor& kv_table_rows);
-    void commit_mtp_kvarn_pages(const Tensor& positions, const Tensor& accepted_columns,
-                                const Tensor& kv_table_rows);
 
     [[nodiscard]] const Weight* proposal_head() const noexcept { return proposal_head_; }
 

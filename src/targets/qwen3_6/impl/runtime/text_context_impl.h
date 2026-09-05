@@ -271,17 +271,6 @@ void TextContext::commit_text_kvarn_pages(const Tensor& positions, const Tensor&
     }
 }
 
-void TextContext::commit_mtp_kvarn_pages(const Tensor& positions, const Tensor& accepted_columns,
-                                         const Tensor& kv_table_rows) {
-    if (batch_mtp_kv_ == nullptr || batch_mtp_kv_->storage() != KvCacheStorage::KvarnK4V2Group64) {
-        return;
-    }
-    for (std::uint32_t layer = 0; layer < batch_mtp_kv_->layers(); ++layer) {
-        ops::kvarn_commit_pages(positions, accepted_columns, kv_table_rows,
-                                batch_mtp_kv_->kvarn_batch_layer_view(layer), ctx_.stream);
-    }
-}
-
 void TextContext::bind() {
     using TargetBindings = LoadedModelData;
     using TargetMlp      = MlpWeights;

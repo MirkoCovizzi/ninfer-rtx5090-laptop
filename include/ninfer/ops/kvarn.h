@@ -24,7 +24,8 @@ inline constexpr std::int32_t kKvarnVChannelScaleOffset = 13440;
 inline constexpr std::int32_t kKvarnVTokenScaleOffset   = 13952;
 inline constexpr std::int32_t kKvarnVTokenZeroOffset    = 14080;
 inline constexpr std::int32_t kKvarnRecordPayloadBytes  = 14208;
-inline constexpr std::int32_t kKvarnRecordBytes         = 16384;
+inline constexpr std::int32_t kKvarnRecordBytes         = 14336;
+static_assert(kKvarnRecordBytes >= kKvarnRecordPayloadBytes && kKvarnRecordBytes % 256 == 0);
 
 struct KvarnTileStorage {
     Tensor k_codes;          // U8   [G/2,D,N]

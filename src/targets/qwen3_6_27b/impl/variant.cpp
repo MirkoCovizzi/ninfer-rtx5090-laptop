@@ -118,7 +118,7 @@ std::size_t post_mixer_workspace_bytes(QType gate_up_qtype, QType down_qtype,
 std::vector<GraphExecutionProfile> Variant::ordinary_graph_profiles(std::uint32_t capacity) {
     // E+1 is the one-token visible window. Early ranges limit empty producer CTAs; later ranges
     // follow measured split-policy transitions until the producer grid reaches its fixed cap.
-    return graph_profiles_through(capacity - 1, {127, 511, 2047, 4095, 8197, 16389, 32767});
+    return graph_profiles_through(capacity - 1, {127, 511, 2047, 4095, 8197, 16389, 32767, 122879});
 }
 
 std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t capacity,
@@ -145,8 +145,10 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
             add_shifted(visible_end, draft_window + 1);
         }
     }
-    // Keep the profile below the high-depth KVarN paired-column crossover on the scalar kernel.
-    add_shifted(122880U, draft_window + 1);
+    // KVarN packed verification starts above 1K; the final width-one AR step switches splits at
+    // 120K.
+    add_shifted(1024U, draft_window + 1);
+    add_shifted(122880U, 2 * draft_window);
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
     return graph_profiles_through(capacity - 1, ends);

@@ -2,8 +2,8 @@
 
 // Native CUDA execution of the fixed Huawei KVarN profile. Record decode and online-softmax follow
 // commit 7586257f1c632e63187bfacbbe21ccb51540f7b3 triton_kvarn_decode.py; permanent FP16 sinks and
-// provisional tail retirement follow kvarn_attn.py. NInfer supplies only its P=64 page translation
-// and bounded lane/table-row ownership.
+// provisional tail retention follow kvarn_attn.py. Query-position-based record visibility preserves
+// NInfer's ordinary decoding semantics across speculative page closures.
 
 #include "core/device.h"
 #include "ops/kvarn/config.cuh"
@@ -85,16 +85,29 @@ __device__ int tail_slot(int logical_page, int first_page, int last_page) {
     return -1;
 }
 
-__device__ int mapped_tail_slot(const ViewPointers& cache, int row, int logical_page,
-                                int first_page, int last_page) {
+__device__ int mapped_tail_slot(const ViewPointers& cache, int row, int logical_page) {
     for (int slot = 0; slot < kKvarnTailSlots; ++slot) {
         if (cache.markers[slot + kKvarnTailSlots * row] == logical_page) return slot;
     }
-    const int preferred = tail_slot(logical_page, first_page, last_page);
-    if (preferred < 0 || logical_page < kKvarnSinkPages) return preferred;
-    if (cache.markers[preferred + kKvarnTailSlots * row] < 0) return preferred;
+    return -1;
+}
+
+// Called by one thread per staging CTA. All CTAs touching a new page use the same preferred
+// slot; a concurrent claim of that page is success, not a reason to use the alternate slot.
+__device__ int claim_tail_slot(const ViewPointers& cache, int row, int page, int first_page,
+                               int last_page) {
+    auto* markers = cache.markers + kKvarnTailSlots * row;
+    for (int slot = 0; slot < kKvarnTailSlots; ++slot) {
+        if (atomicAdd(markers + slot, 0) == page) { return slot; }
+    }
+    const int preferred = tail_slot(page, first_page, last_page);
+    if (preferred < 0) { return -1; }
+    const int previous = atomicCAS(markers + preferred, -1, page);
+    if (previous == -1 || previous == page) { return preferred; }
+    if (page < kKvarnSinkPages) { return -1; }
     const int alternate = preferred == 2 ? 3 : 2;
-    return cache.markers[alternate + kKvarnTailSlots * row] < 0 ? alternate : -1;
+    const int other     = atomicCAS(markers + alternate, -1, page);
+    return other == -1 || other == page ? alternate : -1;
 }
 
 __global__ void stage_kernel(const __nv_bfloat16* key, const __nv_bfloat16* value,
@@ -120,8 +133,10 @@ __global__ void stage_kernel(const __nv_bfloat16* key, const __nv_bfloat16* valu
                              intersection_end == page_begin + kvarn::Group &&
                              page >= kKvarnSinkPages && !provisional;
     if (full_direct) return;
-    const int row  = table_rows[b];
-    const int slot = mapped_tail_slot(cache, row, page, first_page, last_page);
+    const int row = table_rows[b];
+    __shared__ int slot;
+    if (threadIdx.x == 0) { slot = claim_tail_slot(cache, row, page, first_page, last_page); }
+    __syncthreads();
     if (slot < 0) return;
     const int d = static_cast<int>(threadIdx.x);
     const std::int64_t source =
@@ -134,7 +149,6 @@ __global__ void stage_kernel(const __nv_bfloat16* key, const __nv_bfloat16* valu
             (offset + kvarn::Group * (head + cache.heads * (slot + kKvarnTailSlots * row)));
     cache.tail_k[destination] = key[source];
     cache.tail_v[destination] = value[source];
-    if (head == 0 && d == 0) cache.markers[slot + kKvarnTailSlots * row] = page;
 }
 
 __global__ void rotate_stage_kernel(const __nv_bfloat16* key, const __nv_bfloat16* value,
@@ -158,7 +172,9 @@ __global__ void rotate_stage_kernel(const __nv_bfloat16* key, const __nv_bfloat1
     const int first_page = start / kvarn::Group;
     const int last_page  = (end - 1) / kvarn::Group;
     const int row        = table_rows[b];
-    const int slot       = mapped_tail_slot(cache, row, page, first_page, last_page);
+    __shared__ int slot;
+    if (threadIdx.x == 0) { slot = claim_tail_slot(cache, row, page, first_page, last_page); }
+    __syncthreads();
     if (slot < 0) return;
     const int d = static_cast<int>(threadIdx.x);
     const std::int64_t source =
@@ -172,7 +188,6 @@ __global__ void rotate_stage_kernel(const __nv_bfloat16* key, const __nv_bfloat1
         static_cast<std::int64_t>(kvarn::D) *
             (offset + kvarn::Group * (head + cache.heads * (slot + kKvarnTailSlots * row)));
     (key_path ? cache.tail_k : cache.tail_v)[destination] = __float2bfloat16_rn(transformed);
-    if (key_path && head == 0 && d == 0) { cache.markers[slot + kKvarnTailSlots * row] = page; }
 }
 
 __device__ kvarn::StorePointers record_pointers(std::uint8_t* record) {
@@ -191,7 +206,7 @@ __device__ kvarn::StorePointers record_pointers(std::uint8_t* record) {
 __global__ void encode_kernel(const __nv_bfloat16* key, const __nv_bfloat16* value,
                               const std::int32_t* positions, const std::int32_t* valid_columns,
                               const std::int32_t* table_rows, ViewPointers cache, int width,
-                              int batch, int touched_pages, bool masked, bool from_tail_only) {
+                              int batch, int touched_pages, bool masked) {
     extern __shared__ float shared[];
     const int encoded   = static_cast<int>(blockIdx.x);
     const bool key_path = (encoded & 1) == 0;
@@ -213,9 +228,9 @@ __global__ void encode_kernel(const __nv_bfloat16* key, const __nv_bfloat16* val
     const int intersection_begin = max(start, page_begin);
     const int intersection_end   = min(end, page_begin + kvarn::Group);
     if (intersection_end != page_begin + kvarn::Group) return;
-    const bool full_direct = intersection_begin == page_begin && !from_tail_only;
+    const bool full_direct = intersection_begin == page_begin;
     const int row          = table_rows[b];
-    const int slot         = mapped_tail_slot(cache, row, page, first_page, last_page);
+    const int slot         = mapped_tail_slot(cache, row, page);
     if (!full_direct && (slot < 0 || cache.markers[slot + kKvarnTailSlots * row] != page)) return;
     const int physical = cache.block_tables[page + cache.logical_pages * row];
     if (physical < 0 || physical >= cache.physical_pages) return;
@@ -270,7 +285,7 @@ __global__ void retire_kernel(const std::int32_t* positions, const std::int32_t*
         return;
     }
     const int row  = table_rows[b];
-    const int slot = mapped_tail_slot(cache, row, page, first_page, last_page);
+    const int slot = mapped_tail_slot(cache, row, page);
     if (slot < 0) return;
     if (cache.markers[slot + kKvarnTailSlots * row] == page) {
         cache.markers[slot + kKvarnTailSlots * row] = -1;
@@ -372,17 +387,12 @@ void stage_and_encode(Tensor key, Tensor value, const Tensor& positions,
             provisional);
     }
     CUDA_CHECK(cudaGetLastError());
+    const int pages = max_touched_pages(width);
+    encode_kernel<<<2 * batch * pages * cache.num_kv_heads, kThreads, kStoreSharedBytes, stream>>>(
+        key_data, value_data, position_data, valid_data, row_data, view, width, batch, pages,
+        masked);
+    CUDA_CHECK(cudaGetLastError());
     if (!provisional) {
-        const int pages = max_touched_pages(width);
-        encode_kernel<<<2 * batch * pages * cache.num_kv_heads, kThreads, kStoreSharedBytes,
-                        stream>>>(static_cast<const __nv_bfloat16*>(key.data),
-                                  static_cast<const __nv_bfloat16*>(value.data),
-                                  static_cast<const std::int32_t*>(positions.data),
-                                  masked ? static_cast<const std::int32_t*>(valid_columns.data)
-                                         : nullptr,
-                                  static_cast<const std::int32_t*>(table_rows.data), view, width,
-                                  batch, pages, masked, false);
-        CUDA_CHECK(cudaGetLastError());
         retire_kernel<<<batch * pages, 1, 0, stream>>>(
             static_cast<const std::int32_t*>(positions.data),
             masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr,
@@ -428,9 +438,15 @@ std::size_t kvarn_attention_workspace_capacity_bytes(std::int32_t query_heads,
     }
     const std::int32_t kv_heads     = query_heads == 24 ? 4 : 2;
     const std::int32_t decode_width = std::min(max_width, 6);
-    const std::size_t decode        = causal_softmax_attention_workspace_capacity_bytes(
+    std::size_t decode              = causal_softmax_attention_workspace_capacity_bytes(
         {kvarn::D, query_heads, kv_heads}, DType::BF16, envelope, batch_size,
         std::min(min_width, decode_width), decode_width);
+    if (query_heads == 24 && envelope.max_visible_keys > 8198) {
+        const std::size_t split_rows = static_cast<std::size_t>(query_heads) * decode_width *
+                                       batch_size * kvarn::DecodeLongSplits;
+        decode = std::max(
+            decode, split_rows * (kvarn::D * sizeof(std::uint16_t) + 2 * sizeof(float)) + 3 * 256);
+    }
     if (batch_size != 1 || max_width < kKvarnGroup) { return decode; }
     const std::size_t slab_tokens =
         std::min<std::size_t>(envelope.max_visible_keys, kvarn::PrefillSlabTokens);
@@ -448,7 +464,6 @@ void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& posit
                      KvarnPagedBatchLayerView cache, bool provisional,
                      CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
                      Tensor& output, cudaStream_t stream) {
-    (void)workspace;
     validate_inputs(query, &key, &value, positions, valid_columns, kv_table_rows, cache, output);
     if (envelope.max_visible_keys == 0) {
         throw std::invalid_argument("KVarN attention: empty execution envelope");
@@ -457,10 +472,6 @@ void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& posit
     if (!rotate_on_stage) { rotate_kv(key, value, stream); }
     stage_and_encode(key, value, positions, valid_columns, kv_table_rows, cache, provisional,
                      rotate_on_stage, stream);
-    const int width = query.ne[2];
-    const int batch = query.ne[3];
-    (void)width;
-    (void)batch;
     kvarn::decode_attention(query, positions, valid_columns, kv_table_rows, scale, cache, envelope,
                             workspace, output, stream);
 }
@@ -470,7 +481,6 @@ void kvarn_attention_cached(Tensor query, const Tensor& positions, const Tensor&
                             CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
                             Tensor& output, cudaStream_t stream) {
     validate_inputs(query, nullptr, nullptr, positions, Tensor{}, kv_table_rows, cache, output);
-    (void)workspace;
     if (envelope.max_visible_keys == 0) {
         throw std::invalid_argument("KVarN attention: empty execution envelope");
     }
@@ -500,16 +510,6 @@ void kvarn_commit_pages(const Tensor& positions, const Tensor& accepted_columns,
     const int width = positions.ne[0];
     const int batch = positions.ne[1];
     const int pages = max_touched_pages(width);
-    static const cudaError_t encode_attribute =
-        cudaFuncSetAttribute(encode_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             static_cast<int>(kStoreSharedBytes));
-    CUDA_CHECK(encode_attribute);
-    encode_kernel<<<2 * batch * pages * cache.num_kv_heads, kThreads, kStoreSharedBytes, stream>>>(
-        nullptr, nullptr, static_cast<const std::int32_t*>(positions.data),
-        static_cast<const std::int32_t*>(accepted_columns.data),
-        static_cast<const std::int32_t*>(kv_table_rows.data), pointers(cache), width, batch, pages,
-        true, true);
-    CUDA_CHECK(cudaGetLastError());
     retire_kernel<<<batch * pages, 1, 0, stream>>>(
         static_cast<const std::int32_t*>(positions.data),
         static_cast<const std::int32_t*>(accepted_columns.data),

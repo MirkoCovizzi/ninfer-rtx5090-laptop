@@ -152,7 +152,6 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                                     state.execution.device.stream);
         card.mtp_forward_decode_batch(alignment_ids, target_hidden, target_positions, target_rope,
                                       licensed_counts, mtp_rows, envelopes.batch, alignment_hidden);
-        card.commit_mtp_kvarn_pages(target_positions, licensed_counts, mtp_rows);
         card.set_kvarn_provisional(true);
         ops::speculative_select_accepted_hidden(alignment_hidden, accepted, ar_hidden,
                                                 state.execution.device.stream);

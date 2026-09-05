@@ -269,6 +269,10 @@ int compare_profile(const char* label, const std::vector<double>& actual,
     double reference_squared = 0.0;
     double maximum           = 0.0;
     for (std::size_t index = 0; index < actual.size(); ++index) {
+        if (!std::isfinite(actual[index]) || !std::isfinite(expected[index])) {
+            std::cerr << label << ": non-finite value at " << index << '\n';
+            return 1;
+        }
         const double error = std::abs(actual[index] - expected[index]);
         error_squared += error * error;
         reference_squared += expected[index] * expected[index];
@@ -1067,13 +1071,13 @@ int run_27b_attention_case() {
     return failures;
 }
 
-template <int Width, int Valid = Width, int Context = 122944>
+template <int Width, int Valid = Width, int Context = 122943>
 int run_27b_grouped_decode_case() {
     static_assert(Width >= 2 && Width <= 6);
     static_assert(Valid > 0 && Valid <= Width);
     constexpr int Heads        = 4;
     constexpr int QueryHeads   = 24;
-    constexpr int LogicalPages = Context / kGroup;
+    constexpr int LogicalPages = (Context + kGroup - 1) / kGroup;
 
     std::vector<std::uint8_t> host_records(static_cast<std::size_t>(ops::kKvarnRecordBytes) * Heads,
                                            0);
@@ -1096,7 +1100,7 @@ int run_27b_grouped_decode_case() {
     std::vector<float> host_tail_v(tail_values, 0.0F);
     for (int head = 0; head < Heads; ++head) {
         for (int column = 0; column < Width; ++column) {
-            const int token         = kGroup - Width + column;
+            const int token         = (Context - Width + column) % kGroup;
             const std::size_t index = static_cast<std::size_t>(kD) * (token + kGroup * head);
             host_tail_k[index]      = 64.0F;
             host_tail_v[index]      = static_cast<float>((column + 1) * (head + 1));
@@ -1189,6 +1193,181 @@ int run_35b_attention_case() {
     return run_cached_attention_case(cache, 16, 136, 64, "KVarN H16/KV2 tiled attention");
 }
 
+int run_tail_staging_case(int width) {
+    constexpr int Heads  = 4;
+    constexpr int Prefix = 190;
+    const int Total      = Prefix + width;
+    const auto key       = make_cache_values(Total, 0xc001U, Heads);
+    const auto value     = make_cache_values(Total, 0xc002U, Heads);
+    const auto rotate    = [](const std::vector<float>& input) {
+        std::vector<std::uint16_t> result(input.size());
+        for (std::size_t base = 0; base < input.size(); base += kD) {
+            for (int d = 0; d < kD; ++d) {
+                double sum = 0;
+                for (int col = 0; col < kD; ++col) {
+                    const int sign =
+                        (__builtin_popcount(static_cast<unsigned>(d & col)) & 1) ? -1 : 1;
+                    sum += sign * input[base + col];
+                }
+                result[base + d] = f32_to_bf16(static_cast<float>(sum / 16.0));
+            }
+        }
+        return result;
+    };
+    const auto expected_k  = rotate(key);
+    const auto expected_v  = rotate(value);
+    const auto prefix_size = static_cast<std::size_t>(Prefix) * Heads * kD;
+    // Multiple independent allocations exercise the inter-CTA page-claim race rather than
+    // comparing attention against an already-corrupted production cache.
+    for (int repeat = 0; repeat < 8; ++repeat) {
+        CacheFixture<Heads> cache;
+        append_cache(cache, {key.begin(), key.begin() + prefix_size},
+                     {value.begin(), value.begin() + prefix_size}, 0, false);
+        append_cache(cache, {key.begin() + prefix_size, key.end()},
+                     {value.begin() + prefix_size, value.end()}, Prefix, true);
+        const auto markers  = from_device<std::int32_t>(cache.markers, ops::kKvarnTailSlots);
+        const auto actual_k = from_device<std::uint16_t>(cache.tail_k, cache.tail_k.bytes / 2);
+        const auto actual_v = from_device<std::uint16_t>(cache.tail_v, cache.tail_v.bytes / 2);
+        for (int page = 0; page < 4; ++page) {
+            if (std::count(markers.begin(), markers.end(), page) != 1) {
+                std::cerr << "KVarN staging did not give page " << page << " one tail slot\n";
+                return 1;
+            }
+            const int slot =
+                static_cast<int>(std::find(markers.begin(), markers.end(), page) - markers.begin());
+            for (int position = page * kGroup; position < std::min(Total, (page + 1) * kGroup);
+                 ++position) {
+                for (int head = 0; head < Heads; ++head) {
+                    for (int d = 0; d < kD; ++d) {
+                        const std::size_t source = d + kD * (head + Heads * position);
+                        const std::size_t destination =
+                            d + kD * (position % kGroup + kGroup * (head + Heads * slot));
+                        if (actual_k[destination] != expected_k[source] ||
+                            actual_v[destination] != expected_v[source]) {
+                            std::cerr << "KVarN staging changed represented K/V at " << position
+                                      << '\n';
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+template <int Heads, int QueryHeads, int Pages = 132>
+int run_speculative_boundary_case(int width, int valid, int accepted, int first) {
+    CacheFixture<Heads, Pages> sequential;
+    CacheFixture<Heads, Pages> speculative;
+    const auto prefix_k = make_cache_values(first, 0xd001U, Heads);
+    const auto prefix_v = make_cache_values(first, 0xd002U, Heads);
+    append_cache(sequential, prefix_k, prefix_v, 0, false);
+    append_cache(speculative, prefix_k, prefix_v, 0, false);
+    const auto key   = make_cache_values(width, 0xd003U, Heads);
+    const auto value = make_cache_values(width, 0xd004U, Heads);
+    const auto query = make_cache_values(width * QueryHeads, 0xd005U);
+    std::vector<std::int32_t> host_positions(width);
+    std::iota(host_positions.begin(), host_positions.end(), first);
+    DeviceBuffer q = to_device_bf16(query), k = to_device_bf16(key), v = to_device_bf16(value);
+    DeviceBuffer original_q = to_device_bf16(query), original_k = to_device_bf16(key),
+                 original_v      = to_device_bf16(value);
+    DeviceBuffer positions       = to_device(host_positions);
+    DeviceBuffer rows            = to_device(std::vector<std::int32_t>{0});
+    DeviceBuffer counts          = to_device(std::vector<std::int32_t>{valid});
+    DeviceBuffer accepted_counts = to_device(std::vector<std::int32_t>{accepted});
+    DeviceBuffer output(query.size() * 2);
+    Tensor qt(q.p, DType::BF16, {kD, QueryHeads, width, 1});
+    Tensor kt(k.p, DType::BF16, {kD, Heads, width, 1});
+    Tensor vt(v.p, DType::BF16, {kD, Heads, width, 1});
+    Tensor pt(positions.p, DType::I32, {width, 1});
+    Tensor rt(rows.p, DType::I32, {1});
+    Tensor ct(counts.p, DType::I32, {1});
+    Tensor at(accepted_counts.p, DType::I32, {1});
+    Tensor ot(output.p, DType::BF16, {kD, QueryHeads, width, 1});
+    const ops::CausalAttentionExecutionEnvelope envelope{1,
+                                                         static_cast<std::uint32_t>(first + width)};
+    WorkspaceArena workspace(
+        ops::kvarn_attention_workspace_capacity_bytes(QueryHeads, envelope, 1, 1, width));
+    std::vector<double> expected(query.size(), 0);
+    for (int column = 0; column < valid; ++column) {
+        Tensor one_q = qt.slice(2, column, 1);
+        Tensor one_k = kt.slice(2, column, 1);
+        Tensor one_v = vt.slice(2, column, 1);
+        Tensor one_p = pt.slice(0, column, 1);
+        Tensor one_o = ot.slice(2, column, 1);
+        ops::kvarn_attention(one_q, one_k, one_v, one_p, Tensor{}, rt, 0.0625F, sequential.view(),
+                             false, envelope, workspace, one_o, nullptr);
+    }
+    cuda_synchronize();
+    const auto reference = from_device_bf16(output, query.size());
+    std::copy_n(reference.begin(), static_cast<std::size_t>(valid) * QueryHeads * kD,
+                expected.begin());
+    const auto body = [&](cudaStream_t stream) {
+        cuda_check(cudaMemcpyAsync(q.p, original_q.p, q.bytes, cudaMemcpyDeviceToDevice, stream),
+                   "restore query");
+        cuda_check(cudaMemcpyAsync(k.p, original_k.p, k.bytes, cudaMemcpyDeviceToDevice, stream),
+                   "restore key");
+        cuda_check(cudaMemcpyAsync(v.p, original_v.p, v.bytes, cudaMemcpyDeviceToDevice, stream),
+                   "restore value");
+        ops::kvarn_attention(qt, kt, vt, pt, ct, rt, 0.0625F, speculative.view(), true, envelope,
+                             workspace, ot, stream);
+    };
+    body(nullptr);
+    cuda_synchronize();
+    const std::string label = "KVarN speculative boundary first=" + std::to_string(first) +
+                              " width=" + std::to_string(width) + " valid=" + std::to_string(valid);
+    // Supplementary exact parity protects scalar/packed partition and reduction order.
+    // Independent attention oracles remain separate.
+    int failures =
+        compare_profile(label.c_str(), from_device_bf16(output, query.size()), expected, 0.0);
+    cudaStream_t stream        = nullptr;
+    cudaGraph_t graph          = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    cuda_check(cudaStreamCreate(&stream), "boundary stream");
+    cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "boundary capture");
+    body(stream);
+    cuda_check(cudaStreamEndCapture(stream, &graph), "end boundary capture");
+    cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
+               "boundary instantiate");
+    cuda_check(cudaGraphLaunch(executable, stream), "boundary replay");
+    cuda_synchronize(stream);
+    failures +=
+        compare_profile(label.c_str(), from_device_bf16(output, query.size()), expected, 0.0);
+    cudaGraphExecDestroy(executable);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+
+    ops::kvarn_commit_pages(pt, at, rt, speculative.view(), nullptr);
+    cuda_synchronize();
+    // Rejection may leave a tentative record, but completing the page with replacement tokens
+    // must encode the accepted BF16 prefix, not reuse that rejected record.
+    CacheFixture<Heads, Pages> replay;
+    append_cache(replay, prefix_k, prefix_v, 0, false);
+    const std::size_t kept = static_cast<std::size_t>(accepted) * Heads * kD;
+    if (accepted > 0) {
+        append_cache(replay, {key.begin(), key.begin() + kept},
+                     {value.begin(), value.begin() + kept}, first, false);
+    }
+    const int frontier       = first + accepted;
+    const int replacements   = kGroup - frontier % kGroup;
+    const auto replacement_k = make_cache_values(replacements, 0xd006U, Heads);
+    const auto replacement_v = make_cache_values(replacements, 0xd007U, Heads);
+    append_cache(replay, replacement_k, replacement_v, frontier, false);
+    append_cache(speculative, replacement_k, replacement_v, frontier, false);
+    const auto expected_records = from_device<std::uint8_t>(replay.records, replay.records.bytes);
+    const auto actual_records =
+        from_device<std::uint8_t>(speculative.records, speculative.records.bytes);
+    const std::size_t committed_bytes =
+        static_cast<std::size_t>(frontier + replacements) / kGroup * Heads * ops::kKvarnRecordBytes;
+    failures += verify_exact(
+        "KVarN rejected-page re-encode",
+        std::vector<std::uint8_t>(actual_records.begin(), actual_records.begin() + committed_bytes),
+        std::vector<std::uint8_t>(expected_records.begin(),
+                                  expected_records.begin() + committed_bytes));
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -1204,13 +1383,42 @@ int main() {
     failures += run_27b_grouped_decode_case<3>();
     failures += run_27b_grouped_decode_case<4>();
     failures += run_27b_grouped_decode_case<4, 3>();
-    failures += run_27b_grouped_decode_case<4, 4, 4096>();
+    failures += run_27b_grouped_decode_case<4, 4, 4095>();
     failures += run_27b_grouped_decode_case<5>();
     failures += run_27b_grouped_decode_case<6>();
     failures += run_35b_attention_case();
     failures += run_prefill_slab_boundary_case();
     failures += run_batched_attention_case<4>(24, "KVarN H24/KV4 B=2 attention");
     failures += run_batched_attention_case<2>(16, "KVarN H16/KV2 B=2 attention");
+    failures += run_tail_staging_case(6);
+    failures += run_tail_staging_case(16);
+    for (int width = 1; width <= 6; ++width) {
+        failures += run_speculative_boundary_case<4, 24>(width, width, 1, 2111);
+        if (width > 1) { failures += run_speculative_boundary_case<4, 24>(width, width, 1, 2110); }
+    }
+    failures += run_speculative_boundary_case<4, 24>(6, 3, 2, 2110);
+    for (int first : {1022, 1086, 4093, 4094, 4095, 4096, 8190, 8196, 8198}) {
+        for (int width = 2; width <= 6; ++width) {
+            failures += run_speculative_boundary_case<4, 24>(width, width, 1, first);
+        }
+    }
+    for (int offset = 0; offset < kGroup; ++offset) {
+        failures += run_speculative_boundary_case<4, 24>(6, 6, 1, 2048 + offset);
+    }
+    for (int valid = 0; valid <= 6; ++valid) {
+        for (int accepted = 0; accepted <= valid; ++accepted) {
+            failures += run_speculative_boundary_case<4, 24>(6, valid, accepted, 4094);
+        }
+    }
+    failures += run_speculative_boundary_case<4, 24, 520>(6, 6, 6, 32798);
+    failures += run_speculative_boundary_case<4, 24, 1940>(6, 6, 1, 122878);
+    failures += run_speculative_boundary_case<4, 24, 1940>(4, 3, 2, 122879);
+    failures += run_speculative_boundary_case<2, 16>(16, 13, 1, 190);
+    CacheFixture<4, 34> packed_cache;
+    append_cache(packed_cache, make_cache_values(2118, 0xe001U, 4),
+                 make_cache_values(2118, 0xe002U, 4), 0, false);
+    failures +=
+        run_cached_attention_case(packed_cache, 24, 2112, 6, "KVarN random packed attention");
     std::cout << (failures == 0 ? "OK" : "FAIL") << " kvarn correctness\n";
     return failures == 0 ? 0 : 1;
 }

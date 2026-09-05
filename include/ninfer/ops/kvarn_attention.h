@@ -16,8 +16,10 @@ namespace ninfer::ops {
     std::int32_t query_heads, CausalAttentionExecutionEnvelope envelope, std::int32_t batch_size,
     std::int32_t min_width, std::int32_t max_width);
 
-// Appends and attends in the orthonormal KVarN frame. Committed calls encode every newly complete
-// non-sink page; provisional calls retain all touched pages in BF16 until kvarn_commit_pages.
+// Appends and attends in the orthonormal KVarN frame. Every newly complete non-sink page is
+// encoded. Provisional calls retain its BF16 tail until commit: queries before the closing position
+// read BF16, queries at/after closure read the record. Rejected suffixes remain overwritable in the
+// tail. Q is transformed in place; K/V are disposable and may also be transformed in place.
 void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& positions,
                      const Tensor& valid_columns, const Tensor& kv_table_rows, float scale,
                      KvarnPagedBatchLayerView cache, bool provisional,
@@ -34,7 +36,7 @@ void kvarn_kv_append(Tensor key, Tensor value, const Tensor& positions, const Te
                      cudaStream_t stream);
 
 // accepted_columns is an I32 prefix count per batch row. Full non-sink pages in that accepted
-// prefix are encoded and their dynamic BF16 markers retired; sink pages remain lossless.
+// prefix already have encoded records; only their BF16 markers are retired. Sinks remain lossless.
 void kvarn_commit_pages(const Tensor& positions, const Tensor& accepted_columns,
                         const Tensor& kv_table_rows, KvarnPagedBatchLayerView cache,
                         cudaStream_t stream);

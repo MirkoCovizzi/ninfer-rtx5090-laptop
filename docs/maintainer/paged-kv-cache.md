@@ -78,11 +78,112 @@ MTP 与 DFlash 在一个 Engine 内互斥，因此当前最多有两个 growing 
 | MTP | MTP persistent K/V 与其 code/scale planes | MTP KV frontier |
 | DFlash Full | DFlash persistent full-context K/V | DFlash context frontier |
 
-Main Text 与 MTP 使用 Engine 选择的 BF16、INT8-G64 或 FP8-E4M3FN-row256 KV profile；DFlash Full
+Main Text 与 MTP 使用 Engine 选择的 BF16、INT8-G64、FP8-E4M3FN-row256 或 KVarN K4V2-G64 KV profile；DFlash Full
 使用自己的 BF16 layout。
 
 Common pool implementation 只接收 `KVPageGeometry`、plane inventory 和 capacity。Target/runtime 负责把
 plane ordinal 解释成 layer、K/V、code 或 scale。
+
+### KVarN Record And Tail Semantics
+
+KVarN uses one record plane per attention layer. Each KV head's 64-token record has 14,208 payload
+bytes and a 14,336-byte, 256-aligned stride. Codec field offsets and represented scales are defined
+in `include/ninfer/ops/kvarn.h`; padding does not change the codec. Compared with a 16,384-byte
+stride, this saves 12.5% of the record pool, not of the entire runtime reservation.
+
+Each execution row has two permanent BF16 sink slots for logical pages 0 and 1, and two dynamic
+BF16 tail slots. Concurrent staging CTAs atomically claim one common slot per logical page and
+use a CTA-uniform slot index for every K/V write. Staging never relocates a live page. Exact sink
+and tail values and their page markers belong to the continuation StateImage.
+
+Every completed non-sink page is encoded before attention, including a provisional page. Ordinary
+append retires its BF16 marker immediately. Provisional append retains the BF16 values for rollback:
+queries before the page's closing position read BF16, and queries at or after closure read the
+record. Packed query groups split at this representation boundary. Acceptance only retires markers
+for completed accepted pages; it does not encode again. A rejected page's tentative record is
+ignored until replacement tokens complete the page and re-encode it from the retained BF16 prefix.
+Prefill continues to encode complete prompt pages before attending to them.
+
+Decode split selection is a function of each query's visible position, not its speculative width.
+Packed groups also split at changes in split count, partition size, and the 122,880-key policy
+boundary. Choosing one partition from the final column for earlier columns reproduced a greedy
+divergence after the 4K transition. The packed denominator combines per-lane tile sums before
+reducing lanes, matching the scalar route's order. These constraints preserve packed K/V reuse
+where it is valid rather than falling back to scalar execution everywhere.
+The reducer computes each split's FP32 softmax weight once and shares it across output dimensions;
+the numerator and denominator accumulation orders are unchanged.
+
+#### Paper And Reference Alignment
+
+The mathematical reference is [KVarN, arXiv:2606.03458v1](https://arxiv.org/html/2606.03458v1),
+especially Section 3.3 and Appendices A, D, and H. The implemented profile follows Huawei's
+[released K4V2-G64 preset](https://github.com/huawei-csl/KVarN/blob/7586257f1c632e63187bfacbbe21ccb51540f7b3/vllm/model_executor/layers/quantization/kvarn/config.py),
+not the paper's main experimental precision profile.
+
+- Orthonormal channel-wise Sylvester-Hadamard rotation uses `H / sqrt(256)`. Q and K are rotated
+  after RoPE; V is rotated on storage and the attention result is rotated back. There is no
+  token-axis rotation.
+- K is balanced as `[D,G]` and quantized per channel; V is balanced as `[G,D]` and quantized per
+  token. Both use alternating column/row log-scale updates, eight passes, standard-deviation
+  clamps `[1e-3,1e3]`, log-scale clamps `[-0.3,10]`, and best-state selection with `<=`.
+- Asymmetric nearest-even RTN uses K4/V2 codes. Absorbing one balancing scale into the RTN scale
+  and offset gives `(code * absorbed_scale + absorbed_offset) * other_scale`, with FP16 metadata.
+  Code bit ordering and payload offsets match the released preset; only trailing record padding
+  is smaller.
+- Appendix H writes its imbalance objective using variance spreads, whereas Huawei's
+  [PyTorch reference](https://github.com/huawei-csl/KVarN/blob/7586257f1c632e63187bfacbbe21ccb51540f7b3/vllm/model_executor/layers/quantization/kvarn/sinkhorn.py)
+  and Triton implementation use standard-deviation spreads. These objectives need not select the
+  same best iteration. NInfer follows the released implementation; it is not a literal execution
+  of the paper's pseudocode.
+- The paper's main experiments use K2/V2, group 128, and FP8 scales with an FP16 zero point in its
+  memory-accounting description. NInfer uses K4/V2, group 64, and FP16 scales/offsets. Its payload
+  is 3.46875 bits per K/V element, or 3.5 including record padding, before sink/tail overhead.
+  The paper's roughly 2.3-bit storage and quality results do not describe this profile.
+- NInfer retains rotated Q/K/V and sink/tail values in BF16 with FP32 transform/normalization
+  arithmetic; the released backend uses an FP16 rotation/tail path. This is an implementation
+  precision difference, so encoding identical unrotated inputs need not produce byte-identical
+  records across engines. The 128-token permanent sink matches the paper's usual sink size.
+- Flush timing and speculative rollback are NInfer-owned semantics described above. The reference
+  backend flushes previously committed groups at a later scheduling boundary; NInfer encodes a
+  closing page before attention and retains provisional BF16 data for rollback. Model-output
+  identity with the reference backend is not claimed.
+
+Qualification uses an independent FP64 balancing/RTN oracle on represented BF16 tiles, represented
+stored-code decoding checks, an independent Hadamard oracle, and represented-cache attention
+oracles for H24/KV4 and H16/KV2. This checks the implementation, not reproduction of the paper's
+reasoning/quality benchmark results or stochastic tool-call reliability.
+
+#### Greedy Regression
+
+Use the existing `ninfer_qwen3_6_27b_mtp_greedy_parity_real_test` with
+`NINFER_MTP_GREEDY_PARITY_WEIGHTS` set to an explicit artifact path. `--kvarn-only` selects KVarN;
+its default is 8,192 output tokens, one generation per case/row/depth, and a 1,024-token prefill
+chunk. `--output-tokens 128..16384` supports focused cases. A short smoke is not the long-decode
+gate: the reproduced identifier-prompt failure was at output token 3,888.
+
+| Case | Arguments after `--kvarn-only` | Protected behavior |
+|---|---|---|
+| Long decode | `--sample 1 --output-tokens 8192` | MTP1..5 versus MTP0 across packed, 4K, and 8K transitions |
+| Mixed rows | `--sample 1 --output-tokens 512 --concurrency 8` | Unequal prompt/output lengths, compact batches, and row completion |
+| Prefix restore | `--sample 1 --output-tokens 512 --concurrency 2 --prefix-reuse` | One-token prewarm, exact reused frontier, and resumed greedy output |
+| Eager/full head | `--sample 1 --output-tokens 8192 --draft-tokens 5 --no-cuda-graph --full-proposal-head --prefill-chunk 128` | Eager execution, full proposal head, and a different prefill chunk |
+| Long-context transition | `--sample 5 --output-tokens 512 --corpus /path/to/corpus.ids` | All depths crossing 122,880 visible keys |
+| Long resident context | `--sample 6` or `--sample 7`, with `--output-tokens 512 --draft-tokens 3 --corpus /path/to/corpus.ids` | MTP3 at 192K and about 240K prompt tokens |
+
+Samples 0/1 are thinking-code/non-thinking-identifier chats; sample 2 is a 2,110-token raw prompt.
+With a whitespace-separated token-ID corpus, samples 3..7 use 8,190, 32,799, 122,879, 196,607,
+and 245,743 prompt tokens. `--draft-tokens 1..5` selects one depth plus MTP0; otherwise all depths
+run. `--concurrency 1..8` varies row prompts and output budgets and asserts that a multi-row case
+actually executed a compact batch. Prefix cases assert the exact reused token count. Graph-enabled
+Engine cases use the startup/replay route; `active_captures_completed` alone cannot prove coverage
+because it excludes startup capture. Op regressions explicitly capture and replay the kernels.
+
+The Op suite covers all 64 page offsets, widths 1..6, every valid/accepted prefix length through
+six (including zero), rejected-page replacement, and split-policy transitions. Numerical oracles
+remain independent; exact sequential/provisional comparisons additionally protect greedy parity.
+Eight-row testing also reproduced a W8 vocabulary-head mismatch above 33 columns. The full
+48-column verification range now retains the ordinary eight-way K-reduction profile; the
+48-column kernel stages activations in two halves without reassociating any column's arithmetic.
 
 ### 3.2 Main capacity
 
